@@ -1,0 +1,64 @@
+{
+  "name": "@ralphkrauss/agent-orchestrator-mcp",
+  "version": "0.1.0",
+  "description": "MCP agent orchestrator for Codex and Claude worker runs",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "agent-orchestrator-mcp": "dist/cli.js",
+    "agent-orchestrator-mcp-daemon": "dist/daemonCli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test dist/__tests__/*.test.js dist/__tests__/integration/*.test.js",
+    "audit:prod": "pnpm audit --prod",
+    "verify": "pnpm build && pnpm test && node scripts/check-publish-ready.mjs && pnpm audit --prod && npm pack --dry-run",
+    "prepack": "pnpm build",
+    "pack:dry-run": "npm pack --dry-run"
+  },
+  "files": [
+    "dist/",
+    "src/",
+    "!dist/__tests__/",
+    "!src/__tests__/",
+    "README.md",
+    "PUBLISHING.md",
+    "LICENSE.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ralphkrauss/agent-orchestrator-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ralphkrauss/agent-orchestrator-mcp/issues"
+  },
+  "homepage": "https://github.com/ralphkrauss/agent-orchestrator-mcp#readme",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "ulid": "^2.4.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.18",
+    "typescript": "^5.9.3"
+  },
+  "overrides": {
+    "path-to-regexp": ">=8.4.0"
+  },
+  "packageManager": "pnpm@10.30.3"
+}

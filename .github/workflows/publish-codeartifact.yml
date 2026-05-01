@@ -1,0 +1,77 @@
+name: Publish CodeArtifact
+
+on:
+  workflow_dispatch:
+    inputs:
+      aws-region:
+        description: AWS region for the CodeArtifact repository.
+        required: true
+        default: eu-west-1
+      role-to-assume:
+        description: AWS IAM role ARN allowed to publish to the CodeArtifact repository.
+        required: true
+      codeartifact-domain:
+        description: CodeArtifact domain name.
+        required: true
+      codeartifact-domain-owner:
+        description: AWS account ID that owns the CodeArtifact domain.
+        required: true
+      codeartifact-repository:
+        description: CodeArtifact repository name.
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: Publish to CodeArtifact
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.role-to-assume }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Confirm AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify
+        run: pnpm verify
+
+      - name: Login npm to CodeArtifact
+        run: |
+          aws codeartifact login \
+            --tool npm \
+            --domain "${{ inputs.codeartifact-domain }}" \
+            --domain-owner "${{ inputs.codeartifact-domain-owner }}" \
+            --repository "${{ inputs.codeartifact-repository }}" \
+            --region "${{ inputs.aws-region }}"
+
+      - name: Confirm npm registry
+        run: |
+          npm ping
+          npm config get registry
+
+      - name: Publish
+        run: npm publish

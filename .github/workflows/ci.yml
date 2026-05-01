@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build, Test, and Pack on Node ${{ matrix.node-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['22', '24']
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify
+        run: pnpm verify
+
+      - name: Install packed tarball smoke test
+        run: |
+          set -euo pipefail
+          package_file="$(npm pack --silent | tail -n 1)"
+          temp_dir="$(mktemp -d)"
+          cd "$temp_dir"
+          npm init -y >/dev/null
+          npm install "$GITHUB_WORKSPACE/$package_file" >/dev/null
+          ./node_modules/.bin/agent-orchestrator-mcp --help
+          ./node_modules/.bin/agent-orchestrator-mcp doctor --json
