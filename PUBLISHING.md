@@ -1,90 +1,25 @@
-# Publishing
+# Publishing and Release Process
 
-This package is intended to be published publicly as:
+This package is published publicly as:
 
 ```text
 @ralphkrauss/agent-orchestrator-mcp
 ```
 
-Before the first public publish, run:
+The repository uses npm Trusted Publishing. GitHub Actions publishes from git tags; no long-lived `NPM_TOKEN` is required for the normal release flow.
 
-```bash
-pnpm verify
-```
+## Mental Model
 
-## Automatic npm Publish
+- `latest` is the stable npm dist-tag. Users get this by default.
+- `next` is the test/prerelease npm dist-tag. Users must opt in explicitly.
+- Stable versions look like `0.2.0` and publish to `latest`.
+- Prerelease versions look like `0.2.0-beta.0` and publish to `next`.
+- `npm version ...` updates `package.json`, updates `pnpm-lock.yaml`, creates a git commit, and creates a matching git tag.
+- The `Publish npm` GitHub workflow runs when a `v*.*.*` tag is pushed.
 
-The `Publish npm` workflow publishes automatically when either:
+## One-Time npm Setup
 
-- a tag matching `v*.*.*` is pushed
-- a GitHub Release is published
-
-The tag must match `package.json` exactly. For example, version `0.1.0` must be released from tag `v0.1.0`.
-
-Release command sequence:
-
-```bash
-pnpm verify
-git tag v0.1.0
-git push origin main v0.1.0
-```
-
-For later releases, bump the package version and push the generated tag:
-
-```bash
-pnpm verify
-npm version patch
-git push origin main --follow-tags
-```
-
-The workflow verifies the package, skips safely if that exact package version is already on npm, and publishes with npm Trusted Publishing.
-
-## Testing Releases
-
-npm does not have a separate testing mode for published packages. The standard approach is prerelease versions plus npm dist-tags:
-
-- Stable versions such as `0.2.0` publish with the `latest` tag.
-- Prerelease versions such as `0.2.0-beta.0` publish with the `next` tag.
-
-Users who run `npm install @ralphkrauss/agent-orchestrator-mcp` get `latest`. Testers can opt in with:
-
-```bash
-npm install @ralphkrauss/agent-orchestrator-mcp@next
-npx -y @ralphkrauss/agent-orchestrator-mcp@next doctor
-```
-
-Create a prerelease from the current stable version with:
-
-```bash
-npm version prerelease --preid beta
-git push origin main --follow-tags
-```
-
-Promote a tested prerelease by publishing a normal semver release:
-
-```bash
-npm version patch
-git push origin main --follow-tags
-```
-
-## First Manual npm Publish
-
-The first public publish of a scoped npm package must make public access explicit:
-
-```bash
-npm login
-pnpm install --frozen-lockfile
-pnpm verify
-npm publish --access public
-```
-
-`publishConfig.access` is also set to `public`, but keep `--access public` in the first manual publish command so the intent is visible.
-
-## GitHub Actions Trusted Publishing
-
-The `Publish npm` workflow is ready for npm Trusted Publishing.
-
-Configure the package on npm with these values:
+The first public publish of a scoped package must be done manually so the package exists on npm. After that, configure Trusted Publishing on npm:
 
 | Field | Value |
 |---|---|
@@ -92,17 +27,145 @@ Configure the package on npm with these values:
 | Repository owner | `ralphkrauss` |
 | Repository name | `agent-orchestrator-mcp` |
 | Workflow filename | `publish-npm.yml` |
-| Environment | leave empty unless you add a GitHub environment |
+| Environment | leave empty |
 
-The workflow uses GitHub OIDC with `id-token: write` and publishes with:
+The workflow has `id-token: write`, which is what npm uses for OIDC trusted publishing.
+
+## Verification Before Any Release
+
+Always run:
 
 ```bash
-npm publish --access public --provenance
+pnpm install --frozen-lockfile
+pnpm verify
 ```
 
-When using trusted publishing, npm automatically generates provenance attestations. The workflow still passes `--provenance` so the intent is explicit and remains compatible with token fallback publishing.
+`pnpm verify` builds, tests, checks publish readiness, resolves the npm dist-tag, audits production dependencies, and runs `npm pack --dry-run`.
 
-If Trusted Publishing is not configured yet, use the manual publish path above. A long-lived `NPM_TOKEN` should be a fallback, not the default.
+## Beta/Test Release
+
+Use this when you want to try the package in real projects without changing what default users get.
+
+```bash
+pnpm verify
+npm version prerelease --preid beta
+git push origin main --follow-tags
+```
+
+Example result:
+
+```text
+0.1.1-beta.0
+tag v0.1.1-beta.0
+published as @ralphkrauss/agent-orchestrator-mcp@next
+```
+
+Test the beta from any project:
+
+```bash
+npm view @ralphkrauss/agent-orchestrator-mcp@next version
+npx -y @ralphkrauss/agent-orchestrator-mcp@next doctor
+```
+
+MCP configs for beta testing should use:
+
+```text
+@ralphkrauss/agent-orchestrator-mcp@next
+```
+
+If the beta needs fixes, make code changes and run the same prerelease command again:
+
+```bash
+pnpm verify
+npm version prerelease --preid beta
+git push origin main --follow-tags
+```
+
+This increments `0.1.1-beta.0` to `0.1.1-beta.1`.
+
+## Stable Release
+
+Use this only when the current code is ready for normal users.
+
+```bash
+pnpm verify
+npm version patch
+git push origin main --follow-tags
+```
+
+Example result:
+
+```text
+0.1.1
+tag v0.1.1
+published as @ralphkrauss/agent-orchestrator-mcp@latest
+```
+
+For minor or major releases, use:
+
+```bash
+npm version minor
+npm version major
+```
+
+Then push with:
+
+```bash
+git push origin main --follow-tags
+```
+
+## What The GitHub Action Checks
+
+The `Publish npm` workflow:
+
+1. Installs dependencies with the lockfile.
+2. Checks the git tag matches `package.json`, for example `v0.1.1-beta.0`.
+3. Runs `pnpm verify`.
+4. Chooses npm dist-tag:
+   - prerelease versions publish with `--tag next`
+   - stable versions publish with `--tag latest`
+5. Checks whether that exact package version is already on npm.
+6. Publishes with `npm publish --access public --provenance --tag <tag>`, or skips if already published.
+
+## Manual Workflow Smoke Test
+
+You can run the publish workflow manually from GitHub Actions. Manual dispatch on `main` should verify the package and skip publishing if the current version is already published.
+
+This tests the workflow shape, but it does not prove a new version can publish. To test actual publishing, create a beta release.
+
+## Deprecating Bad Versions
+
+Prefer deprecating over unpublishing:
+
+```bash
+npm deprecate @ralphkrauss/agent-orchestrator-mcp@0.1.0 "Initial smoke release. Use @next until the next stable release."
+```
+
+Unpublishing is discouraged. npm versions are immutable: once `package@version` has been used, that exact version cannot be reused, even if unpublished.
+
+## Inspecting npm State
+
+Useful commands:
+
+```bash
+npm view @ralphkrauss/agent-orchestrator-mcp version
+npm view @ralphkrauss/agent-orchestrator-mcp versions --json
+npm dist-tag ls @ralphkrauss/agent-orchestrator-mcp
+npm view @ralphkrauss/agent-orchestrator-mcp@next version
+```
+
+## Installed-Package Smoke Test
+
+Before publishing, you can test the exact packed tarball locally:
+
+```bash
+package_file="$(npm pack --silent | tail -n 1)"
+temp_dir="$(mktemp -d)"
+cd "$temp_dir"
+npm init -y >/dev/null
+npm install "/path/to/agent-orchestrator-mcp/$package_file"
+./node_modules/.bin/agent-orchestrator-mcp doctor --json
+```
 
 ## CodeArtifact Publishing
 
@@ -112,17 +175,11 @@ Required inputs:
 
 | Input | Meaning |
 |---|---|
-| `aws-region` | AWS region for CodeArtifact, for example `eu-west-1` |
+| `aws-region` | AWS region for the CodeArtifact repository, for example `eu-west-1` |
 | `role-to-assume` | IAM role ARN allowed to publish |
 | `codeartifact-domain` | CodeArtifact domain |
 | `codeartifact-domain-owner` | AWS account ID that owns the domain |
 | `codeartifact-repository` | CodeArtifact repository |
-
-The workflow confirms AWS identity, runs build/tests, checks publish readiness, logs npm into CodeArtifact, prints the active npm registry, and then runs:
-
-```bash
-npm publish
-```
 
 For local manual CodeArtifact publishing, use AWS CLI 2.9.5 or newer when using npm 10 or newer:
 
