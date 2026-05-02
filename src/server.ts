@@ -11,6 +11,8 @@ import {
 import { IpcClient, IpcRequestError } from './ipc/client.js';
 import { daemonPaths } from './daemon/paths.js';
 import { orchestratorError, wrapErr } from './contract.js';
+import { checkDaemonVersion } from './daemonVersion.js';
+import { getPackageVersion } from './packageMetadata.js';
 import { ipcTimeoutForTool } from './toolTimeout.js';
 
 const paths = daemonPaths();
@@ -112,7 +114,7 @@ const tools = [
 ] as const;
 
 const server = new Server(
-  { name: 'agent-orchestrator-mcp', version: '0.1.0' },
+  { name: 'agent-orchestrator-mcp', version: getPackageVersion() },
   { capabilities: { tools: {} } },
 );
 
@@ -150,11 +152,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
-async function ensureDaemon(): Promise<void> {
+async function ensureDaemon(options: { allowVersionMismatch?: boolean } = {}): Promise<void> {
   try {
-    await client.request('ping', {}, 500);
+    assertMatchingDaemon(await client.request('ping', {}, 500));
     return;
-  } catch {
+  } catch (error) {
+    if (isDaemonVersionMismatch(error)) {
+      if (options.allowVersionMismatch) return;
+      throw error;
+    }
     // Auto-start below.
   }
 
@@ -169,9 +175,10 @@ async function ensureDaemon(): Promise<void> {
   const deadline = Date.now() + 2_000;
   while (Date.now() < deadline) {
     try {
-      await client.request('ping', {}, 500);
+      assertMatchingDaemon(await client.request('ping', {}, 500));
       return;
-    } catch {
+    } catch (error) {
+      if (isDaemonVersionMismatch(error)) throw error;
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
   }
@@ -179,9 +186,18 @@ async function ensureDaemon(): Promise<void> {
   throw new IpcRequestError(orchestratorError('DAEMON_UNAVAILABLE', `Daemon did not start; inspect ${paths.log}`));
 }
 
+function assertMatchingDaemon(value: unknown): void {
+  const check = checkDaemonVersion(value);
+  if (!check.ok) throw new IpcRequestError(check.error);
+}
+
+function isDaemonVersionMismatch(error: unknown): boolean {
+  return error instanceof IpcRequestError && error.orchestratorError.code === 'DAEMON_VERSION_MISMATCH';
+}
+
 process.on('SIGINT', () => process.exit(0));
 process.on('SIGTERM', () => process.exit(0));
 
 const transport = new StdioServerTransport();
-await ensureDaemon();
+await ensureDaemon({ allowVersionMismatch: true });
 await server.connect(transport);

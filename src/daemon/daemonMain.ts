@@ -32,7 +32,7 @@ async function main(): Promise<void> {
   const service = new OrchestratorService(store, createBackendRegistry(), log);
   await service.initialize();
 
-  ipcServer = new IpcServer(paths.socket, async (method, params) => service.dispatch(method, params));
+  ipcServer = new IpcServer(paths.socket, async (method, params, context) => service.dispatch(method, params, context));
   const oldUmask = process.umask(0o177);
   try {
     await ipcServer.listen();

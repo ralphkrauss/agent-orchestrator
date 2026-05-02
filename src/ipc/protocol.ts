@@ -1,17 +1,21 @@
 import type { Socket } from 'node:net';
 import { randomUUID } from 'node:crypto';
 import {
+  daemonVersionMismatchError,
   orchestratorError,
   PROTOCOL_VERSION,
   RpcRequestSchema,
+  type OrchestratorError,
   type RpcMethod,
   type RpcRequest,
   type RpcResponse,
 } from '../contract.js';
+import { getPackageVersion } from '../packageMetadata.js';
 
-export function createRpcRequest(method: RpcMethod, params?: unknown): RpcRequest {
+export function createRpcRequest(method: RpcMethod, params?: unknown, frontendVersion = getPackageVersion()): RpcRequest {
   return {
     protocol_version: PROTOCOL_VERSION,
+    frontend_version: frontendVersion,
     id: randomUUID(),
     method,
     params,
@@ -49,13 +53,32 @@ export function writeFrame(socket: Socket, value: unknown): void {
   socket.write(encodeFrame(value));
 }
 
-export function validateRpcRequest(value: unknown): RpcRequest | { protocolMismatch: true; id: string | null } {
+export function validateRpcRequest(
+  value: unknown,
+  daemonVersion = getPackageVersion(),
+): RpcRequest | { protocolMismatch: true; id: string | null } | { daemonVersionMismatch: true; id: string | null; error: OrchestratorError } {
   const rec = value && typeof value === 'object' ? value as Record<string, unknown> : {};
   const id = typeof rec.id === 'string' ? rec.id : null;
   if (rec.protocol_version !== PROTOCOL_VERSION) {
     return { protocolMismatch: true, id };
   }
-  return RpcRequestSchema.parse(value);
+  const request = RpcRequestSchema.parse(value);
+  if (request.frontend_version !== daemonVersion && !allowsLifecycleVersionMismatch(request.method)) {
+    return {
+      daemonVersionMismatch: true,
+      id,
+      error: daemonVersionMismatchError({
+        frontendVersion: request.frontend_version ?? null,
+        daemonVersion,
+        daemonPid: process.pid,
+      }),
+    };
+  }
+  return request;
+}
+
+function allowsLifecycleVersionMismatch(method: RpcMethod): boolean {
+  return method === 'ping' || method === 'shutdown';
 }
 
 export function rpcOk(id: string, result: unknown): RpcResponse {
@@ -73,5 +96,14 @@ export function rpcErr(id: string, code: Parameters<typeof orchestratorError>[0]
     id,
     ok: false,
     error: orchestratorError(code, message, details),
+  };
+}
+
+export function rpcErrFromError(id: string, error: OrchestratorError): RpcResponse {
+  return {
+    protocol_version: PROTOCOL_VERSION,
+    id,
+    ok: false,
+    error,
   };
 }

@@ -150,6 +150,17 @@ just orchestrator-prune-dry-run 30
 just orchestrator-prune 30
 ```
 
+The daemon is long-lived across MCP reconnects and editor restarts. After
+changing package source, rebuilding `dist/`, or switching npm dist-tags during
+dogfooding, restart the daemon so the frontend and daemon package versions
+match:
+
+```bash
+node dist/daemonCli.js restart
+node dist/daemonCli.js restart --force
+just orchestrator-restart
+```
+
 Access level: read/write local process orchestration. The server can start
 Codex or Claude worker CLI processes in a requested working directory. Worker
 authentication remains whatever the host Codex or Claude CLI already has.

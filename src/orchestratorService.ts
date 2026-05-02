@@ -24,6 +24,7 @@ import type { WorkerBackend } from './backend/WorkerBackend.js';
 import { resolveBinary } from './backend/common.js';
 import { getBackendStatus } from './diagnostics.js';
 import { captureGitSnapshot } from './gitSnapshot.js';
+import { getPackageVersion } from './packageMetadata.js';
 import { ProcessManager, type ManagedRun } from './processManager.js';
 import { RunStore } from './runStore.js';
 
@@ -39,6 +40,10 @@ const defaultConfig: OrchestratorConfig = {
 
 type ToolResult = ToolResponse<object>;
 type OrchestratorLogger = (message: string) => void;
+
+export interface OrchestratorDispatchContext {
+  frontend_version?: string | null;
+}
 
 export class OrchestratorService {
   private readonly processManager: ProcessManager;
@@ -61,10 +66,10 @@ export class OrchestratorService {
     await this.orphanRunningRuns();
   }
 
-  async dispatch(method: string, params: unknown): Promise<unknown> {
+  async dispatch(method: string, params: unknown, context: OrchestratorDispatchContext = {}): Promise<unknown> {
     switch (method) {
       case 'ping':
-        return wrapOk({ pong: true, daemon_pid: process.pid });
+        return wrapOk({ pong: true, daemon_pid: process.pid, daemon_version: getPackageVersion() });
       case 'shutdown':
         return this.shutdown(params);
       case 'prune_runs':
@@ -86,7 +91,13 @@ export class OrchestratorService {
       case 'cancel_run':
         return this.cancelRun(params);
       case 'get_backend_status':
-        return wrapOk({ status: await getBackendStatus() });
+        return wrapOk({
+          status: await getBackendStatus({
+            frontendVersion: context.frontend_version ?? getPackageVersion(),
+            daemonVersion: getPackageVersion(),
+            daemonPid: process.pid,
+          }),
+        });
       default:
         return wrapErr(orchestratorError('INVALID_INPUT', `Unknown method: ${method}`));
     }

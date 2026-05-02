@@ -5,9 +5,16 @@ import { promisify } from 'node:util';
 import type { Backend, BackendDiagnostic, BackendStatusReport } from './contract.js';
 import { resolveBinary } from './backend/common.js';
 import { daemonPaths } from './daemon/paths.js';
+import { getPackageVersion } from './packageMetadata.js';
 
 const execFileAsync = promisify(execFile);
 const commandTimeoutMs = 2_000;
+
+export interface BackendStatusOptions {
+  frontendVersion?: string | null;
+  daemonVersion?: string | null;
+  daemonPid?: number | null;
+}
 
 interface BackendCheckDefinition {
   name: Backend;
@@ -58,13 +65,19 @@ const definitions: BackendCheckDefinition[] = [
   },
 ];
 
-export async function getBackendStatus(): Promise<BackendStatusReport> {
+export async function getBackendStatus(options: BackendStatusOptions = {}): Promise<BackendStatusReport> {
   const paths = daemonPaths();
   const runStore = await checkRunStore(paths.home);
   const posixSupported = process.platform !== 'win32';
   const backends = await Promise.all(definitions.map((definition) => diagnoseBackend(definition, posixSupported)));
+  const frontendVersion = options.frontendVersion ?? getPackageVersion();
+  const daemonVersion = options.daemonVersion ?? null;
 
   return {
+    frontend_version: frontendVersion,
+    daemon_version: daemonVersion,
+    version_match: daemonVersion !== null && frontendVersion === daemonVersion,
+    daemon_pid: options.daemonPid ?? null,
     platform: process.platform,
     node_version: process.version,
     posix_supported: posixSupported,
@@ -77,6 +90,10 @@ export function formatBackendStatus(report: BackendStatusReport): string {
   const lines: string[] = [
     'Agent Orchestrator MCP diagnostics',
     '',
+    `Frontend version: ${report.frontend_version}`,
+    `Daemon version: ${report.daemon_version ?? 'not connected'}`,
+    `Version match: ${report.daemon_version === null ? 'not checked' : report.version_match ? 'yes' : 'no'}`,
+    ...(report.daemon_pid === null ? [] : [`Daemon PID: ${report.daemon_pid}`]),
     `Platform: ${report.platform}`,
     `Node: ${report.node_version}`,
     `POSIX support: ${report.posix_supported ? 'yes' : 'no'}`,
