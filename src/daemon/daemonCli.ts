@@ -71,6 +71,14 @@ function daemonHelp(): string {
   ].join('\n');
 }
 
+function pruneUsage(): string {
+  return [
+    'Usage: agent-orchestrator prune --older-than-days <days> [--dry-run]',
+    '   or: agent-orchestrator-daemon prune --older-than-days <days> [--dry-run]',
+    '',
+  ].join('\n');
+}
+
 async function start(): Promise<void> {
   if (await ping()) {
     process.stdout.write('agent-orchestrator daemon is already running\n');
@@ -257,7 +265,7 @@ async function watch(argv: readonly string[]): Promise<void> {
 async function prune(argv: readonly string[]): Promise<void> {
   const olderThanDays = readPositiveIntOption(argv, '--older-than-days');
   if (!olderThanDays) {
-    process.stderr.write('Usage: agent-orchestrator prune --older-than-days <days> [--dry-run]\n');
+    process.stderr.write(pruneUsage());
     process.exit(1);
   }
 

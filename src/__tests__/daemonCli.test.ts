@@ -35,6 +35,11 @@ describe('daemon CLI', () => {
     assert.equal(result.stderr, '');
   });
 
+  it('prints both prune command forms when the required age is missing', async () => {
+    await assertPruneMissingAgeUsage(cliPath);
+    await assertPruneMissingAgeUsage(daemonCliPath);
+  });
+
   it('exposes the canonical main CLI and standalone daemon bins', async () => {
     const packageJson = JSON.parse(await readFile(new URL('../../package.json', import.meta.url), 'utf8')) as {
       bin?: Record<string, string>;
@@ -167,6 +172,20 @@ async function waitForStopped(env: NodeJS.ProcessEnv): Promise<void> {
     }
   }
   throw new Error('daemon did not stop before timeout');
+}
+
+async function assertPruneMissingAgeUsage(entrypoint: string): Promise<void> {
+  await assert.rejects(
+    execFileAsync(process.execPath, [entrypoint, 'prune'], { timeout: 5_000 }),
+    (error: unknown) => {
+      const result = error as { code?: number; stdout?: string; stderr?: string };
+      assert.equal(result.code, 1);
+      assert.equal(result.stdout ?? '', '');
+      assert.match(result.stderr ?? '', /Usage: agent-orchestrator prune --older-than-days <days> \[--dry-run\]/);
+      assert.match(result.stderr ?? '', /or: agent-orchestrator-daemon prune --older-than-days <days> \[--dry-run\]/);
+      return true;
+    },
+  );
 }
 
 function escapeRegExp(value: string): string {
