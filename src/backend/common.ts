@@ -81,7 +81,9 @@ export function finalizeFromObserved(context: FinalizeContext): FinalizedWorkerR
 
   const files = Array.from(new Set([...context.filesChangedFromGit, ...context.filesChangedFromEvents])).sort();
   const commands = Array.from(new Set(context.commandsRun));
-  const summary = context.resultEvent?.summary ?? actionableErrorSummary(errors);
+  const summary = context.runStatusOverride
+    ? actionableErrorSummary(errors)
+    : context.resultEvent?.summary ?? actionableErrorSummary(errors);
   const result = WorkerResultSchema.parse({
     status: derived.workerStatus,
     summary,

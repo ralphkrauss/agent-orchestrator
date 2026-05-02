@@ -187,7 +187,7 @@ process.stdin.on('end', () => {
     assert.deepStrictEqual(result?.errors, []);
   });
 
-  it('does not persist parsed worker error events when a worker later succeeds', async () => {
+  it('fails fast on parsed fatal worker errors even if a result event follows', async () => {
     const root = await mkdtemp(join(tmpdir(), 'agent-process-'));
     const cli = join(root, 'worker.js');
     await writeFile(cli, `#!/usr/bin/env node
@@ -218,14 +218,19 @@ process.stdin.on('end', () => {
       stdinPayload: 'finish',
     });
 
-    await managed.completion;
+    const meta = await managed.completion;
     const result = await store.loadResult(run.run_id);
-    assert.equal(result?.status, 'completed');
-    assert.equal(result?.summary, 'done after retry');
-    assert.deepStrictEqual(result?.errors, []);
+    assert.equal(meta.status, 'failed');
+    assert.equal(meta.terminal_reason, 'backend_fatal_error');
+    assert.equal(meta.latest_error?.category, 'rate_limit');
+    assert.equal(meta.latest_error?.retryable, true);
+    assert.equal(meta.latest_error?.fatal, true);
+    assert.equal(result?.status, 'failed');
+    assert.equal(result?.summary, 'recoverable rate limit warning');
+    assert.ok(result?.errors.some((error) => error.message === 'recoverable rate limit warning'));
   });
 
-  it('keeps parsed worker error events for exit-zero runs without result events', async () => {
+  it('fails fast for parsed fatal worker errors without adding generic missing-result errors', async () => {
     const root = await mkdtemp(join(tmpdir(), 'agent-process-'));
     const cli = join(root, 'worker.js');
     await writeFile(cli, `#!/usr/bin/env node
@@ -255,12 +260,16 @@ process.stdin.on('end', () => {
       stdinPayload: 'finish',
     });
 
-    await managed.completion;
+    const meta = await managed.completion;
     const result = await store.loadResult(run.run_id);
+    assert.equal(meta.status, 'failed');
+    assert.equal(meta.terminal_reason, 'backend_fatal_error');
+    assert.equal(meta.latest_error?.category, 'invalid_model');
+    assert.equal(meta.latest_error?.fatal, true);
     assert.equal(result?.status, 'failed');
     assert.equal(result?.summary, "The 'openai/gpt-5.5' model is not supported when using Codex with a ChatGPT account.");
     assert.ok(result?.errors.some((error) => error.message.includes('not supported when using Codex with a ChatGPT account')));
-    assert.ok(result?.errors.some((error) => error.message === 'worker result event missing'));
+    assert.equal(result?.errors.some((error) => error.message === 'worker result event missing'), false);
     assert.equal(result?.errors.some((error) => error.message === 'worker process exited unsuccessfully'), false);
   });
 
