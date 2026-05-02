@@ -33,7 +33,7 @@ globs:
   child variable a server expects, such as `GITHUB_PERSONAL_ACCESS_TOKEN` or
   `GH_TOKEN`.
 - Prefer user-level secrets at
-  `~/.config/agent-orchestrator-mcp/mcp-secrets.env`, process environment, or
+  `~/.config/agent-orchestrator/mcp-secrets.env`, process environment, or
   local `gh` auth. Do not use repo-local secret files.
 - Add new MCP servers to every supported client config in one pass:
   `.mcp.json`, `.cursor/mcp.json`, `.codex/config.toml`, and `opencode.json`.

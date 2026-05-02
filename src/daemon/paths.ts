@@ -35,7 +35,7 @@ export function daemonIpcEndpoint(home: string, platform: NodeJS.Platform = proc
       .slice(0, 16);
     return {
       transport: 'windows_pipe',
-      path: `\\\\.\\pipe\\agent-orchestrator-mcp-${hash}`,
+      path: `\\\\.\\pipe\\agent-orchestrator-${hash}`,
       cleanupPath: null,
     };
   }

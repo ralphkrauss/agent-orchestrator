@@ -223,7 +223,7 @@ describe('agent orchestrator integration with mock CLIs', () => {
       model: 'claude-opus-4-7',
       service_tier: 'fast',
     });
-    assert.equal(claudeTier.ok, false);
+    assertInvalidInput(claudeTier, /Claude does not support service_tier/);
 
     const claudeAlias = await service.startRun({
       backend: 'claude',
@@ -231,7 +231,7 @@ describe('agent orchestrator integration with mock CLIs', () => {
       cwd: repo,
       model: 'opus',
     });
-    assert.equal(claudeAlias.ok, false);
+    assertInvalidInput(claudeAlias, /Claude model must be a direct model id/);
 
     const claudeUnknownEffortModel = await service.startRun({
       backend: 'claude',
@@ -240,7 +240,7 @@ describe('agent orchestrator integration with mock CLIs', () => {
       model: 'claude-sonnet-4-5',
       reasoning_effort: 'high',
     });
-    assert.equal(claudeUnknownEffortModel.ok, false);
+    assertInvalidInput(claudeUnknownEffortModel, /Claude effort levels are documented/);
 
     const claudeXhighFallback = await service.startRun({
       backend: 'claude',
@@ -249,7 +249,7 @@ describe('agent orchestrator integration with mock CLIs', () => {
       model: 'claude-sonnet-4-6',
       reasoning_effort: 'xhigh',
     });
-    assert.equal(claudeXhighFallback.ok, false);
+    assertInvalidInput(claudeXhighFallback, /Claude xhigh effort requires claude-opus-4-7/);
 
     const claudeMax = await service.startRun({
       backend: 'claude',
@@ -270,7 +270,7 @@ describe('agent orchestrator integration with mock CLIs', () => {
       model: 'gpt-5.5',
       reasoning_effort: 'max',
     });
-    assert.equal(codexMax.ok, false);
+    assertInvalidInput(codexMax, /Codex reasoning_effort must be one of/);
   });
 
   it('records requested and observed backend session ids separately for resume auditing', async () => {
@@ -552,4 +552,11 @@ async function waitForFile(path: string): Promise<void> {
 
 function prependPath(entry: string, current: string | undefined): string {
   return current ? `${entry}${delimiter}${current}` : entry;
+}
+
+function assertInvalidInput(result: unknown, message: RegExp): void {
+  const response = result as { ok: boolean; error?: { code: string; message: string } };
+  assert.equal(response.ok, false);
+  assert.equal(response.error?.code, 'INVALID_INPUT');
+  assert.match(response.error?.message ?? '', message);
 }

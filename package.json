@@ -1,5 +1,5 @@
 {
-  "name": "@ralphkrauss/agent-orchestrator-mcp",
+  "name": "@ralphkrauss/agent-orchestrator",
   "version": "0.1.1-beta.0",
   "description": "MCP agent orchestrator for Codex and Claude worker runs",
   "type": "module",
@@ -13,8 +13,8 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "agent-orchestrator-mcp": "dist/cli.js",
-    "agent-orchestrator-mcp-daemon": "dist/daemonCli.js",
+    "agent-orchestrator": "dist/cli.js",
+    "agent-orchestrator-daemon": "dist/daemonCli.js",
     "agent-orchestrator-opencode": "dist/opencodeCli.js"
   },
   "scripts": {
@@ -39,12 +39,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ralphkrauss/agent-orchestrator-mcp.git"
+    "url": "git+https://github.com/ralphkrauss/agent-orchestrator.git"
   },
   "bugs": {
-    "url": "https://github.com/ralphkrauss/agent-orchestrator-mcp/issues"
+    "url": "https://github.com/ralphkrauss/agent-orchestrator/issues"
   },
-  "homepage": "https://github.com/ralphkrauss/agent-orchestrator-mcp#readme",
+  "homepage": "https://github.com/ralphkrauss/agent-orchestrator#readme",
   "license": "MIT",
   "publishConfig": {
     "access": "public"

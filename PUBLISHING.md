@@ -3,7 +3,7 @@
 This package is published publicly as:
 
 ```text
-@ralphkrauss/agent-orchestrator-mcp
+@ralphkrauss/agent-orchestrator
 ```
 
 The repository uses npm Trusted Publishing. GitHub Actions publishes from git tags; no long-lived `NPM_TOKEN` is required for the normal release flow.
@@ -23,9 +23,9 @@ The first public publish of a scoped package must be done manually so the packag
 
 | Field | Value |
 |---|---|
-| Package | `@ralphkrauss/agent-orchestrator-mcp` |
+| Package | `@ralphkrauss/agent-orchestrator` |
 | Repository owner | `ralphkrauss` |
-| Repository name | `agent-orchestrator-mcp` |
+| Repository name | `agent-orchestrator` |
 | Workflow filename | `publish-npm.yml` |
 | Environment | leave empty |
 
@@ -57,20 +57,20 @@ Example result:
 ```text
 0.1.1-beta.0
 tag v0.1.1-beta.0
-published as @ralphkrauss/agent-orchestrator-mcp@next
+published as @ralphkrauss/agent-orchestrator@next
 ```
 
 Test the beta from any project:
 
 ```bash
-npm view @ralphkrauss/agent-orchestrator-mcp@next version
-npx -y @ralphkrauss/agent-orchestrator-mcp@next doctor
+npm view @ralphkrauss/agent-orchestrator@next version
+npx -y @ralphkrauss/agent-orchestrator@next doctor
 ```
 
 MCP configs for beta testing should use:
 
 ```text
-@ralphkrauss/agent-orchestrator-mcp@next
+@ralphkrauss/agent-orchestrator@next
 ```
 
 If the beta needs fixes, make code changes and run the same prerelease command again:
@@ -98,7 +98,7 @@ Example result:
 ```text
 0.1.1
 tag v0.1.1
-published as @ralphkrauss/agent-orchestrator-mcp@latest
+published as @ralphkrauss/agent-orchestrator@latest
 ```
 
 For minor or major releases, use:
@@ -138,7 +138,7 @@ This tests the workflow shape, but it does not prove a new version can publish. 
 Prefer deprecating over unpublishing:
 
 ```bash
-npm deprecate @ralphkrauss/agent-orchestrator-mcp@0.1.0 "Initial smoke release. Use @next until the next stable release."
+npm deprecate @ralphkrauss/agent-orchestrator@0.1.0 "Initial smoke release. Use @next until the next stable release."
 ```
 
 Unpublishing is discouraged. npm versions are immutable: once `package@version` has been used, that exact version cannot be reused, even if unpublished.
@@ -148,10 +148,10 @@ Unpublishing is discouraged. npm versions are immutable: once `package@version` 
 Useful commands:
 
 ```bash
-npm view @ralphkrauss/agent-orchestrator-mcp version
-npm view @ralphkrauss/agent-orchestrator-mcp versions --json
-npm dist-tag ls @ralphkrauss/agent-orchestrator-mcp
-npm view @ralphkrauss/agent-orchestrator-mcp@next version
+npm view @ralphkrauss/agent-orchestrator version
+npm view @ralphkrauss/agent-orchestrator versions --json
+npm dist-tag ls @ralphkrauss/agent-orchestrator
+npm view @ralphkrauss/agent-orchestrator@next version
 ```
 
 ## Installed-Package Smoke Test
@@ -163,8 +163,8 @@ package_file="$(npm pack --silent | tail -n 1)"
 temp_dir="$(mktemp -d)"
 cd "$temp_dir"
 npm init -y >/dev/null
-npm install "/path/to/agent-orchestrator-mcp/$package_file"
-./node_modules/.bin/agent-orchestrator-mcp doctor --json
+npm install "/path/to/agent-orchestrator/$package_file"
+./node_modules/.bin/agent-orchestrator doctor --json
 ```
 
 ## CodeArtifact Publishing

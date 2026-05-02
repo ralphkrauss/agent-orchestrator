@@ -1,4 +1,4 @@
-# Agent Orchestrator MCP development tasks.
+# Agent Orchestrator development tasks.
 
 default:
     @just --list

@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const fallbackName = '@ralphkrauss/agent-orchestrator-mcp';
+const fallbackName = '@ralphkrauss/agent-orchestrator';
 const fallbackVersion = 'unknown';
 
 export interface PackageMetadata {

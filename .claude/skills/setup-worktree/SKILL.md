@@ -51,7 +51,7 @@ just worktree <branch>
 ```
 
 This creates or attaches the worktree under
-`~/worktrees-agent-orchestrator-mcp/`. If the branch does not exist locally or
+`~/worktrees-agent-orchestrator/`. If the branch does not exist locally or
 on `origin`, the command creates it from `origin/main` or local `main`.
 
 Do not push a new branch automatically unless the user asks.

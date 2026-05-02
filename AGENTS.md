@@ -1,8 +1,8 @@
-# Agent Orchestrator MCP
+# Agent Orchestrator
 
 ## Project Overview
 
-This repository publishes `@ralphkrauss/agent-orchestrator-mcp`, a standalone
+This repository publishes `@ralphkrauss/agent-orchestrator`, a standalone
 MCP server for coordinating local Codex and Claude worker CLI runs through a
 persistent daemon.
 

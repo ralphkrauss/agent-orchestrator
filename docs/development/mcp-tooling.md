@@ -21,7 +21,7 @@ node scripts/mcp-secret-bridge.mjs <profile> -- <command> [args...]
 
 The bridge resolves `GITHUB_TOKEN` in this order:
 
-1. `~/.config/agent-orchestrator-mcp/mcp-secrets.env`
+1. `~/.config/agent-orchestrator/mcp-secrets.env`
 2. current process environment, such as `GITHUB_TOKEN` or `GH_TOKEN`
 3. `gh auth token`
 
@@ -40,7 +40,7 @@ node scripts/init-mcp-secrets.mjs
 Then edit:
 
 ```text
-~/.config/agent-orchestrator-mcp/mcp-secrets.env
+~/.config/agent-orchestrator/mcp-secrets.env
 ```
 
 The local `gh auth token` fallback means a machine that already has `gh auth
@@ -78,7 +78,7 @@ launcher is intentionally separate:
 
 ```bash
 agent-orchestrator-opencode
-agent-orchestrator-mcp opencode
+agent-orchestrator opencode
 ```
 
 That launcher starts OpenCode with a process-local `OPENCODE_CONFIG_CONTENT`
@@ -152,7 +152,7 @@ Example commands for the `execute` tool:
 pr list --state open --json number,title,headRefName
 repo view --json nameWithOwner,description,url
 run list --limit 5
-api repos/ralphkrauss/agent-orchestrator-mcp/actions/runs --jq '.workflow_runs[0].status'
+api repos/ralphkrauss/agent-orchestrator/actions/runs --jq '.workflow_runs[0].status'
 ```
 
 ## Agent Orchestrator Server

@@ -56,7 +56,7 @@ Sources read:
 
 Current repository shape:
 
-- The package already exposes `agent-orchestrator-mcp` and `agent-orchestrator-mcp-daemon`.
+- The package already exposes `agent-orchestrator` and `agent-orchestrator-daemon`.
 - `opencode.json` configures `github`, `gh`, and `agent-orchestrator` MCP servers for normal development.
 - The current daemon contract has concrete `codex` and `claude` backend names, and current MCP tools accept per-run `model`, `reasoning_effort`, and `service_tier` settings. The harness should wrap these behind worker profiles so future backends can be added without redesigning supervisor behavior.
 - OpenCode project/global configs are merged, not replaced. Inline `OPENCODE_CONFIG_CONTENT` has high precedence, so the harness can overlay a supervisor config without editing normal config files.
@@ -76,7 +76,7 @@ Current repository shape:
 
 | # | Decision | Choice | Rationale | Rejected Alternatives |
 |---|---|---|---|---|
-| 1 | Harness entry points | Add `agent-orchestrator-mcp opencode` and a dedicated `agent-orchestrator-opencode` bin that share one launcher implementation. | Matches the issue's suggested UX, keeps the existing package CLI useful, and gives users a short command for the supported mode. | Documentation-only launch instructions; replacing normal `opencode`; only adding a new bin with no package CLI command. |
+| 1 | Harness entry points | Add `agent-orchestrator opencode` and a dedicated `agent-orchestrator-opencode` bin that share one launcher implementation. | Matches the issue's suggested UX, keeps the existing package CLI useful, and gives users a short command for the supported mode. | Documentation-only launch instructions; replacing normal `opencode`; only adding a new bin with no package CLI command. |
 | 2 | Config isolation | Generate an in-memory OpenCode config and pass it through `OPENCODE_CONFIG_CONTENT`; do not edit global, user, or project OpenCode config during normal orchestration mode. | OpenCode treats inline config as a high-precedence runtime override, so this isolates orchestration sessions while preserving normal development sessions. | Writing `opencode.json`; writing global `~/.config/opencode/opencode.json`; requiring users to copy a config template. |
 | 3 | Agent profile | Define a dedicated primary agent named `agent-orchestrator` and set `default_agent` to it in the overlay config. | Makes the supervisor role explicit and avoids relying on the default `build` agent, which has broad implementation powers. | Using built-in `plan`; relying only on prompt text without a named agent. |
 | 4 | Direct-write permissions | Deny direct source edits, `todowrite`, unsafe bash by default, web mutation, and non-orchestrator MCP tools; allow file read/list/glob/grep/skill, questions, narrow read-only git bash commands, `agent-orchestrator` MCP tools, and scoped edits only for the configured route manifest and `.agents/skills/orchestrate-*/SKILL.md`. | The supervisor needs context-gathering, orchestration, profile setup, and skill-maintenance powers, but direct implementation and external-service mutation must stay unavailable. | Letting OpenCode ask for broad writes; relying only on supervisor prompt; disabling all bash including read-only git checks. |
@@ -99,7 +99,7 @@ Current repository shape:
 ### In Scope
 
 - Add a reusable OpenCode harness launcher module.
-- Add `agent-orchestrator-mcp opencode` and `agent-orchestrator-opencode` entry points.
+- Add `agent-orchestrator opencode` and `agent-orchestrator-opencode` entry points.
 - Launch OpenCode with `OPENCODE_CONFIG_CONTENT` overlay config and no persistent OpenCode config writes.
 - Support `--cwd` or current-directory target workspace semantics.
 - Define the dedicated `agent-orchestrator` primary agent with a supervisor prompt.
@@ -120,7 +120,7 @@ Current repository shape:
 
 ### Out Of Scope
 
-- Adding an OpenCode worker backend to `agent-orchestrator-mcp`.
+- Adding an OpenCode worker backend to `agent-orchestrator`.
 - Adding non-Codex/non-Claude backends in this first implementation.
 - Changing `send_followup` routing behavior; follow-ups continue from the parent run unless explicitly overridden by direct model settings.
 - Automating containers, bind mounts, or separate-user setup.
@@ -165,7 +165,7 @@ Current repository shape:
 | OPC-2 | Expose or derive worker capabilities before launch | OPC-1 | implemented; verified | The launcher can obtain a current capability catalog from daemon/backend diagnostics or a shared local capability builder; it reports available worker agent ids, backend names, model/variant/effort/service-tier constraints, and start/resume support; if no usable capability data is available, orchestration launch fails. |
 | OPC-3 | Add project orchestration skill loader | OPC-1, OPC-2 | implemented; verified | Project-owned orchestration skills can be loaded from the shared `.agents/skills/` root by `orchestrate-*` prefix; no package-owned defaults or temp fallback skills are created; the loader returns the project skill root and discovered orchestration skill names. |
 | OPC-4 | Add OpenCode harness config builder | OPC-1, OPC-2, OPC-3 | implemented; verified | A TypeScript module builds a deterministic OpenCode config object/string with `$schema`, `model`, `small_model`, `default_agent`, `agent.agent-orchestrator`, shared `skills.paths`, `mcp` overrides, and permission policy; it injects validated capability data, route diagnostics, target workspace, shared skill root, and orchestrate-* skill names into the supervisor prompt; writes are scoped to the configured route manifest and `.agents/skills/orchestrate-*/SKILL.md`. |
-| OPC-5 | Add launcher CLI and bin wiring | OPC-4 | implemented; verified | `agent-orchestrator-mcp opencode` and `agent-orchestrator-opencode` are wired through package bins and shared code; help text documents options; launcher resolves `--cwd` or process cwd, finds/spawns `opencode` in that workspace, injects `OPENCODE_CONFIG_CONTENT`, preserves normal environment, supports `--print-config` or dry-run inspection, rejects unsafe agent overrides by default, and starts with diagnostics when routes are missing or invalid. |
+| OPC-5 | Add launcher CLI and bin wiring | OPC-4 | implemented; verified | `agent-orchestrator opencode` and `agent-orchestrator-opencode` are wired through package bins and shared code; help text documents options; launcher resolves `--cwd` or process cwd, finds/spawns `opencode` in that workspace, injects `OPENCODE_CONFIG_CONTENT`, preserves normal environment, supports `--print-config` or dry-run inspection, rejects unsafe agent overrides by default, and starts with diagnostics when routes are missing or invalid. |
 | OPC-6 | Implement supervisor prompt and permission policy | OPC-4 | implemented; verified | The dedicated primary agent prompt states the supervisor must not directly edit source/todowrite/commit/push/PR/publish or mutate external services; config disables GitHub/`gh`, allows repository reads and narrow read-only git checks, allows `agent-orchestrator` MCP tools, allows only `orchestrate-*` skills, allows scoped edits for the configured route manifest and orchestrate-* `SKILL.md` files, and instructs worker starts to prefer live route/profile aliases. |
 | OPC-7 | Add single-agent setup writes | OPC-4, OPC-5 | implemented; verified | `agent-orchestrator-opencode` launches one `agent-orchestrator` agent that can inspect capabilities and write only the configured route manifest and `.agents/skills/orchestrate-*/SKILL.md`; the launcher creates the shared skill root and route-manifest directory before OpenCode starts; edit permissions allow both absolute and workspace-relative skill paths when applicable. |
 | OPC-8 | Add model, route, and skill-root option handling | OPC-1, OPC-5, OPC-7 | implemented; verified | CLI flags/env/config input cover orchestrator model, small model, worker profile definitions, worker variants/settings, use-case routes, target workspace, user-level manifest path, shared skill root, and optional inline route JSON; `start_run` supports live route/profile resolution from the routes file plus direct backend/model starts for explicit overrides; missing or invalid routing information is surfaced as setup diagnostics. |
@@ -218,7 +218,7 @@ Current repository shape:
 
 ### OPC-5: Add launcher CLI and bin wiring
 - **Status:** implemented; verified
-- **Evidence:** Added and updated `src/opencode/launcher.ts`, `src/opencodeCli.ts`, `agent-orchestrator-opencode` package bin, and `agent-orchestrator-mcp opencode` top-level command. CLI smoke is covered by build and harness tests.
+- **Evidence:** Added and updated `src/opencode/launcher.ts`, `src/opencodeCli.ts`, `agent-orchestrator-opencode` package bin, and `agent-orchestrator opencode` top-level command. CLI smoke is covered by build and harness tests.
 - **Notes:** OpenCode passthrough rejects `--agent` and `--dangerously-skip-permissions`. The legacy `setup` word is accepted as a compatibility alias but still launches the single `agent-orchestrator` agent.
 
 ### OPC-6: Implement supervisor prompt and permission policy

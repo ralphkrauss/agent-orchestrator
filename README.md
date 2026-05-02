@@ -1,4 +1,4 @@
-# Agent Orchestrator MCP
+# Agent Orchestrator
 
 An MCP server that lets a supervising agent coordinate Codex and Claude worker CLI runs through a persistent local daemon.
 
@@ -9,7 +9,7 @@ The package is intentionally host-native. It does not install Codex or Claude. T
 Use the package directly from npm in any MCP client config:
 
 ```bash
-npx -y @ralphkrauss/agent-orchestrator-mcp@latest
+npx -y @ralphkrauss/agent-orchestrator@latest
 ```
 
 For local development from a checkout:
@@ -38,8 +38,8 @@ The MCP package never installs or bundles worker CLIs. Missing workers are repor
 Run:
 
 ```bash
-npx -y @ralphkrauss/agent-orchestrator-mcp@latest doctor
-npx -y @ralphkrauss/agent-orchestrator-mcp@latest doctor --json
+npx -y @ralphkrauss/agent-orchestrator@latest doctor
+npx -y @ralphkrauss/agent-orchestrator@latest doctor --json
 ```
 
 Diagnostics check:
@@ -68,7 +68,7 @@ When called through the daemon, that report also includes the frontend package v
     "agent-orchestrator": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@ralphkrauss/agent-orchestrator-mcp@latest"]
+      "args": ["-y", "@ralphkrauss/agent-orchestrator@latest"]
     }
   }
 }
@@ -79,7 +79,7 @@ When called through the daemon, that report also includes the frontend package v
 ```toml
 [mcp_servers.agent-orchestrator]
 command = "npx"
-args = ["-y", "@ralphkrauss/agent-orchestrator-mcp@latest"]
+args = ["-y", "@ralphkrauss/agent-orchestrator@latest"]
 ```
 
 ### Cursor `.cursor/mcp.json`
@@ -89,7 +89,7 @@ args = ["-y", "@ralphkrauss/agent-orchestrator-mcp@latest"]
   "mcpServers": {
     "agent-orchestrator": {
       "command": "npx",
-      "args": ["-y", "@ralphkrauss/agent-orchestrator-mcp@latest"]
+      "args": ["-y", "@ralphkrauss/agent-orchestrator@latest"]
     }
   }
 }
@@ -102,7 +102,7 @@ args = ["-y", "@ralphkrauss/agent-orchestrator-mcp@latest"]
   "mcp": {
     "agent-orchestrator": {
       "type": "local",
-      "command": ["npx", "-y", "@ralphkrauss/agent-orchestrator-mcp@latest"]
+      "command": ["npx", "-y", "@ralphkrauss/agent-orchestrator@latest"]
     }
   }
 }
@@ -119,7 +119,7 @@ npx
 Use arguments:
 
 ```text
--y @ralphkrauss/agent-orchestrator-mcp@latest
+-y @ralphkrauss/agent-orchestrator@latest
 ```
 
 If your repository already has a cross-platform `npx` wrapper, use it the same way you would use it for Playwright MCP:
@@ -127,7 +127,7 @@ If your repository already has a cross-platform `npx` wrapper, use it the same w
 ```json
 {
   "command": "node",
-  "args": ["scripts/run-npx-mcp.mjs", "@ralphkrauss/agent-orchestrator-mcp@latest"]
+  "args": ["scripts/run-npx-mcp.mjs", "@ralphkrauss/agent-orchestrator@latest"]
 }
 ```
 
@@ -148,7 +148,7 @@ Launch from the repository where workers should run:
 ```bash
 agent-orchestrator-opencode
 agent-orchestrator-opencode --cwd /path/to/workspace
-agent-orchestrator-mcp opencode --cwd /path/to/workspace
+agent-orchestrator opencode --cwd /path/to/workspace
 ```
 
 The launcher does not modify normal OpenCode config. It generates an
@@ -257,8 +257,8 @@ There are two processes:
 
 | Process | Responsibility | Lifetime |
 |---|---|---|
-| `agent-orchestrator-mcp` | Stdio MCP server. Translates MCP tool calls into JSON-RPC requests over a local daemon IPC endpoint. Holds no run state. | Same lifetime as the MCP client. Restarts are expected. |
-| `agent-orchestrator-mcp-daemon` | Owns worker subprocesses, active run handles, timeouts, cancellation, follow-up session reuse, and the durable run store. | Long-lived. Auto-started by the MCP server or controlled manually. |
+| `agent-orchestrator` | Stdio MCP server. Translates MCP tool calls into JSON-RPC requests over a local daemon IPC endpoint. Holds no run state. | Same lifetime as the MCP client. Restarts are expected. |
+| `agent-orchestrator-daemon` | Owns worker subprocesses, active run handles, timeouts, cancellation, follow-up session reuse, and the durable run store. | Long-lived. Auto-started by the MCP server or controlled manually. |
 
 The guarantee is deliberately scoped:
 
@@ -271,30 +271,30 @@ The guarantee is deliberately scoped:
 When installed locally or globally, use:
 
 ```bash
-agent-orchestrator-mcp-daemon status
-agent-orchestrator-mcp-daemon status --verbose
-agent-orchestrator-mcp-daemon runs
-agent-orchestrator-mcp-daemon runs --json --prompts
-agent-orchestrator-mcp-daemon watch
-agent-orchestrator-mcp-daemon start
-agent-orchestrator-mcp-daemon stop
-agent-orchestrator-mcp-daemon stop --force
-agent-orchestrator-mcp-daemon restart
-agent-orchestrator-mcp-daemon restart --force
-agent-orchestrator-mcp-daemon prune --older-than-days 30 --dry-run
-agent-orchestrator-mcp-daemon prune --older-than-days 30
+agent-orchestrator-daemon status
+agent-orchestrator-daemon status --verbose
+agent-orchestrator-daemon runs
+agent-orchestrator-daemon runs --json --prompts
+agent-orchestrator-daemon watch
+agent-orchestrator-daemon start
+agent-orchestrator-daemon stop
+agent-orchestrator-daemon stop --force
+agent-orchestrator-daemon restart
+agent-orchestrator-daemon restart --force
+agent-orchestrator-daemon prune --older-than-days 30 --dry-run
+agent-orchestrator-daemon prune --older-than-days 30
 ```
 
 With `npx`, target the daemon bin explicitly:
 
 ```bash
-npx -y --package @ralphkrauss/agent-orchestrator-mcp@latest agent-orchestrator-mcp-daemon status
-npx -y --package @ralphkrauss/agent-orchestrator-mcp@latest agent-orchestrator-mcp-daemon runs
-npx -y --package @ralphkrauss/agent-orchestrator-mcp@latest agent-orchestrator-mcp-daemon watch
-npx -y --package @ralphkrauss/agent-orchestrator-mcp@latest agent-orchestrator-mcp-daemon stop --force
-npx -y --package @ralphkrauss/agent-orchestrator-mcp@latest agent-orchestrator-mcp-daemon restart
-npx -y --package @ralphkrauss/agent-orchestrator-mcp@latest agent-orchestrator-mcp-daemon restart --force
-npx -y --package @ralphkrauss/agent-orchestrator-mcp@latest agent-orchestrator-mcp-daemon prune --older-than-days 30 --dry-run
+npx -y --package @ralphkrauss/agent-orchestrator@latest agent-orchestrator-daemon status
+npx -y --package @ralphkrauss/agent-orchestrator@latest agent-orchestrator-daemon runs
+npx -y --package @ralphkrauss/agent-orchestrator@latest agent-orchestrator-daemon watch
+npx -y --package @ralphkrauss/agent-orchestrator@latest agent-orchestrator-daemon stop --force
+npx -y --package @ralphkrauss/agent-orchestrator@latest agent-orchestrator-daemon restart
+npx -y --package @ralphkrauss/agent-orchestrator@latest agent-orchestrator-daemon restart --force
+npx -y --package @ralphkrauss/agent-orchestrator@latest agent-orchestrator-daemon prune --older-than-days 30 --dry-run
 ```
 
 `stop` refuses while runs are active and prints the active run IDs. `stop --force` cancels active runs through the normal cancellation path, waits for terminal statuses, and exits. `restart` uses the same safe default and refuses active runs; `restart --force` cancels active runs before starting a fresh daemon. Direct `SIGTERM`/`SIGINT` to the daemon behaves like `stop --force`; `SIGKILL` cannot be caught and any in-flight runs become `orphaned` on next daemon startup.
@@ -302,7 +302,7 @@ npx -y --package @ralphkrauss/agent-orchestrator-mcp@latest agent-orchestrator-m
 After changing the configured npm version or dist-tag, restart the daemon so it picks up the same package build as the MCP frontend:
 
 ```bash
-npx -y --package @ralphkrauss/agent-orchestrator-mcp@latest agent-orchestrator-mcp-daemon restart
+npx -y --package @ralphkrauss/agent-orchestrator@latest agent-orchestrator-daemon restart
 ```
 
 `prune` deletes only terminal runs with `finished_at` older than the requested age. Use `--dry-run` first to inspect the matching run IDs.
@@ -312,11 +312,11 @@ npx -y --package @ralphkrauss/agent-orchestrator-mcp@latest agent-orchestrator-m
 Use the daemon CLI to inspect sessions and runs:
 
 ```bash
-agent-orchestrator-mcp-daemon status --verbose
-agent-orchestrator-mcp-daemon runs
-agent-orchestrator-mcp-daemon runs --json
-agent-orchestrator-mcp-daemon runs --json --prompts
-agent-orchestrator-mcp-daemon watch
+agent-orchestrator-daemon status --verbose
+agent-orchestrator-daemon runs
+agent-orchestrator-daemon runs --json
+agent-orchestrator-daemon runs --json --prompts
+agent-orchestrator-daemon watch
 ```
 
 `watch` opens an interactive terminal dashboard. Use arrow keys to move through
@@ -395,9 +395,9 @@ Secrets and CLI credentials are not stored by the MCP package. Worker authentica
 Manual cleanup:
 
 ```bash
-agent-orchestrator-mcp-daemon prune --older-than-days 30 --dry-run
-agent-orchestrator-mcp-daemon prune --older-than-days 30
-agent-orchestrator-mcp-daemon stop --force
+agent-orchestrator-daemon prune --older-than-days 30 --dry-run
+agent-orchestrator-daemon prune --older-than-days 30
+agent-orchestrator-daemon stop --force
 rm -rf "${AGENT_ORCHESTRATOR_HOME:-$HOME/.agent-orchestrator}"
 ```
 
@@ -489,8 +489,8 @@ package_file="$(npm pack --silent | tail -n 1)"
 temp_dir="$(mktemp -d)"
 cd "$temp_dir"
 npm init -y >/dev/null
-npm install "/path/to/agent-orchestrator-mcp/$package_file"
-./node_modules/.bin/agent-orchestrator-mcp doctor --json
+npm install "/path/to/agent-orchestrator/$package_file"
+./node_modules/.bin/agent-orchestrator doctor --json
 ```
 
 ## Publishing

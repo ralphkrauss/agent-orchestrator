@@ -4,7 +4,7 @@
  * to the child-process env names expected by the server.
  *
  * Secret sources for canonical names, in precedence order:
- * 1. Non-blank values in ~/.config/agent-orchestrator-mcp/mcp-secrets.env
+ * 1. Non-blank values in ~/.config/agent-orchestrator/mcp-secrets.env
  *    (override with AGENT_ORCHESTRATOR_MCP_SECRETS_FILE)
  * 2. Current process environment
  * 3. `gh auth token` for GITHUB_TOKEN/GH_TOKEN
@@ -15,7 +15,7 @@ import { join, resolve } from "node:path";
 import os from "node:os";
 import { spawn, spawnSync } from "node:child_process";
 
-const defaultSecretsFile = join(os.homedir(), ".config", "agent-orchestrator-mcp", "mcp-secrets.env");
+const defaultSecretsFile = join(os.homedir(), ".config", "agent-orchestrator", "mcp-secrets.env");
 
 const profiles = {
   github: {
@@ -30,7 +30,7 @@ const profiles = {
         "auth token,auth login,auth logout,auth refresh,repo delete,repo archive,ssh-key delete,gpg-key delete,secret set,secret delete",
       MCP_DESCRIPTION: "GitHub CLI wrapper for repos, pull requests, issues, actions, and GitHub API calls",
       MCP_EXAMPLES:
-        '["pr list --state open --json number,title","repo view --json nameWithOwner,url","run list --limit 5","api repos/ralphkrauss/agent-orchestrator-mcp/actions/runs --jq .workflow_runs[0].status"]',
+        '["pr list --state open --json number,title","repo view --json nameWithOwner,url","run list --limit 5","api repos/ralphkrauss/agent-orchestrator/actions/runs --jq .workflow_runs[0].status"]',
     },
   },
 };
