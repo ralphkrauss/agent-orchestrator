@@ -25,6 +25,10 @@ The bridge resolves `GITHUB_TOKEN` in this order:
 2. current process environment, such as `GITHUB_TOKEN` or `GH_TOKEN`
 3. `gh auth token`
 
+Blank entries in the optional secrets file are treated as unset, so the
+generated `GITHUB_TOKEN=` template falls through to process env or local `gh`
+auth.
+
 The token is never printed by the bridge.
 
 Initialize the optional user-level secrets file with:

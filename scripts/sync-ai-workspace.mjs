@@ -35,6 +35,7 @@ const checkOnly = process.argv.includes("--check");
 
 const generatedHeader =
   "<!-- Generated from .agents/ by scripts/sync-ai-workspace.mjs. Do not edit directly. -->\n\n";
+const expectedGeneratedPaths = new Set();
 
 function addGeneratedHeader(content) {
   const match = content.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n/);
@@ -131,6 +132,7 @@ function readMaybe(path) {
 }
 
 function writeOrCheck(path, content, drift) {
+  expectedGeneratedPaths.add(path);
   if (checkOnly) {
     if (readMaybe(path) !== content) {
       drift.push(path);
@@ -142,6 +144,7 @@ function writeOrCheck(path, content, drift) {
 }
 
 function copyOrCheck(src, dest, drift) {
+  expectedGeneratedPaths.add(dest);
   if (checkOnly) {
     if (!existsSync(dest)) {
       drift.push(dest);
@@ -219,12 +222,36 @@ function syncAgents(drift) {
   }
 }
 
+function checkStaleGeneratedFiles(drift) {
+  const generatedTargets = [
+    { dir: join(root, ".claude", "skills"), includes: () => true },
+    { dir: join(root, ".claude", "rules"), includes: (rel) => isTopLevelFileWithExtension(rel, ".md") },
+    { dir: join(root, ".claude", "agents"), includes: (rel) => isTopLevelFileWithExtension(rel, ".md") },
+    { dir: join(root, ".cursor", "rules"), includes: (rel) => isTopLevelFileWithExtension(rel, ".mdc") },
+  ];
+
+  for (const target of generatedTargets) {
+    for (const rel of collectFiles(target.dir)) {
+      const path = join(target.dir, rel);
+      if (target.includes(rel) && !expectedGeneratedPaths.has(path)) {
+        drift.push(path);
+      }
+    }
+  }
+}
+
+function isTopLevelFileWithExtension(path, extension) {
+  return !path.includes("/") && !path.includes("\\") && extname(path) === extension;
+}
+
 const drift = [];
 syncSkills(drift);
 syncRules(drift);
 syncAgents(drift);
 
 if (checkOnly) {
+  checkStaleGeneratedFiles(drift);
+  drift.sort();
   if (drift.length > 0) {
     console.error("AI workspace projections are out of sync:");
     for (const path of drift) console.error(`  ${relative(root, path)}`);
