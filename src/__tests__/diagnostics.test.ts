@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { getBackendStatus } from '../diagnostics.js';
 import { createBackendRegistry } from '../backend/registry.js';
 import { OrchestratorService } from '../orchestratorService.js';
+import { getPackageVersion } from '../packageMetadata.js';
 import { RunStore } from '../runStore.js';
 
 let originalPath = process.env.PATH;
@@ -37,6 +38,10 @@ describe('backend diagnostics', () => {
 
     const report = await getBackendStatus();
 
+    assert.equal(report.frontend_version, getPackageVersion());
+    assert.equal(report.daemon_version, null);
+    assert.equal(report.version_match, false);
+    assert.equal(report.daemon_pid, null);
     assert.equal(report.posix_supported, true);
     assert.deepStrictEqual(report.backends.map((backend) => backend.status), ['missing', 'missing']);
     assert.ok(report.backends.every((backend) => backend.hints.length > 0));
@@ -46,7 +51,7 @@ describe('backend diagnostics', () => {
     const root = await mkdtemp(join(tmpdir(), 'agent-diag-win-missing-'));
     process.env.PATH = join(root, 'missing-bin');
 
-    const report = await getBackendStatus('win32');
+    const report = await getBackendStatus({ platform: 'win32' });
 
     assert.equal(report.platform, 'win32');
     assert.equal(report.posix_supported, false);
@@ -112,9 +117,13 @@ describe('backend diagnostics', () => {
 
     const service = new OrchestratorService(new RunStore(join(root, 'home')), createBackendRegistry());
     await service.initialize();
-    const result = await service.dispatch('get_backend_status', {}) as { ok: boolean; status?: { backends: { status: string }[] } };
+    const result = await service.dispatch('get_backend_status', {}, { frontend_version: getPackageVersion() }) as { ok: boolean; status?: { frontend_version: string; daemon_version: string | null; version_match: boolean; daemon_pid: number | null; backends: { status: string }[] } };
 
     assert.equal(result.ok, true);
+    assert.equal(result.status?.frontend_version, getPackageVersion());
+    assert.equal(result.status?.daemon_version, getPackageVersion());
+    assert.equal(result.status?.version_match, true);
+    assert.equal(result.status?.daemon_pid, process.pid);
     assert.deepStrictEqual(result.status?.backends.map((backend) => backend.status), ['auth_unknown', 'auth_unknown']);
   });
 

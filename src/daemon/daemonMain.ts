@@ -27,7 +27,7 @@ async function main(): Promise<void> {
   const service = new OrchestratorService(store, createBackendRegistry(), log);
   await service.initialize();
 
-  ipcServer = new IpcServer(paths.ipc.path, async (method, params) => service.dispatch(method, params));
+  ipcServer = new IpcServer(paths.ipc.path, async (method, params, context) => service.dispatch(method, params, context));
   if (paths.ipc.transport === 'unix_socket') {
     const oldUmask = process.umask(0o177);
     try {

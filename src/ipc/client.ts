@@ -2,15 +2,19 @@ import { connect } from 'node:net';
 import { once } from 'node:events';
 import { createRpcRequest, FrameReader, writeFrame } from './protocol.js';
 import { orchestratorError, type OrchestratorError, RpcResponseSchema, type RpcMethod } from '../contract.js';
+import { getPackageVersion } from '../packageMetadata.js';
 
 export class IpcClient {
-  constructor(private readonly socketPath: string) {}
+  constructor(
+    private readonly socketPath: string,
+    private readonly frontendVersion = getPackageVersion(),
+  ) {}
 
   async request<T = unknown>(method: RpcMethod, params?: unknown, timeoutMs = 30_000): Promise<T> {
     const socket = connect(this.socketPath);
     try {
       await once(socket, 'connect');
-      const request = createRpcRequest(method, params);
+      const request = createRpcRequest(method, params, this.frontendVersion);
       const reader = new FrameReader();
       return await new Promise<T>((resolve, reject) => {
         const timer = setTimeout(() => {

@@ -4,7 +4,7 @@
  * to the child-process env names expected by the server.
  *
  * Secret sources for canonical names, in precedence order:
- * 1. ~/.config/agent-orchestrator-mcp/mcp-secrets.env
+ * 1. Non-blank values in ~/.config/agent-orchestrator-mcp/mcp-secrets.env
  *    (override with AGENT_ORCHESTRATOR_MCP_SECRETS_FILE)
  * 2. Current process environment
  * 3. `gh auth token` for GITHUB_TOKEN/GH_TOKEN
@@ -111,7 +111,12 @@ async function main() {
 
 function loadSecrets() {
   const fileSecrets = readSecretFile(resolveSecretsPath());
-  const secrets = { ...process.env, ...fileSecrets };
+  const secrets = { ...process.env };
+  for (const [key, value] of Object.entries(fileSecrets)) {
+    if (hasValue(value)) {
+      secrets[key] = value;
+    }
+  }
 
   if (!hasValue(secrets.GITHUB_TOKEN) && hasValue(secrets.GH_TOKEN)) {
     secrets.GITHUB_TOKEN = secrets.GH_TOKEN;

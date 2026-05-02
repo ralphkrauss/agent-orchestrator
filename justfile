@@ -62,10 +62,7 @@ orchestrator-stop *args: orchestrator-build
 
 # Restart the daemon so it picks up the current build.
 orchestrator-restart: orchestrator-build
-    -node dist/daemonCli.js stop --force
-    sleep 1
-    node dist/daemonCli.js start
-    node dist/daemonCli.js status
+    node dist/daemonCli.js restart --force
 
 # Preview terminal run pruning for runs older than the requested age.
 orchestrator-prune-dry-run days="30": orchestrator-build

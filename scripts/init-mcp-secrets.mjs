@@ -24,8 +24,8 @@ const templateText = `# Shared MCP secret contract for agent-orchestrator-mcp.
 #   ~/.config/agent-orchestrator-mcp/mcp-secrets.env
 #
 # Secret-bearing MCP servers read this path through
-# scripts/mcp-secret-bridge.mjs. Values here override process env for canonical
-# names so stale shell exports do not silently win.
+# scripts/mcp-secret-bridge.mjs. Non-blank values here override process env for
+# canonical names so stale shell exports do not silently win.
 
 # GitHub PAT used by both the official GitHub MCP server and the gh CLI wrapper.
 # If this is blank, the bridge falls back to process env and then gh auth token.

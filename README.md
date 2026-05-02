@@ -56,6 +56,7 @@ Diagnostics check:
 Diagnostics do not make model calls. If auth cannot be proven locally without a model call, the backend reports `auth_unknown` with a next-step hint.
 
 Supervisor agents can use the MCP tool `get_backend_status` to retrieve the same diagnostics.
+When called through the daemon, that report also includes the frontend package version, daemon package version, daemon PID, and whether the two package versions match.
 
 ## MCP Client Config
 
@@ -143,6 +144,7 @@ The guarantee is deliberately scoped:
 
 - MCP-client or supervisor restarts preserve run state and in-flight runs because the daemon keeps running.
 - Daemon restarts do not preserve in-flight worker ownership. On daemon startup, any run still marked `running` becomes terminal `orphaned` with the previous daemon PID and worker PID in the error context.
+- Package upgrades can restart the stdio MCP frontend without restarting the daemon. If their package versions differ, tool calls return `DAEMON_VERSION_MISMATCH` with both versions and a restart hint instead of failing later with stale method or result-shape errors.
 
 ## Daemon Lifecycle
 
@@ -153,6 +155,8 @@ agent-orchestrator-mcp-daemon status
 agent-orchestrator-mcp-daemon start
 agent-orchestrator-mcp-daemon stop
 agent-orchestrator-mcp-daemon stop --force
+agent-orchestrator-mcp-daemon restart
+agent-orchestrator-mcp-daemon restart --force
 agent-orchestrator-mcp-daemon prune --older-than-days 30 --dry-run
 agent-orchestrator-mcp-daemon prune --older-than-days 30
 ```
@@ -162,10 +166,18 @@ With `npx`, target the daemon bin explicitly:
 ```bash
 npx -y --package @ralphkrauss/agent-orchestrator-mcp@latest agent-orchestrator-mcp-daemon status
 npx -y --package @ralphkrauss/agent-orchestrator-mcp@latest agent-orchestrator-mcp-daemon stop --force
+npx -y --package @ralphkrauss/agent-orchestrator-mcp@latest agent-orchestrator-mcp-daemon restart
+npx -y --package @ralphkrauss/agent-orchestrator-mcp@latest agent-orchestrator-mcp-daemon restart --force
 npx -y --package @ralphkrauss/agent-orchestrator-mcp@latest agent-orchestrator-mcp-daemon prune --older-than-days 30 --dry-run
 ```
 
-`stop` refuses while runs are active and prints the active run IDs. `stop --force` cancels active runs through the normal cancellation path, waits for terminal statuses, and exits. Direct `SIGTERM`/`SIGINT` to the daemon behaves like `stop --force`; `SIGKILL` cannot be caught and any in-flight runs become `orphaned` on next daemon startup.
+`stop` refuses while runs are active and prints the active run IDs. `stop --force` cancels active runs through the normal cancellation path, waits for terminal statuses, and exits. `restart` uses the same safe default and refuses active runs; `restart --force` cancels active runs before starting a fresh daemon. Direct `SIGTERM`/`SIGINT` to the daemon behaves like `stop --force`; `SIGKILL` cannot be caught and any in-flight runs become `orphaned` on next daemon startup.
+
+After changing the configured npm version or dist-tag, restart the daemon so it picks up the same package build as the MCP frontend:
+
+```bash
+npx -y --package @ralphkrauss/agent-orchestrator-mcp@latest agent-orchestrator-mcp-daemon restart
+```
 
 `prune` deletes only terminal runs with `finished_at` older than the requested age. Use `--dry-run` first to inspect the matching run IDs.
 

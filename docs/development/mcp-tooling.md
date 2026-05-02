@@ -25,6 +25,10 @@ The bridge resolves `GITHUB_TOKEN` in this order:
 2. current process environment, such as `GITHUB_TOKEN` or `GH_TOKEN`
 3. `gh auth token`
 
+Blank entries in the optional secrets file are treated as unset, so the
+generated `GITHUB_TOKEN=` template falls through to process env or local `gh`
+auth.
+
 The token is never printed by the bridge.
 
 Initialize the optional user-level secrets file with:
@@ -149,6 +153,17 @@ just orchestrator-stop
 just orchestrator-stop --force
 just orchestrator-prune-dry-run 30
 just orchestrator-prune 30
+```
+
+The daemon is long-lived across MCP reconnects and editor restarts. After
+changing package source, rebuilding `dist/`, or switching npm dist-tags during
+dogfooding, restart the daemon so the frontend and daemon package versions
+match:
+
+```bash
+node dist/daemonCli.js restart
+node dist/daemonCli.js restart --force
+just orchestrator-restart
 ```
 
 Access level: read/write local process orchestration. The server can start

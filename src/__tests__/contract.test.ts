@@ -34,6 +34,10 @@ describe('contract schemas and envelopes', () => {
     });
 
     BackendStatusReportSchema.parse({
+      frontend_version: '0.1.1-beta.0',
+      daemon_version: '0.1.1-beta.0',
+      version_match: true,
+      daemon_pid: 123,
       platform: 'linux',
       node_version: 'v22.0.0',
       posix_supported: true,
@@ -94,6 +98,10 @@ describe('contract schemas and envelopes', () => {
     assert.deepStrictEqual(
       wrapErr(orchestratorError('UNKNOWN_RUN', 'missing')),
       { ok: false, error: { code: 'UNKNOWN_RUN', message: 'missing' } },
+    );
+    assert.deepStrictEqual(
+      wrapErr(orchestratorError('DAEMON_VERSION_MISMATCH', 'mismatch', { frontend_version: 'new', daemon_version: 'old' })),
+      { ok: false, error: { code: 'DAEMON_VERSION_MISMATCH', message: 'mismatch', details: { frontend_version: 'new', daemon_version: 'old' } } },
     );
   });
 });

@@ -62,6 +62,10 @@ export const BackendDiagnosticSchema = z.object({
 export type BackendDiagnostic = z.infer<typeof BackendDiagnosticSchema>;
 
 export const BackendStatusReportSchema = z.object({
+  frontend_version: z.string(),
+  daemon_version: z.string().nullable(),
+  version_match: z.boolean(),
+  daemon_pid: z.number().int().nullable(),
   platform: z.string(),
   node_version: z.string(),
   posix_supported: z.boolean(),
@@ -94,6 +98,7 @@ export type GitSnapshot = z.infer<typeof GitSnapshotSchema>;
 
 export const OrchestratorErrorCodeSchema = z.enum([
   'DAEMON_UNAVAILABLE',
+  'DAEMON_VERSION_MISMATCH',
   'UNKNOWN_RUN',
   'INVALID_INPUT',
   'BACKEND_NOT_FOUND',
@@ -246,6 +251,7 @@ export type RpcMethod = z.infer<typeof RpcMethodSchema>;
 
 export const RpcRequestSchema = z.object({
   protocol_version: z.literal(PROTOCOL_VERSION),
+  frontend_version: z.string().min(1).optional(),
   id: z.string(),
   method: RpcMethodSchema,
   params: z.unknown().optional(),
@@ -278,4 +284,30 @@ export function orchestratorError(
   details?: Record<string, unknown>,
 ): OrchestratorError {
   return details ? { code, message, details } : { code, message };
+}
+
+export const DAEMON_VERSION_MISMATCH_RECOVERY_HINT =
+  'Restart the daemon so it picks up the current package build: agent-orchestrator-mcp-daemon restart';
+
+export function daemonVersionMismatchError(input: {
+  frontendVersion: string | null;
+  daemonVersion: string | null;
+  daemonPid?: number | null;
+}): OrchestratorError {
+  const frontendVersion = input.frontendVersion ?? 'unknown';
+  const daemonVersion = input.daemonVersion ?? 'unknown';
+  const details: Record<string, unknown> = {
+    frontend_version: input.frontendVersion,
+    daemon_version: input.daemonVersion,
+    recovery_hint: DAEMON_VERSION_MISMATCH_RECOVERY_HINT,
+  };
+  if (input.daemonPid !== undefined) {
+    details.daemon_pid = input.daemonPid;
+  }
+
+  return orchestratorError(
+    'DAEMON_VERSION_MISMATCH',
+    `Frontend package version ${frontendVersion} does not match daemon package version ${daemonVersion}. Restart the daemon so it picks up the current package build.`,
+    details,
+  );
 }
