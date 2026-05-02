@@ -16,7 +16,7 @@ import { ensureProjectSkillRoot, loadProjectSkills } from './skills.js';
 
 export interface ParsedOpenCodeLauncherArgs {
   cwd: string;
-  profilesFile: string | null;
+  profilesFile: string;
   profilesJson: string | null;
   manifestPath: string;
   skillsPath: string;
@@ -41,9 +41,11 @@ export function parseOpenCodeLauncherArgs(
   const opencodeArgs = separator >= 0 ? args.slice(separator + 1) : [];
 
   let cwd = env.AGENT_ORCHESTRATOR_OPENCODE_CWD || defaultCwd;
-  let profilesFile: string | null = env.AGENT_ORCHESTRATOR_OPENCODE_PROFILES_FILE || env.AGENT_ORCHESTRATOR_OPENCODE_ROUTES_FILE || null;
+  let profilesFile: string | null = env.AGENT_ORCHESTRATOR_OPENCODE_PROFILES_FILE
+    || env.AGENT_ORCHESTRATOR_OPENCODE_ROUTES_FILE
+    || env.AGENT_ORCHESTRATOR_OPENCODE_MANIFEST
+    || null;
   let profilesJson: string | null = env.AGENT_ORCHESTRATOR_OPENCODE_PROFILES_JSON || env.AGENT_ORCHESTRATOR_OPENCODE_ROUTES_JSON || null;
-  let manifestPath: string | null = env.AGENT_ORCHESTRATOR_OPENCODE_MANIFEST || null;
   let skillsPath: string | null = env.AGENT_ORCHESTRATOR_OPENCODE_SKILLS_PATH || null;
   let orchestratorModel = env.AGENT_ORCHESTRATOR_OPENCODE_MODEL || undefined;
   let orchestratorSmallModel = env.AGENT_ORCHESTRATOR_OPENCODE_SMALL_MODEL || undefined;
@@ -63,13 +65,10 @@ export function parseOpenCodeLauncherArgs(
         // Compatibility no-op for older launcher invocations.
       } else if (arg === '--cwd') {
         cwd = readOptionValue(ownArgs, ++index, arg);
-      } else if (arg === '--profiles-file' || arg === '--routes-file') {
+      } else if (arg === '--profiles-file' || arg === '--routes-file' || arg === '--manifest') {
         profilesFile = readOptionValue(ownArgs, ++index, arg);
       } else if (arg === '--profiles-json' || arg === '--routes-json') {
         profilesJson = readOptionValue(ownArgs, ++index, arg);
-      } else if (arg === '--manifest') {
-        manifestPath = readOptionValue(ownArgs, ++index, arg);
-        profilesFile ??= manifestPath;
       } else if (arg === '--skills' || arg === '--orchestration-skills') {
         skillsPath = readOptionValue(ownArgs, ++index, arg);
       } else if (arg === '--orchestrator-model') {
@@ -88,15 +87,15 @@ export function parseOpenCodeLauncherArgs(
 
   const resolvedCwd = resolve(defaultCwd, cwd);
   const defaultProfilesPath = defaultWorkerProfilesFile(env);
-  const resolvedManifest = resolve(resolvedCwd, manifestPath ?? profilesFile ?? defaultProfilesPath);
+  const resolvedProfilesFile = resolve(resolvedCwd, profilesFile ?? defaultProfilesPath);
   const resolvedSkillsPath = resolve(resolvedCwd, skillsPath ?? '.agents/skills');
   return {
     ok: true,
     value: {
       cwd: resolvedCwd,
-      profilesFile: profilesFile ? resolve(resolvedCwd, profilesFile) : resolvedManifest,
+      profilesFile: resolvedProfilesFile,
       profilesJson,
-      manifestPath: resolvedManifest,
+      manifestPath: resolvedProfilesFile,
       skillsPath: resolvedSkillsPath,
       orchestratorModel,
       orchestratorSmallModel,
@@ -133,8 +132,9 @@ export async function runOpenCodeLauncher(
     return 1;
   }
 
-  if (hasUnsafeOpenCodeArg(options.opencodeArgs)) {
-    io.stderr.write('OpenCode orchestration mode does not allow --agent or --dangerously-skip-permissions passthrough arguments.\n');
+  const passthroughValidation = validateOpenCodePassthroughArgs(options.opencodeArgs);
+  if (!passthroughValidation.ok) {
+    io.stderr.write(`${passthroughValidation.error}\n`);
     return 1;
   }
 
@@ -209,6 +209,10 @@ Options:
   --print-config                       Print generated OpenCode config and exit.
   --help
 
+Passthrough after --:
+  Omit passthrough args for the OpenCode TUI, or use run <prompt>.
+  The run subcommand accepts only positional prompt tokens; options are rejected.
+
 Environment fallbacks:
   AGENT_ORCHESTRATOR_OPENCODE_CWD
   AGENT_ORCHESTRATOR_OPENCODE_PROFILES_FILE
@@ -255,10 +259,6 @@ async function loadManifestInput(
     }
   }
 
-  if (!options.profilesFile) {
-    return { ok: false, error: 'No profiles file configured', missing: true };
-  }
-
   try {
     return { ok: true, value: JSON.parse(await readFile(options.profilesFile, 'utf8')) as unknown };
   } catch (error) {
@@ -277,8 +277,20 @@ function withAgentArg(args: string[], agentName: string): string[] {
   return ['--agent', agentName, ...args];
 }
 
-function hasUnsafeOpenCodeArg(args: readonly string[]): boolean {
-  return args.some((arg) => arg === '--agent' || arg.startsWith('--agent=') || arg === '--dangerously-skip-permissions');
+function validateOpenCodePassthroughArgs(args: readonly string[]): { ok: true } | { ok: false; error: string } {
+  if (args.length === 0) return { ok: true };
+  if (args[0] !== 'run') {
+    const rejected = args[0]?.startsWith('-') ? `option ${args[0]}` : `subcommand ${args[0]}`;
+    return { ok: false, error: `OpenCode orchestration mode only allows no passthrough arguments or run followed by positional prompt tokens; rejected ${rejected}.` };
+  }
+  if (args.length === 1) {
+    return { ok: false, error: 'OpenCode orchestration mode requires run to be followed by a positional prompt.' };
+  }
+  const option = args.slice(1).find((arg) => arg.startsWith('-'));
+  if (option) {
+    return { ok: false, error: `OpenCode orchestration mode only allows positional prompt tokens after run; rejected option ${option}.` };
+  }
+  return { ok: true };
 }
 
 async function validateCwd(cwd: string): Promise<{ ok: true } | { ok: false; error: string }> {

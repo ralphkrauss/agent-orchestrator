@@ -86,7 +86,28 @@ describe('OpenCode worker capability profiles', () => {
     assert.ok(!result.ok && result.errors.some((error) => error.includes('unsupported variant experimental')));
     assert.ok(!result.ok && result.errors.some((error) => error.includes('unsupported service_tier fast')));
     assert.ok(!result.ok && result.errors.some((error) => error.includes('provider-prefixed model openai/gpt-5.5')));
-    assert.ok(!result.ok && result.errors.some((error) => error.includes('direct Claude model id')));
+    assert.ok(!result.ok && result.errors.some((error) => error.includes('direct model id')));
+  });
+
+  it('rejects Claude effort profiles for unsupported direct model ids', () => {
+    const manifest = parseWorkerProfileManifest({
+      profiles: {
+        reviewer: {
+          backend: 'claude',
+          model: 'claude-sonnet-4-5',
+          reasoning_effort: 'high',
+        },
+      },
+    });
+    assert.equal(manifest.ok, true);
+
+    const result = validateWorkerProfiles(
+      manifest.ok ? manifest.value : assert.fail('manifest parse failed'),
+      createWorkerCapabilityCatalog(),
+    );
+
+    assert.equal(result.ok, false);
+    assert.ok(!result.ok && result.errors.some((error) => error.includes('Claude effort levels are documented')));
   });
 });
 

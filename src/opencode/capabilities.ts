@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { validateClaudeModelAndEffort } from '../backend/claudeValidation.js';
 import type { BackendStatusReport } from '../contract.js';
 
 export interface WorkerBackendCapability {
@@ -160,17 +161,8 @@ function validateBackendSpecificProfile(profileId: string, profile: WorkerProfil
   if (profile.backend === 'codex') return validateCodexProfile(profileId, profile);
   if (profile.backend !== 'claude') return [];
 
-  const normalized = normalizeClaudeModel(profile.model);
-  if (normalized && isClaudeAlias(normalized)) {
-    return [`profile ${profileId} must use a direct Claude model id, not alias ${profile.model}`];
-  }
-  if (profile.reasoning_effort && !normalized) {
-    return [`profile ${profileId} uses Claude reasoning_effort and must set an explicit direct model id`];
-  }
-  if (profile.reasoning_effort === 'xhigh' && normalized && !normalized.includes('claude-opus-4-7')) {
-    return [`profile ${profileId} uses Claude xhigh effort, which requires claude-opus-4-7 or claude-opus-4-7[1m]`];
-  }
-  return [];
+  const error = validateClaudeModelAndEffort(profile.model, profile.reasoning_effort);
+  return error ? [`profile ${profileId}: ${error}`] : [];
 }
 
 function validateCodexProfile(profileId: string, profile: WorkerProfile): string[] {
@@ -178,20 +170,6 @@ function validateCodexProfile(profileId: string, profile: WorkerProfile): string
     return [`profile ${profileId} must use a Codex CLI model id, not provider-prefixed model ${profile.model}`];
   }
   return [];
-}
-
-function normalizeClaudeModel(model: string | undefined): string | null {
-  const value = model?.trim().toLowerCase();
-  return value ? value.replace(/\[1m\]$/, '') : null;
-}
-
-function isClaudeAlias(model: string): boolean {
-  return model === 'default'
-    || model === 'best'
-    || model === 'opus'
-    || model === 'sonnet'
-    || model === 'haiku'
-    || model === 'opusplan';
 }
 
 function isSafeId(value: string): boolean {

@@ -151,6 +151,12 @@ agent-orchestrator-opencode --cwd /path/to/workspace
 agent-orchestrator opencode --cwd /path/to/workspace
 ```
 
+OpenCode passthrough arguments after `--` are intentionally limited to no
+subcommand or `run` followed by positional prompt tokens. The launcher rejects
+non-supervisor subcommands and any option token after `run`, including
+`--agent`, `--attach`, `--dir`, `--share`, `--session`, `--file`, and
+`--dangerously-skip-permissions`.
+
 The launcher does not modify normal OpenCode config. It generates an
 `OPENCODE_CONFIG_CONTENT` overlay, loads project-owned orchestration skills from
 the shared `.agents/skills/` root, and does not generate default skills. The
@@ -167,8 +173,8 @@ This keeps personal model preferences out of git and reusable across
 repositories. OpenCode can start before that file exists so you can discuss the
 profile aliases you need. The supervisor may write this profiles manifest when you
 ask it to configure profiles, but it cannot write other config, source, docs,
-normal skills, secrets, commits, pull requests, or external services. It must
-not start worker runs until the profiles manifest validates.
+normal skills, secrets, commits, pull requests, run bash, or mutate external
+services. It must not start worker runs until the profiles manifest validates.
 
 Example:
 

@@ -81,7 +81,7 @@ function orchestrationPermission(targetCwd: string, skillRoot: string, manifestP
     websearch: 'deny',
     task: 'deny',
     external_directory: profileManifestExternalDirectoryPermission(manifestPath),
-    bash: readOnlyGitBashPermission(),
+    bash: 'deny',
     'agent-orchestrator_*': 'allow',
     'github_*': 'deny',
     'gh_*': 'deny',
@@ -126,18 +126,6 @@ function setupPermissionPaths(
   return Array.from(new Set(paths));
 }
 
-function readOnlyGitBashPermission(): Record<string, string> {
-  return {
-    '*': 'deny',
-    'git status*': 'allow',
-    'git diff*': 'allow',
-    'git log*': 'allow',
-    'git rev-parse*': 'allow',
-    'git branch*': 'allow',
-    pwd: 'allow',
-  };
-}
-
 function orchestrationPrompt(input: OpenCodeHarnessConfigInput): string {
   return [
     'You are the Agent Orchestrator supervisor.',
@@ -148,6 +136,7 @@ function orchestrationPrompt(input: OpenCodeHarnessConfigInput): string {
     '- Do not directly edit, write, patch, todowrite, commit, push, publish, create pull requests, or mutate external services except for the writable profiles manifest and orchestrate-* skill SKILL.md files under the shared skill root.',
     '- Direct file edits are allowed only for the writable profiles manifest path and SKILL.md files under the shared skill root.',
     '- Source, docs, package metadata, MCP configs, secrets, commits, pull requests, publishing, and external-service writes must not be done directly from this supervisor.',
+    '- Direct bash/shell execution is disabled. Use read/list/glob/grep and agent-orchestrator MCP tools for supervisor context, or delegate shell inspection to workers.',
     '- Start worker runs either by live profile alias or by direct backend/model settings only when the user explicitly asks for a direct override or profile setup is broken.',
     '- Prefer start_run with profile plus profiles_file so the daemon reads and validates the current profiles manifest at worker-start time.',
     '- Use the target workspace as the default cwd for worker runs unless the user explicitly chooses another workspace.',

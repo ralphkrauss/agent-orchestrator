@@ -89,7 +89,7 @@ describe('OpenCode orchestration harness', () => {
       '/repo/.agents/orchestration/profiles.json': 'allow',
       '/repo/.agents/orchestration/*': 'allow',
     });
-    assert.equal(Object.keys(agent.permission.bash as Record<string, string>)[0], '*');
+    assert.equal(agent.permission.bash, 'deny');
     assert.match(agent.prompt, /Target workspace: \/repo/);
     assert.match(agent.prompt, /Shared skill root relative to workspace: \.agents\/skills/);
     assert.match(agent.prompt, /Profiles manifest status:\n- valid/);
@@ -98,6 +98,7 @@ describe('OpenCode orchestration harness', () => {
     assert.match(agent.prompt, /Writable profiles manifest path: \/repo\/\.agents\/orchestration\/profiles\.json/);
     assert.match(agent.prompt, /start_run with profile plus profiles_file/);
     assert.match(agent.prompt, /must reference profile aliases, not raw model names/);
+    assert.match(agent.prompt, /Direct bash\/shell execution is disabled/);
   });
 
   it('builds a supervisor config that can explain missing profile setup', () => {
@@ -229,10 +230,24 @@ describe('OpenCode orchestration harness', () => {
 
     assert.equal(parsed.ok, true);
     assert.equal(parsed.ok && parsed.value.cwd, resolve('/tmp/repo'));
+    assert.equal(parsed.ok && parsed.value.profilesFile, resolve('/tmp/repo/profiles.json'));
     assert.equal(parsed.ok && parsed.value.manifestPath, resolve('/tmp/repo/profiles.json'));
     assert.equal(parsed.ok && parsed.value.skillsPath, resolve('/tmp/repo/.agents/skills'));
     assert.equal(parsed.ok && parsed.value.orchestratorModel, 'openai/gpt-5.5');
     assert.deepStrictEqual(parsed.ok && parsed.value.opencodeArgs, ['run', 'configure profiles']);
+  });
+
+  it('treats --manifest as a true profiles-file alias', () => {
+    const parsed = parseOpenCodeLauncherArgs([
+      '--manifest',
+      'cli-profiles.json',
+    ], {
+      AGENT_ORCHESTRATOR_OPENCODE_PROFILES_FILE: '/env/profiles.json',
+    }, '/tmp/workspace');
+
+    assert.equal(parsed.ok, true);
+    assert.equal(parsed.ok && parsed.value.profilesFile, '/tmp/workspace/cli-profiles.json');
+    assert.equal(parsed.ok && parsed.value.manifestPath, '/tmp/workspace/cli-profiles.json');
   });
 
   it('defaults profiles to the user config directory', () => {
@@ -260,6 +275,39 @@ describe('OpenCode orchestration harness', () => {
 
       assert.equal(code, 1);
       assert.match(stderr.value(), /Invalid --profiles-json/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects unsafe or non-session OpenCode passthrough', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-opencode-passthrough-'));
+    const cases: Array<{ args: string[]; pattern: RegExp }> = [
+      { args: ['mcp', '--help'], pattern: /rejected subcommand mcp/ },
+      { args: ['--agent=build'], pattern: /rejected option --agent=build/ },
+      { args: ['run'], pattern: /requires run to be followed by a positional prompt/ },
+      { args: ['run', '--attach', 'session-id'], pattern: /rejected option --attach/ },
+      { args: ['run', '--dir=/tmp', 'prompt'], pattern: /rejected option --dir=\/tmp/ },
+      { args: ['run', '--dangerously-skip-permissions=true', 'prompt'], pattern: /rejected option --dangerously-skip-permissions=true/ },
+      { args: ['run', '--share', 'prompt'], pattern: /rejected option --share/ },
+      { args: ['run', '--command', 'test'], pattern: /rejected option --command/ },
+      { args: ['run', '--session', 'ses_123', 'prompt'], pattern: /rejected option --session/ },
+      { args: ['run', '--file', 'secret.txt', 'prompt'], pattern: /rejected option --file/ },
+    ];
+
+    try {
+      for (const testCase of cases) {
+        const stdout = captureStream();
+        const stderr = captureStream();
+        const code = await runOpenCodeLauncher(['--cwd', root, '--print-config', '--', ...testCase.args], {
+          stdout: stdout.stream,
+          stderr: stderr.stream,
+          env: process.env,
+        });
+
+        assert.equal(code, 1, testCase.args.join(' '));
+        assert.match(stderr.value(), testCase.pattern);
+      }
     } finally {
       await rm(root, { recursive: true, force: true });
     }
