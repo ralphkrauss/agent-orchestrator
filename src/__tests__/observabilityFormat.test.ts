@@ -70,12 +70,12 @@ describe('observability CLI formatting', () => {
       { reasoning_effort: 'xhigh', service_tier: 'fast', mode: null },
     ];
     session.workspace = {
-      cwd: '/tmp/worktrees-agent-orchestrator-mcp/4-add-observability',
-      repository_root: '/tmp/worktrees-agent-orchestrator-mcp/4-add-observability',
-      repository_name: 'agent-orchestrator-mcp',
+      cwd: '/tmp/worktrees-agent-orchestrator/4-add-observability',
+      repository_root: '/tmp/worktrees-agent-orchestrator/4-add-observability',
+      repository_name: 'agent-orchestrator',
       branch: '4-add-observability',
       dirty_count: 3,
-      label: 'agent-orchestrator-mcp:4-add-observability*',
+      label: 'agent-orchestrator:4-add-observability*',
     };
     session.prompts.push({
       run_id: 'run-2',
@@ -90,7 +90,7 @@ describe('observability CLI formatting', () => {
     });
 
     const sessions = stripAnsi(renderDashboard(envelope, { view: 'sessions', selectedSession: 0, selectedPrompt: 0 }, 160, 40));
-    assert.match(sessions, /> codex\s+running\s+2\s+gpt-5\.5\s+xhigh\s+fast\s+ao-mcp:4-add-observability\*\s+Terminal dashboard/);
+    assert.match(sessions, /> codex\s+running\s+2\s+gpt-5\.5\s+xhigh\s+fast\s+a-orchestrator:4-add-observabi\.\*\s+Terminal dashboard/);
     assert.doesNotMatch(sessions, /gpt-5\.2 \+1/);
 
     const prompts = stripAnsi(renderDashboard(envelope, { view: 'prompts', selectedSession: 0, selectedPrompt: 0 }, 160, 40));

@@ -166,7 +166,7 @@ Existing architecture already has durable run metadata, event logs, stdout/stder
 ### OBS-6: Add interactive terminal dashboard mode
 
 - **Status:** implemented; verified
-- **Evidence:** Added `agent-orchestrator-mcp-daemon watch` with periodic snapshot polling, raw-mode arrow navigation, Enter detail drill-down, Backspace/Escape return, `q` exit, and non-TTY fallback.
+- **Evidence:** Added `agent-orchestrator-daemon watch` with periodic snapshot polling, raw-mode arrow navigation, Enter detail drill-down, Backspace/Escape return, `q` exit, and non-TTY fallback.
 - **Notes:** Implementation uses Node built-ins and ANSI output only.
 
 ### OBS-7: Update docs and examples
@@ -184,5 +184,5 @@ Existing architecture already has durable run metadata, event logs, stdout/stder
 ### OBS-9: Verify affected checks
 
 - **Status:** complete
-- **Evidence:** `pnpm build` passed. `pnpm test` passed with 52 tests across 14 suites. `git diff --check` passed.
+- **Evidence:** `pnpm build` passed. `pnpm test` passed with 70 tests total, 69 passed and 1 skipped. `git diff --check` passed.
 - **Notes:** Hardening pass addressed prompt creation atomicity, event-summary refresh cost, MCP tool registration tests, CLI formatter tests, full prompt history counts under limited snapshots, and observed model mismatch warnings.

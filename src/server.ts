@@ -20,7 +20,7 @@ const paths = daemonPaths();
 const client = new IpcClient(paths.ipc.path);
 
 const server = new Server(
-  { name: 'agent-orchestrator-mcp', version: getPackageVersion() },
+  { name: 'agent-orchestrator', version: getPackageVersion() },
   { capabilities: { tools: {} } },
 );
 

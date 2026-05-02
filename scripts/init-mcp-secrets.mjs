@@ -3,7 +3,7 @@
  * Initialize the optional user-level MCP secret file.
  *
  * Target file:
- *   ~/.config/agent-orchestrator-mcp/mcp-secrets.env
+ *   ~/.config/agent-orchestrator/mcp-secrets.env
  *
  * The MCP bridge can also use process env or `gh auth token`, so this file is
  * a convenience for explicit local configuration rather than a requirement.
@@ -13,15 +13,15 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "n
 import { dirname, join, resolve } from "node:path";
 import os from "node:os";
 
-const defaultTargetPath = join(os.homedir(), ".config", "agent-orchestrator-mcp", "mcp-secrets.env");
+const defaultTargetPath = join(os.homedir(), ".config", "agent-orchestrator", "mcp-secrets.env");
 
-const templateText = `# Shared MCP secret contract for agent-orchestrator-mcp.
+const templateText = `# Shared MCP secret contract for agent-orchestrator.
 #
 # This file lives outside the repo so one developer-owned copy works across
 # worktrees, tools, and fresh clones.
 #
 # Target path:
-#   ~/.config/agent-orchestrator-mcp/mcp-secrets.env
+#   ~/.config/agent-orchestrator/mcp-secrets.env
 #
 # Secret-bearing MCP servers read this path through
 # scripts/mcp-secret-bridge.mjs. Non-blank values here override process env for

@@ -91,7 +91,7 @@ export async function getBackendStatus(options: BackendStatusOptions = {}): Prom
 
 export function formatBackendStatus(report: BackendStatusReport): string {
   const lines: string[] = [
-    'Agent Orchestrator MCP diagnostics',
+    'Agent Orchestrator diagnostics',
     '',
     `Frontend version: ${report.frontend_version}`,
     `Daemon version: ${report.daemon_version ?? 'not connected'}`,

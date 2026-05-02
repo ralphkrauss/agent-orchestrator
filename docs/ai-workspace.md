@@ -89,7 +89,7 @@ just worktree-prune
 Worktrees are created under:
 
 ```text
-~/worktrees-agent-orchestrator-mcp/
+~/worktrees-agent-orchestrator/
 ```
 
 `just worktree <branch>` attaches an existing local or remote branch when one

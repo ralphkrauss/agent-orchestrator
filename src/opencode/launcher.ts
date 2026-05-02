@@ -192,7 +192,7 @@ export function openCodeLauncherHelp(): string {
 
 Usage:
   agent-orchestrator-opencode [options] [-- <opencode args>]
-  agent-orchestrator-mcp opencode [options] [-- <opencode args>]
+  agent-orchestrator opencode [options] [-- <opencode args>]
 
 Options:
   --cwd <path>                         Target workspace. Defaults to current directory.

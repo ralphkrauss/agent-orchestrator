@@ -18,8 +18,8 @@ import { basename, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { createInterface } from "node:readline";
 
-const REPO_NAME = "agent-orchestrator-mcp";
-const WORKTREE_BASE = join(homedir(), "worktrees-agent-orchestrator-mcp");
+const REPO_NAME = "agent-orchestrator";
+const WORKTREE_BASE = join(homedir(), "worktrees-agent-orchestrator");
 const MAIN_BRANCH = "main";
 
 function git(args, opts = {}) {

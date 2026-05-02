@@ -22,7 +22,7 @@ describe('daemon IPC endpoint paths', () => {
     const other = daemonIpcEndpoint('C:\\Users\\agent\\other-store', 'win32');
 
     assert.equal(first.transport, 'windows_pipe');
-    assert.match(first.path, /^\\\\\.\\pipe\\agent-orchestrator-mcp-[a-f0-9]{16}$/);
+    assert.match(first.path, /^\\\\\.\\pipe\\agent-orchestrator-[a-f0-9]{16}$/);
     assert.equal(first.cleanupPath, null);
     assert.equal(second.path, first.path);
     assert.notEqual(other.path, first.path);

@@ -1,4 +1,4 @@
-# Agent Orchestrator MCP - Claude Guide
+# Agent Orchestrator - Claude Guide
 
 @AGENTS.md
 

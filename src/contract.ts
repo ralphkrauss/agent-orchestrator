@@ -190,8 +190,8 @@ const defaultRunModelSettings = {
 };
 
 export const RunModelSettingsSchema = z.object({
-  reasoning_effort: z.string().nullable().optional().default(null),
-  service_tier: z.string().nullable().optional().default(null),
+  reasoning_effort: ReasoningEffortSchema.nullable().optional().default(null),
+  service_tier: ServiceTierSchema.nullable().optional().default(null),
   mode: z.string().nullable().optional().default(null),
 }).default(defaultRunModelSettings);
 export type RunModelSettings = z.infer<typeof RunModelSettingsSchema>;
@@ -535,7 +535,7 @@ export function orchestratorError(
 }
 
 export const DAEMON_VERSION_MISMATCH_RECOVERY_HINT =
-  'Restart the daemon so it picks up the current package build: agent-orchestrator-mcp-daemon restart';
+  'Restart the daemon so it picks up the current package build: agent-orchestrator-daemon restart';
 
 export function daemonVersionMismatchError(input: {
   frontendVersion: string | null;

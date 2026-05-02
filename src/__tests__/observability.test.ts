@@ -207,12 +207,12 @@ describe('observability snapshot builder', () => {
     const store = new RunStore(root);
     await store.createRun({
       backend: 'codex',
-      cwd: '/tmp/worktrees-agent-orchestrator-mcp/4-add-observability',
+      cwd: '/tmp/worktrees-agent-orchestrator/4-add-observability',
       prompt: 'Show the workspace label.',
       git_snapshot_status: 'captured',
       git_snapshot: {
         sha: '0123456789abcdef0123456789abcdef01234567',
-        root: '/tmp/worktrees-agent-orchestrator-mcp/4-add-observability',
+        root: '/tmp/worktrees-agent-orchestrator/4-add-observability',
         branch: '4-add-observability',
         dirty_count: 2,
         dirty: ['src/observability.ts', 'src/daemon/observabilityFormat.ts'],
@@ -228,7 +228,7 @@ describe('observability snapshot builder', () => {
       backendStatus: null,
     });
 
-    assert.equal(snapshot.sessions[0]?.workspace.repository_name, 'agent-orchestrator-mcp');
-    assert.equal(snapshot.sessions[0]?.workspace.label, 'agent-orchestrator-mcp:4-add-observability*');
+    assert.equal(snapshot.sessions[0]?.workspace.repository_name, 'agent-orchestrator');
+    assert.equal(snapshot.sessions[0]?.workspace.label, 'agent-orchestrator:4-add-observability*');
   });
 });
