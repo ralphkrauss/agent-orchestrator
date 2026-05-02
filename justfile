@@ -48,9 +48,17 @@ orchestrator-help: orchestrator-build
 orchestrator-doctor: orchestrator-build
     node dist/cli.js doctor
 
-# Show the current daemon status.
-orchestrator-status: orchestrator-build
-    node dist/daemonCli.js status
+# Show the current daemon status. Pass --verbose or --json for observability output.
+orchestrator-status *args: orchestrator-build
+    node dist/daemonCli.js status {{args}}
+
+# Show session and run observability output.
+orchestrator-runs *args: orchestrator-build
+    node dist/daemonCli.js runs {{args}}
+
+# Open the interactive terminal observability dashboard.
+orchestrator-watch *args: orchestrator-build
+    node dist/daemonCli.js watch {{args}}
 
 # Explicitly start the daemon. MCP clients also auto-start it via node dist/cli.js.
 orchestrator-start: orchestrator-build

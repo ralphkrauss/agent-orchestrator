@@ -3,10 +3,12 @@ import { constants } from 'node:fs';
 import {
   BackendSchema,
   CancelRunInputSchema,
+  GetObservabilitySnapshotInputSchema,
   GetRunEventsInputSchema,
   isTerminalStatus,
   orchestratorError,
   PruneRunsInputSchema,
+  ReasoningEffortSchema,
   RunIdInputSchema,
   SendFollowupInputSchema,
   ShutdownInputSchema,
@@ -15,8 +17,13 @@ import {
   wrapErr,
   wrapOk,
   type Backend,
+  type RunDisplayMetadata,
+  type ReasoningEffort,
+  type ModelSource,
   type OrchestratorError,
   type RunStatus,
+  type RunModelSettings,
+  type ServiceTier,
   type ToolResponse,
   type WorkerResult,
 } from './contract.js';
@@ -24,6 +31,7 @@ import type { WorkerBackend } from './backend/WorkerBackend.js';
 import { resolveBinary } from './backend/common.js';
 import { getBackendStatus } from './diagnostics.js';
 import { captureGitSnapshot } from './gitSnapshot.js';
+import { buildObservabilitySnapshot } from './observability.js';
 import { getPackageVersion } from './packageMetadata.js';
 import { ProcessManager, type ManagedRun } from './processManager.js';
 import { RunStore } from './runStore.js';
@@ -98,6 +106,8 @@ export class OrchestratorService {
             daemonPid: process.pid,
           }),
         });
+      case 'get_observability_snapshot':
+        return this.getObservabilitySnapshot(params, context);
       default:
         return wrapErr(orchestratorError('INVALID_INPUT', `Unknown method: ${method}`));
     }
@@ -111,17 +121,23 @@ export class OrchestratorService {
     if (!backend) return wrapErr(orchestratorError('BACKEND_NOT_FOUND', `Backend not found: ${input.backend}`));
     const timeout = this.resolveExecutionTimeout(input.execution_timeout_seconds);
     if (!timeout.ok) return wrapErr(timeout.error);
+    const settings = modelSettingsForBackend(input.backend, input.model ?? null, input.reasoning_effort, input.service_tier);
+    if (!settings.ok) return wrapErr(settings.error);
 
     const meta = await this.store.createRun({
       backend: input.backend,
       cwd: input.cwd,
+      prompt: input.prompt,
       model: input.model ?? null,
+      model_source: input.model ? 'explicit' : 'backend_default',
+      model_settings: settings.value,
+      display: displayMetadata(input.metadata, input.prompt),
       metadata: input.metadata,
       execution_timeout_seconds: timeout.value,
     });
     await this.captureAndPersistGitSnapshot(meta.run_id, input.cwd);
 
-    await this.startManagedRun(meta.run_id, backend, input.prompt, input.cwd, timeout.value, undefined, input.model);
+    await this.startManagedRun(meta.run_id, backend, input.prompt, input.cwd, timeout.value, settings.value, undefined, input.model);
     return wrapOk({ run_id: meta.run_id });
   }
 
@@ -133,7 +149,8 @@ export class OrchestratorService {
     if (!isTerminalStatus(parent.meta.status)) {
       return wrapErr(orchestratorError('INVALID_STATE', 'Cannot send follow-up while parent run is still running'));
     }
-    if (!parent.meta.session_id) {
+    const resumeSessionId = parent.meta.observed_session_id ?? parent.meta.session_id;
+    if (!resumeSessionId) {
       return wrapErr(orchestratorError('INVALID_STATE', 'Cannot send follow-up because parent run has no backend session id'));
     }
 
@@ -143,19 +160,32 @@ export class OrchestratorService {
     const timeout = this.resolveExecutionTimeout(parsed.data.execution_timeout_seconds);
     if (!timeout.ok) return wrapErr(timeout.error);
     const model = parsed.data.model ?? parent.meta.model;
+    const metadata = { ...parent.meta.metadata, ...parsed.data.metadata };
+    const modelSource: ModelSource = parsed.data.model ? 'explicit' : parent.meta.model ? 'inherited' : 'backend_default';
+    const settings = hasModelSettingsInput(parsed.data)
+      ? modelSettingsForBackend(backendName, model, parsed.data.reasoning_effort, parsed.data.service_tier)
+      : parsed.data.model
+        ? validateInheritedModelSettingsForBackend(backendName, model, parent.meta.model_settings)
+        : { ok: true as const, value: parent.meta.model_settings };
+    if (!settings.ok) return wrapErr(settings.error);
 
     const meta = await this.store.createRun({
       backend: backendName,
       cwd: parent.meta.cwd,
+      prompt: parsed.data.prompt,
       parent_run_id: parent.meta.run_id,
-      session_id: parent.meta.session_id,
+      session_id: resumeSessionId,
+      requested_session_id: resumeSessionId,
       model,
-      metadata: parent.meta.metadata,
+      model_source: modelSource,
+      model_settings: settings.value,
+      display: displayMetadata(parsed.data.metadata, parsed.data.prompt, parent.meta.display),
+      metadata,
       execution_timeout_seconds: timeout.value,
     });
     await this.captureAndPersistGitSnapshot(meta.run_id, parent.meta.cwd);
 
-    await this.startManagedRun(meta.run_id, backend, parsed.data.prompt, parent.meta.cwd, timeout.value, parent.meta.session_id, model);
+    await this.startManagedRun(meta.run_id, backend, parsed.data.prompt, parent.meta.cwd, timeout.value, settings.value, resumeSessionId, model);
     return wrapOk({ run_id: meta.run_id });
   }
 
@@ -242,12 +272,31 @@ export class OrchestratorService {
     return wrapOk(await this.store.pruneTerminalRuns(parsed.data.older_than_days, parsed.data.dry_run));
   }
 
+  async getObservabilitySnapshot(params: unknown, context: OrchestratorDispatchContext = {}): Promise<ToolResult> {
+    const parsed = GetObservabilitySnapshotInputSchema.safeParse(params);
+    if (!parsed.success) return invalidInput(parsed.error.message);
+    return wrapOk({
+      snapshot: await buildObservabilitySnapshot(this.store, {
+        limit: parsed.data.limit,
+        includePrompts: parsed.data.include_prompts,
+        recentEventLimit: parsed.data.recent_event_limit,
+        daemonPid: process.pid,
+        backendStatus: parsed.data.diagnostics ? await getBackendStatus({
+          frontendVersion: context.frontend_version ?? getPackageVersion(),
+          daemonVersion: getPackageVersion(),
+          daemonPid: process.pid,
+        }) : null,
+      }),
+    });
+  }
+
   private async startManagedRun(
     runId: string,
     backend: WorkerBackend,
     prompt: string,
     cwd: string,
     timeoutSeconds: number,
+    modelSettings: RunModelSettings,
     sessionId?: string,
     model?: string | null,
   ): Promise<void> {
@@ -266,8 +315,8 @@ export class OrchestratorService {
 
     try {
       const invocation = sessionId
-        ? await backend.resume(sessionId, { prompt, cwd, model })
-        : await backend.start({ prompt, cwd, model });
+        ? await backend.resume(sessionId, { prompt, cwd, model, modelSettings })
+        : await backend.start({ prompt, cwd, model, modelSettings });
       invocation.command = binary;
       const managed = await this.processManager.start(runId, backend, invocation);
       this.activeRuns.set(runId, managed);
@@ -379,8 +428,138 @@ function unknownRun(runId: string): ToolResult {
   return wrapErr(orchestratorError('UNKNOWN_RUN', `Unknown run: ${runId}`));
 }
 
+function hasModelSettingsInput(input: { reasoning_effort?: ReasoningEffort; service_tier?: ServiceTier }): boolean {
+  return input.reasoning_effort !== undefined || input.service_tier !== undefined;
+}
+
+function modelSettingsForBackend(
+  backend: Backend,
+  model: string | null | undefined,
+  reasoningEffort: ReasoningEffort | undefined,
+  serviceTier: ServiceTier | undefined,
+): { ok: true; value: RunModelSettings } | { ok: false; error: OrchestratorError } {
+  if (backend === 'codex') {
+    if (reasoningEffort === 'max') {
+      return { ok: false, error: orchestratorError('INVALID_INPUT', 'Codex reasoning_effort must be one of none, minimal, low, medium, high, or xhigh') };
+    }
+    return {
+      ok: true,
+      value: {
+        reasoning_effort: reasoningEffort ?? null,
+        service_tier: serviceTier && serviceTier !== 'normal' ? serviceTier : null,
+        mode: serviceTier === 'normal' ? 'normal' : null,
+      },
+    };
+  }
+
+  if (reasoningEffort === 'none' || reasoningEffort === 'minimal') {
+    return { ok: false, error: orchestratorError('INVALID_INPUT', 'Claude reasoning_effort must be one of low, medium, high, xhigh, or max') };
+  }
+  if (serviceTier !== undefined) {
+    return { ok: false, error: orchestratorError('INVALID_INPUT', 'Claude does not support service_tier; set reasoning_effort and model only') };
+  }
+  const claudeModelError = validateClaudeModelAndEffort(model, reasoningEffort);
+  if (claudeModelError) return { ok: false, error: claudeModelError };
+  return {
+    ok: true,
+    value: {
+      reasoning_effort: reasoningEffort ?? null,
+      service_tier: null,
+      mode: null,
+    },
+  };
+}
+
+function validateClaudeModelAndEffort(model: string | null | undefined, reasoningEffort: ReasoningEffort | undefined): OrchestratorError | null {
+  const normalized = normalizeClaudeModel(model);
+  if (normalized && isClaudeAlias(normalized)) {
+    return orchestratorError('INVALID_INPUT', 'Claude model must be a direct model id such as claude-opus-4-7 or claude-opus-4-7[1m]; aliases like opus and sonnet can drift');
+  }
+  if (reasoningEffort && !normalized) {
+    return orchestratorError('INVALID_INPUT', 'Claude reasoning_effort requires an explicit direct model id such as claude-opus-4-7 so fallback behavior is visible');
+  }
+  if (reasoningEffort === 'xhigh' && normalized && !isClaudeOpus47(normalized)) {
+    return orchestratorError('INVALID_INPUT', 'Claude xhigh effort requires claude-opus-4-7 or claude-opus-4-7[1m]; other Claude models can fall back to high');
+  }
+  if (reasoningEffort && normalized && isAnthropicClaudeModelId(normalized) && !isKnownClaudeEffortModel(normalized)) {
+    return orchestratorError('INVALID_INPUT', 'Claude effort levels are documented for Opus 4.7, Opus 4.6, and Sonnet 4.6; use one of those direct model ids');
+  }
+  return null;
+}
+
+function validateInheritedModelSettingsForBackend(
+  backend: Backend,
+  model: string | null | undefined,
+  settings: RunModelSettings,
+): { ok: true; value: RunModelSettings } | { ok: false; error: OrchestratorError } {
+  if (backend !== 'claude') return { ok: true, value: settings };
+  const reasoningEffort = parseReasoningEffort(settings.reasoning_effort);
+  const error = validateClaudeModelAndEffort(model, reasoningEffort);
+  return error ? { ok: false, error } : { ok: true, value: settings };
+}
+
+function parseReasoningEffort(value: string | null | undefined): ReasoningEffort | undefined {
+  const parsed = value ? ReasoningEffortSchema.safeParse(value) : null;
+  return parsed?.success ? parsed.data : undefined;
+}
+
+function normalizeClaudeModel(model: string | null | undefined): string | null {
+  const value = model?.trim().toLowerCase();
+  return value ? value.replace(/\[1m\]$/, '') : null;
+}
+
+function isClaudeAlias(model: string): boolean {
+  return model === 'default'
+    || model === 'best'
+    || model === 'opus'
+    || model === 'sonnet'
+    || model === 'haiku'
+    || model === 'opusplan';
+}
+
+function isClaudeOpus47(model: string): boolean {
+  return model.includes('claude-opus-4-7');
+}
+
+function isKnownClaudeEffortModel(model: string): boolean {
+  return model.includes('claude-opus-4-7')
+    || model.includes('claude-opus-4-6')
+    || model.includes('claude-sonnet-4-6');
+}
+
+function isAnthropicClaudeModelId(model: string): boolean {
+  return model.startsWith('claude-') || model.includes('.claude-');
+}
+
 function positiveInt(value: unknown): number | null {
   return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : null;
+}
+
+function displayMetadata(
+  metadata: Record<string, unknown>,
+  prompt: string,
+  parent?: RunDisplayMetadata,
+): RunDisplayMetadata {
+  const promptFallback = promptTitleFromPrompt(prompt);
+  return {
+    session_title: metadataString(metadata, 'session_title') ?? parent?.session_title ?? metadataString(metadata, 'title') ?? promptFallback,
+    session_summary: metadataString(metadata, 'session_summary') ?? parent?.session_summary ?? metadataString(metadata, 'summary'),
+    prompt_title: metadataString(metadata, 'prompt_title') ?? metadataString(metadata, 'title') ?? promptFallback,
+    prompt_summary: metadataString(metadata, 'prompt_summary') ?? metadataString(metadata, 'summary'),
+  };
+}
+
+function metadataString(metadata: Record<string, unknown>, key: string): string | null {
+  const value = metadata[key];
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
+function promptTitleFromPrompt(prompt: string): string {
+  const firstLine = prompt.split(/\r?\n/, 1)[0]?.trim() ?? '';
+  if (!firstLine) return 'Untitled prompt';
+  return firstLine.length > 80 ? `${firstLine.slice(0, 77)}...` : firstLine;
 }
 
 function scheduleProcessExit(): void {

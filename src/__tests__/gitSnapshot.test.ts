@@ -64,6 +64,8 @@ process.exit(1);
     const capture = await captureGitSnapshot(repo);
     assert.equal(capture.status, 'captured');
     assert.ok(capture.snapshot);
+    assert.equal(capture.snapshot.root, repo);
+    assert.equal(capture.snapshot.branch, (await execFileAsync('git', ['branch', '--show-current'], { cwd: repo })).stdout.trim() || null);
 
     await writeFile(join(repo, 'tracked.txt'), 'dirty after\n');
     await writeFile(join(repo, 'untracked.txt'), 'untracked after\n');

@@ -6,11 +6,11 @@ export class ClaudeBackend extends BaseBackend {
   readonly binary = 'claude';
 
   async start(input: BackendStartInput): Promise<WorkerInvocation> {
-    return invocation(this.binary, ['-p', '--output-format', 'stream-json', '--verbose', ...modelArgs(input.model)], input);
+    return invocation(this.binary, ['-p', '--output-format', 'stream-json', '--verbose', ...modelArgs(input.model), ...modelSettingsArgs(input.modelSettings)], input);
   }
 
   async resume(sessionId: string, input: BackendStartInput): Promise<WorkerInvocation> {
-    return invocation(this.binary, ['-p', '--resume', sessionId, '--output-format', 'stream-json', '--verbose', ...modelArgs(input.model)], input);
+    return invocation(this.binary, ['-p', '--resume', sessionId, '--output-format', 'stream-json', '--verbose', ...modelArgs(input.model), ...modelSettingsArgs(input.modelSettings)], input);
   }
 
   parseEvent(raw: unknown): ParsedBackendEvent {
@@ -75,4 +75,8 @@ export class ClaudeBackend extends BaseBackend {
 
 function modelArgs(model: string | null | undefined): string[] {
   return model ? ['--model', model] : [];
+}
+
+function modelSettingsArgs(settings: BackendStartInput['modelSettings']): string[] {
+  return settings.reasoning_effort ? ['--effort', settings.reasoning_effort] : [];
 }

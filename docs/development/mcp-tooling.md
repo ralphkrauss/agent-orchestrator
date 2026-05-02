@@ -147,6 +147,9 @@ socket on POSIX and a named pipe on Windows. For manual lifecycle checks, use:
 ```bash
 just orchestrator-doctor
 just orchestrator-status
+just orchestrator-status --verbose
+just orchestrator-runs
+just orchestrator-watch
 just orchestrator-start
 just orchestrator-restart
 just orchestrator-stop

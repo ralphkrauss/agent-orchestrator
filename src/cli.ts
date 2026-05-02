@@ -23,6 +23,10 @@ Usage:
 
 Daemon lifecycle:
   agent-orchestrator-mcp-daemon status
+  agent-orchestrator-mcp-daemon status --verbose
+  agent-orchestrator-mcp-daemon status --json
+  agent-orchestrator-mcp-daemon runs [--json] [--prompts]
+  agent-orchestrator-mcp-daemon watch [--interval-ms <ms>] [--limit <n>]
   agent-orchestrator-mcp-daemon start
   agent-orchestrator-mcp-daemon stop [--force]
   agent-orchestrator-mcp-daemon restart [--force]

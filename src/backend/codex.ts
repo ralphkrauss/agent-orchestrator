@@ -10,9 +10,11 @@ export class CodexBackend extends BaseBackend {
       'exec',
       '--json',
       '--skip-git-repo-check',
+      ...userConfigArgs(input.modelSettings),
       '--cd',
       input.cwd,
       ...modelArgs(input.model),
+      ...modelSettingsArgs(input.modelSettings),
       '-',
     ], input);
   }
@@ -23,7 +25,9 @@ export class CodexBackend extends BaseBackend {
       'resume',
       '--json',
       '--skip-git-repo-check',
+      ...userConfigArgs(input.modelSettings),
       ...modelArgs(input.model),
+      ...modelSettingsArgs(input.modelSettings),
       sessionId,
       '-',
     ], input);
@@ -133,4 +137,19 @@ export class CodexBackend extends BaseBackend {
 
 function modelArgs(model: string | null | undefined): string[] {
   return model ? ['--model', model] : [];
+}
+
+function userConfigArgs(settings: BackendStartInput['modelSettings']): string[] {
+  return settings.mode === 'normal' ? ['--ignore-user-config'] : [];
+}
+
+function modelSettingsArgs(settings: BackendStartInput['modelSettings']): string[] {
+  const args: string[] = [];
+  if (settings.reasoning_effort) {
+    args.push('-c', `model_reasoning_effort="${settings.reasoning_effort}"`);
+  }
+  if (settings.service_tier) {
+    args.push('-c', `service_tier="${settings.service_tier}"`);
+  }
+  return args;
 }

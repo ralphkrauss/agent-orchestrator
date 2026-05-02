@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { BackendStatusReportSchema, WorkerResultSchema, RunSummarySchema, wrapErr, wrapOk, orchestratorError } from '../contract.js';
+import { BackendStatusReportSchema, ObservabilitySnapshotSchema, WorkerResultSchema, RunSummarySchema, wrapErr, wrapOk, orchestratorError } from '../contract.js';
 import { deriveObservedResult } from '../backend/resultDerivation.js';
 
 describe('contract schemas and envelopes', () => {
@@ -91,6 +91,132 @@ describe('contract schemas and envelopes', () => {
       metadata: {},
     });
     assert.equal(parsed.model, null);
+    assert.equal(parsed.model_source, 'legacy_unknown');
+    assert.deepStrictEqual(parsed.model_settings, { reasoning_effort: null, service_tier: null, mode: null });
+    assert.equal(parsed.worker_invocation, null);
+    assert.equal(parsed.requested_session_id, null);
+    assert.equal(parsed.observed_session_id, null);
+    assert.equal(parsed.observed_model, null);
+    assert.deepStrictEqual(parsed.display, {
+      session_title: null,
+      session_summary: null,
+      prompt_title: null,
+      prompt_summary: null,
+    });
+  });
+
+  it('accepts observability snapshots', () => {
+    ObservabilitySnapshotSchema.parse({
+      generated_at: new Date().toISOString(),
+      daemon_pid: 123,
+      store_root: '/tmp/store',
+      backend_status: null,
+      sessions: [{
+        session_key: 'codex:session-1',
+        session_id: 'session-1',
+        root_run_id: 'run-1',
+        backend: 'codex',
+        cwd: '/tmp/repo',
+        workspace: {
+          cwd: '/tmp/repo',
+          repository_root: '/tmp/repo',
+          repository_name: 'repo',
+          branch: 'main',
+          dirty_count: 0,
+          label: 'repo:main',
+        },
+        title: 'Implement feature',
+        summary: 'working on observability',
+        status: 'running',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        run_count: 1,
+        running_count: 1,
+        models: [{ name: 'gpt-5.2', source: 'explicit' }],
+        settings: [{ reasoning_effort: 'xhigh', service_tier: 'fast', mode: null }],
+        warnings: [],
+        prompts: [{
+          run_id: 'run-1',
+          status: 'running',
+          title: 'Implement feature',
+          summary: 'working on observability',
+          preview: 'raw prompt preview',
+          model: { name: 'gpt-5.2', source: 'explicit' },
+          settings: { reasoning_effort: 'xhigh', service_tier: 'fast', mode: null },
+          created_at: new Date().toISOString(),
+          last_activity_at: null,
+        }],
+      }],
+      runs: [{
+        run: {
+          run_id: 'run-1',
+          backend: 'codex',
+          status: 'running',
+          parent_run_id: null,
+          session_id: 'session-1',
+          model: 'gpt-5.2',
+          model_source: 'explicit',
+          requested_session_id: null,
+          observed_session_id: 'session-1',
+          observed_model: 'gpt-5.2',
+          display: {
+            session_title: 'Implement feature',
+            session_summary: 'working on observability',
+            prompt_title: 'Implement feature',
+            prompt_summary: 'working on observability',
+          },
+          cwd: '/tmp/repo',
+          created_at: new Date().toISOString(),
+          started_at: null,
+          finished_at: null,
+          worker_pid: null,
+          worker_pgid: null,
+          daemon_pid_at_spawn: null,
+          worker_invocation: {
+            command: '/usr/local/bin/codex',
+            args: ['exec', '--model', 'gpt-5.2', '-'],
+          },
+          git_snapshot_status: 'not_a_repo',
+          git_snapshot: null,
+          model_settings: { reasoning_effort: 'xhigh', service_tier: 'fast', mode: null },
+          metadata: {},
+        },
+        prompt: {
+          title: 'Implement feature',
+          summary: 'working on observability',
+          preview: 'raw prompt preview',
+          text: null,
+          path: '/tmp/store/runs/run-1/prompt.txt',
+          bytes: 18,
+        },
+        response: {
+          status: 'completed',
+          summary: 'Implemented feature',
+          path: '/tmp/store/runs/run-1/result.json',
+          bytes: 120,
+        },
+        model: { name: 'gpt-5.2', source: 'explicit', requested_name: 'gpt-5.2', observed_name: 'gpt-5.2' },
+        settings: { reasoning_effort: 'xhigh', service_tier: 'fast', mode: null },
+        session: {
+          requested_session_id: null,
+          observed_session_id: 'session-1',
+          effective_session_id: 'session-1',
+          status: 'new_session',
+          warnings: [],
+        },
+        activity: {
+          last_event_sequence: 0,
+          last_event_at: null,
+          last_event_type: null,
+          last_interaction_preview: null,
+          event_count: 0,
+          recent_errors: [],
+          recent_events: [],
+        },
+        artifacts: [{ name: 'prompt.txt', path: '/tmp/store/runs/run-1/prompt.txt', exists: true, bytes: 18 }],
+        duration_seconds: null,
+      }],
+    });
   });
 
   it('wraps ok and error envelopes', () => {

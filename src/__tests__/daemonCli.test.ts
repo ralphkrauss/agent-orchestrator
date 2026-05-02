@@ -15,10 +15,13 @@ const cliPath = join(testDir, '..', 'cli.js');
 const daemonCliPath = join(testDir, '..', 'daemonCli.js');
 
 describe('daemon CLI', () => {
-  it('documents restart in the top-level CLI help', async () => {
+  it('documents restart and dashboard commands in the top-level CLI help', async () => {
     const result = await execFileAsync(process.execPath, [cliPath, '--help'], { timeout: 5_000 });
 
     assert.match(result.stdout, /agent-orchestrator-mcp-daemon restart \[--force\]/);
+    assert.match(result.stdout, /agent-orchestrator-mcp-daemon status --json/);
+    assert.match(result.stdout, /agent-orchestrator-mcp-daemon runs \[--json\] \[--prompts\]/);
+    assert.match(result.stdout, /agent-orchestrator-mcp-daemon watch \[--interval-ms <ms>\] \[--limit <n>\]/);
   });
 
   it('restarts a stopped daemon and reports matching versions in status', async () => {
@@ -71,6 +74,20 @@ describe('daemon CLI', () => {
       assert.match(staleStatus.stdout, /daemon_version=0\.0\.0-stale/);
       assert.match(staleStatus.stdout, /version_match=false/);
       assert.match(staleStatus.stdout, /runs=unavailable/);
+
+      const staleRuns = await execFileAsync(process.execPath, [daemonCliPath, 'runs'], { env, timeout: 10_000 });
+      assert.match(staleRuns.stdout, /agent-orchestrator daemon: running pid=/);
+      assert.match(staleRuns.stdout, /error: Frontend package version .* does not match daemon package version 0\.0\.0-stale/);
+      assert.match(staleRuns.stdout, /sessions: 0 runs: 0/);
+
+      const staleVerboseStatus = await execFileAsync(process.execPath, [daemonCliPath, 'status', '--verbose'], { env, timeout: 10_000 });
+      assert.match(staleVerboseStatus.stdout, /agent-orchestrator daemon: running pid=/);
+      assert.match(staleVerboseStatus.stdout, /error: Frontend package version .* does not match daemon package version 0\.0\.0-stale/);
+
+      const staleWatch = await execFileAsync(process.execPath, [daemonCliPath, 'watch'], { env, timeout: 10_000 });
+      assert.match(staleWatch.stdout, /agent-orchestrator daemon: running pid=/);
+      assert.match(staleWatch.stdout, /error: Frontend package version .* does not match daemon package version 0\.0\.0-stale/);
+      assert.match(staleWatch.stdout, /sessions: 0 runs: 0/);
 
       const restart = await execFileAsync(process.execPath, [daemonCliPath, 'restart'], { env, timeout: 10_000 });
       assert.match(restart.stdout, /agent-orchestrator daemon stopping/);
