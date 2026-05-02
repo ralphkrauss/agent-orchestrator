@@ -97,6 +97,16 @@ describe('OpenCode worker capability profiles', () => {
           model: 'claude-sonnet-4-5',
           reasoning_effort: 'high',
         },
+        providerPrefixed: {
+          backend: 'claude',
+          model: 'anthropic/claude-opus-4-7',
+          reasoning_effort: 'xhigh',
+        },
+        padded: {
+          backend: 'claude',
+          model: 'foo-claude-opus-4-7-bar',
+          reasoning_effort: 'xhigh',
+        },
       },
     });
     assert.equal(manifest.ok, true);
@@ -108,6 +118,29 @@ describe('OpenCode worker capability profiles', () => {
 
     assert.equal(result.ok, false);
     assert.ok(!result.ok && result.errors.some((error) => error.includes('Claude effort levels are documented')));
+    assert.ok(!result.ok && result.errors.some((error) => error.includes('profile providerPrefixed: Claude xhigh effort requires claude-opus-4-7')));
+    assert.ok(!result.ok && result.errors.some((error) => error.includes('profile padded: Claude xhigh effort requires claude-opus-4-7')));
+  });
+
+  it('accepts Claude Opus 4.7 one-million-token direct ids for xhigh effort', () => {
+    const manifest = parseWorkerProfileManifest({
+      profiles: {
+        reviewer: {
+          backend: 'claude',
+          model: 'claude-opus-4-7[1m]',
+          reasoning_effort: 'xhigh',
+        },
+      },
+    });
+    assert.equal(manifest.ok, true);
+
+    const result = validateWorkerProfiles(
+      manifest.ok ? manifest.value : assert.fail('manifest parse failed'),
+      createWorkerCapabilityCatalog(),
+    );
+
+    assert.equal(result.ok, true);
+    assert.equal(result.ok && result.value.profiles.reviewer?.model, 'claude-opus-4-7[1m]');
   });
 });
 

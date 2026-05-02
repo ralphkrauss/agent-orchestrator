@@ -1,4 +1,4 @@
-import { dirname, join, relative } from 'node:path';
+import { join, relative } from 'node:path';
 import type { ValidatedWorkerProfiles, WorkerCapabilityCatalog } from './capabilities.js';
 
 export const OPENCODE_ORCHESTRATOR_AGENT = 'agent-orchestrator';
@@ -100,7 +100,6 @@ function profileManifestExternalDirectoryPermission(manifestPath: string): Recor
   return {
     '*': 'deny',
     [manifestPath]: 'allow',
-    [join(dirname(manifestPath), '*')]: 'allow',
   };
 }
 

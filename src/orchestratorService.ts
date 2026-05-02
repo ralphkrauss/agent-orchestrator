@@ -303,7 +303,7 @@ export class OrchestratorService {
     const timeout = this.resolveExecutionTimeout(parsed.data.execution_timeout_seconds);
     if (!timeout.ok) return wrapErr(timeout.error);
     const model = parsed.data.model ?? parent.meta.model;
-    const metadata = { ...parent.meta.metadata, ...parsed.data.metadata };
+    const metadata = metadataForFollowup(parent.meta.metadata, parsed.data.metadata);
     const modelSource: ModelSource = parsed.data.model ? 'explicit' : parent.meta.model ? 'inherited' : 'backend_default';
     const settings = hasModelSettingsInput(parsed.data)
       ? modelSettingsForBackend(backendName, model, parsed.data.reasoning_effort, parsed.data.service_tier)
@@ -610,6 +610,14 @@ function parseProfileModelSettings(
     reasoningEffort: reasoningEffort?.data,
     serviceTier: serviceTier?.data,
   };
+}
+
+function metadataForFollowup(
+  parentMetadata: Record<string, unknown>,
+  childMetadata: Record<string, unknown>,
+): Record<string, unknown> {
+  const { worker_profile: _workerProfile, ...inheritedMetadata } = parentMetadata;
+  return { ...inheritedMetadata, ...childMetadata };
 }
 
 function modelSettingsForBackend(

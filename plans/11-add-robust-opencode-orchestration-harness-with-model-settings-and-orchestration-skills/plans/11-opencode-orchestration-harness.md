@@ -51,8 +51,8 @@ Sources read:
 - `src/__tests__/diagnostics.test.ts`
 - `src/__tests__/workspaceScripts.test.ts`
 - Official OpenCode docs for config, agents, tools, CLI, and `https://opencode.ai/config.json`
-- Local OpenCode session exports `ses_217ef4735ffezhGRxQh6C7Mz1x` and `ses_2181b6efaffeDvlcfxiCODHiKm`
-- Local OpenCode log `~/.local/share/opencode/log/2026-05-02T094135.log`
+- Local OpenCode session exports (redacted)
+- Local OpenCode log `~/.local/share/opencode/log/<redacted>.log`
 
 Current repository shape:
 
@@ -224,7 +224,7 @@ Current repository shape:
 ### OPC-6: Implement supervisor prompt and permission policy
 - **Status:** implemented; verified
 - **Evidence:** `src/opencode/config.ts` defines the single supervisor prompt and permission policy that denies source edits, todowrites, and external mutation; allows scoped route-manifest and `.agents/skills/orchestrate-*/SKILL.md` edits; disables GitHub/`gh`; allows `agent-orchestrator_*`; and restricts skills to `orchestrate-*`. Config tests assert broad wildcard denies are emitted before narrower allow rules.
-- **Notes:** Local OpenCode transcript `ses_217ef4735ffezhGRxQh6C7Mz1x` exposed the reversed-rule-order failure; fixed by putting `*` first in top-level, skill, and edit permission maps, then later tightened bash to an explicit deny.
+- **Notes:** A local OpenCode transcript exposed the reversed-rule-order failure; fixed by putting `*` first in top-level, skill, and edit permission maps, then later tightened bash to an explicit deny.
 
 ### OPC-7: Add single-agent skill writes
 - **Status:** implemented; verified

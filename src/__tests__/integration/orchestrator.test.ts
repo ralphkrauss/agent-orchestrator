@@ -176,6 +176,33 @@ describe('agent orchestrator integration with mock CLIs', () => {
       { mode: 'profile', profile: 'live-implementation', profiles_file: profilesFile },
     );
 
+    const followup = await service.sendFollowup({
+      run_id: secondId,
+      prompt: 'follow profile parent',
+    });
+    assert.equal(followup.ok, true);
+    const followupId = followup.ok ? (followup as unknown as { run_id: string }).run_id : '';
+    await service.waitForRun({ run_id: followupId, wait_seconds: 5 });
+    const followupStatus = await service.getRunStatus({ run_id: followupId });
+    assert.equal(
+      followupStatus.ok && Object.hasOwn((followupStatus as unknown as { run_summary: { metadata: Record<string, unknown> } }).run_summary.metadata, 'worker_profile'),
+      false,
+    );
+
+    const explicitMetadata = await service.sendFollowup({
+      run_id: secondId,
+      prompt: 'follow profile parent with metadata',
+      metadata: { worker_profile: { mode: 'explicit-child' } },
+    });
+    assert.equal(explicitMetadata.ok, true);
+    const explicitMetadataId = explicitMetadata.ok ? (explicitMetadata as unknown as { run_id: string }).run_id : '';
+    await service.waitForRun({ run_id: explicitMetadataId, wait_seconds: 5 });
+    const explicitMetadataStatus = await service.getRunStatus({ run_id: explicitMetadataId });
+    assert.deepStrictEqual(
+      explicitMetadataStatus.ok && (explicitMetadataStatus as unknown as { run_summary: { metadata: { worker_profile: unknown } } }).run_summary.metadata.worker_profile,
+      { mode: 'explicit-child' },
+    );
+
     const args = await readJsonLines<string[]>(join(repo, 'codex-args.jsonl'));
     assert.deepStrictEqual(args[0], ['exec', '--json', '--skip-git-repo-check', '--cd', repo, '--model', 'gpt-5.2', '-c', 'model_reasoning_effort="high"', '-']);
     assert.deepStrictEqual(args[1], ['exec', '--json', '--skip-git-repo-check', '--cd', repo, '--model', 'gpt-5.4', '-c', 'model_reasoning_effort="medium"', '-']);
@@ -251,6 +278,24 @@ describe('agent orchestrator integration with mock CLIs', () => {
     });
     assertInvalidInput(claudeXhighFallback, /Claude xhigh effort requires claude-opus-4-7/);
 
+    const claudeProviderPrefixedXhigh = await service.startRun({
+      backend: 'claude',
+      prompt: 'hello',
+      cwd: repo,
+      model: 'anthropic/claude-opus-4-7',
+      reasoning_effort: 'xhigh',
+    });
+    assertInvalidInput(claudeProviderPrefixedXhigh, /Claude xhigh effort requires claude-opus-4-7/);
+
+    const claudePaddedXhigh = await service.startRun({
+      backend: 'claude',
+      prompt: 'hello',
+      cwd: repo,
+      model: 'foo-claude-opus-4-7-bar',
+      reasoning_effort: 'xhigh',
+    });
+    assertInvalidInput(claudePaddedXhigh, /Claude xhigh effort requires claude-opus-4-7/);
+
     const claudeMax = await service.startRun({
       backend: 'claude',
       prompt: 'hello',
@@ -261,6 +306,18 @@ describe('agent orchestrator integration with mock CLIs', () => {
     assert.equal(claudeMax.ok, true);
     if (claudeMax.ok) {
       await service.waitForRun({ run_id: (claudeMax as unknown as { run_id: string }).run_id, wait_seconds: 5 });
+    }
+
+    const claudeOneMillionXhigh = await service.startRun({
+      backend: 'claude',
+      prompt: 'hello',
+      cwd: repo,
+      model: 'claude-opus-4-7[1m]',
+      reasoning_effort: 'xhigh',
+    });
+    assert.equal(claudeOneMillionXhigh.ok, true);
+    if (claudeOneMillionXhigh.ok) {
+      await service.waitForRun({ run_id: (claudeOneMillionXhigh as unknown as { run_id: string }).run_id, wait_seconds: 5 });
     }
 
     const codexMax = await service.startRun({

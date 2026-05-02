@@ -24,6 +24,13 @@ describe('daemon CLI', () => {
     assert.match(result.stdout, /agent-orchestrator-daemon watch \[--interval-ms <ms>\] \[--limit <n>\]/);
   });
 
+  it('prints daemon help successfully for packed-bin smoke tests', async () => {
+    const result = await execFileAsync(process.execPath, [daemonCliPath, '--help'], { timeout: 5_000 });
+
+    assert.match(result.stdout, /agent-orchestrator-daemon start/);
+    assert.equal(result.stderr, '');
+  });
+
   it('restarts a stopped daemon and reports matching versions in status', async () => {
     const root = await mkdtemp(join(tmpdir(), 'agent-daemon-cli-'));
     const home = join(root, 'home');

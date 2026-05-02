@@ -32,6 +32,7 @@ describe('OpenCode orchestration harness', () => {
         '---',
         '# Create PR',
       ].join('\n'));
+      await mkdir(join(projectSkillRoot, 'orchestrate-empty'), { recursive: true });
 
       const loaded = await loadProjectSkills(projectSkillRoot);
 
@@ -87,7 +88,6 @@ describe('OpenCode orchestration harness', () => {
     assert.deepStrictEqual(agent.permission.external_directory, {
       '*': 'deny',
       '/repo/.agents/orchestration/profiles.json': 'allow',
-      '/repo/.agents/orchestration/*': 'allow',
     });
     assert.equal(agent.permission.bash, 'deny');
     assert.match(agent.prompt, /Target workspace: \/repo/);
@@ -143,8 +143,27 @@ describe('OpenCode orchestration harness', () => {
     assert.deepStrictEqual(agent.permission.external_directory, {
       '*': 'deny',
       '/home/tester/.config/agent-orchestrator/profiles.json': 'allow',
-      '/home/tester/.config/agent-orchestrator/*': 'allow',
     });
+  });
+
+  it('surfaces unreadable project skill files during discovery', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-opencode-skills-'));
+    const projectSkillRoot = join(root, '.agents', 'skills');
+    const skillFile = join(projectSkillRoot, 'orchestrate-broken', 'SKILL.md');
+
+    try {
+      await mkdir(join(projectSkillRoot, 'orchestrate-broken'), { recursive: true });
+      await writeFile(skillFile, '# Broken\n');
+      await chmod(skillFile, 0o000);
+
+      await assert.rejects(
+        loadProjectSkills(projectSkillRoot),
+        /EACCES|permission denied/i,
+      );
+    } finally {
+      await chmod(skillFile, 0o600).catch(() => {});
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it('creates the shared skill root before launching OpenCode', async () => {
@@ -205,7 +224,6 @@ describe('OpenCode orchestration harness', () => {
       assert.deepStrictEqual(invocation.config.agent['agent-orchestrator']?.permission.external_directory, {
         '*': 'deny',
         [join(root, '.agents', 'orchestration', 'profiles.json')]: 'allow',
-        [join(root, '.agents', 'orchestration', '*')]: 'allow',
       });
     } finally {
       await rm(root, { recursive: true, force: true });

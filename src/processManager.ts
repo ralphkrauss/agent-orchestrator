@@ -72,7 +72,8 @@ export class ProcessManager {
     let sessionId: string | undefined;
     const filesFromEvents = new Set<string>();
     const commandsRun: string[] = [];
-    const observedErrors: { message: string; context?: Record<string, unknown> }[] = [];
+    const parsedErrors: { message: string; context?: Record<string, unknown> }[] = [];
+    const stderrErrors: { message: string; context?: Record<string, unknown> }[] = [];
     let terminalOverride: Extract<RunStatus, 'cancelled' | 'timed_out'> | undefined;
     let killTimer: NodeJS.Timeout | null = null;
     const parseTasks: Promise<void>[] = [];
@@ -87,14 +88,14 @@ export class ProcessManager {
         setResultEvent: (event) => { resultEvent = event; },
         addFile: (path) => filesFromEvents.add(path),
         addCommand: (command) => commandsRun.push(command),
-        addError: (error) => observedErrors.push(error),
+        addError: (error) => parsedErrors.push(error),
       }));
     });
 
     child.stderr.on('data', (chunk: Buffer) => {
       const text = chunk.toString('utf8');
       if (text.toLowerCase().includes('error')) {
-        observedErrors.push({ message: text.trim(), context: { stream: 'stderr' } });
+        stderrErrors.push({ message: text.trim(), context: { stream: 'stderr' } });
         void this.store.appendEvent(runId, { type: 'error', payload: { stream: 'stderr', text } });
       }
     });
@@ -129,7 +130,8 @@ export class ProcessManager {
               sessionId,
               Array.from(filesFromEvents),
               commandsRun,
-              observedErrors,
+              parsedErrors,
+              stderrErrors,
               terminalOverride,
             );
           } catch (error) {
@@ -219,7 +221,8 @@ export class ProcessManager {
     sessionId: string | undefined,
     filesFromEvents: string[],
     commandsRun: string[],
-    observedErrors: { message: string; context?: Record<string, unknown> }[],
+    parsedErrors: { message: string; context?: Record<string, unknown> }[],
+    stderrErrors: { message: string; context?: Record<string, unknown> }[],
     terminalOverride: Extract<RunStatus, 'cancelled' | 'timed_out'> | undefined,
   ): Promise<RunMeta> {
     const meta = await this.store.loadMeta(runId);
@@ -229,10 +232,12 @@ export class ProcessManager {
       : [];
     const errors = terminalOverride
       ? [{ message: terminalOverride === 'timed_out' ? 'execution timeout exceeded' : 'cancelled by user' }]
-      : [
-          ...(exitCode === 0 ? [] : [{ message: 'worker process exited unsuccessfully', context: { exit_code: exitCode, signal } }]),
-          ...dedupeErrors(observedErrors),
-        ];
+      : exitCode === 0
+        ? dedupeErrors(parsedErrors)
+        : [
+            { message: 'worker process exited unsuccessfully', context: { exit_code: exitCode, signal } },
+            ...dedupeErrors([...parsedErrors, ...stderrErrors]),
+          ];
 
     let finalized = backend.finalizeResult({
       runStatusOverride: terminalOverride,

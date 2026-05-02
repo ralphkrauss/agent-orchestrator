@@ -36,15 +36,19 @@ function isClaudeAlias(model: string): boolean {
 }
 
 function isClaudeOpus47(model: string): boolean {
-  return model.includes('claude-opus-4-7');
+  return model === 'claude-opus-4-7';
 }
 
 function isKnownClaudeEffortModel(model: string): boolean {
-  return model.includes('claude-opus-4-7')
-    || model.includes('claude-opus-4-6')
-    || model.includes('claude-sonnet-4-6');
+  return knownClaudeEffortModels.has(model);
 }
 
 function isAnthropicClaudeModelId(model: string): boolean {
-  return model.startsWith('claude-') || model.includes('.claude-');
+  return model.includes('claude-');
 }
+
+const knownClaudeEffortModels = new Set([
+  'claude-opus-4-7',
+  'claude-opus-4-6',
+  'claude-sonnet-4-6',
+]);

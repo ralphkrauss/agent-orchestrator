@@ -154,6 +154,37 @@ process.stdin.on('end', () => {
     assert.deepStrictEqual(meta.worker_invocation, { command: cli, args: [] });
   });
 
+  it('does not promote benign stderr error text when a worker succeeds', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-process-'));
+    const cli = join(root, 'worker.js');
+    await writeFile(cli, `#!/usr/bin/env node
+process.stdin.on('data', () => {});
+process.stdin.on('end', () => {
+  console.error('0 errors found during validation');
+  console.log(JSON.stringify({ type: 'thread.started', thread_id: 'session-1' }));
+  console.log(JSON.stringify({ type: 'result', subtype: 'success', result: 'done', session_id: 'session-1' }));
+  process.exit(0);
+});
+`);
+    await chmod(cli, 0o755);
+
+    const store = new RunStore(root);
+    const run = await store.createRun({ backend: 'codex', cwd: root });
+    const manager = new ProcessManager(store);
+    const managed = await manager.start(run.run_id, new CodexBackend(), {
+      command: cli,
+      args: [],
+      cwd: root,
+      stdinPayload: 'finish',
+    });
+
+    await managed.completion;
+    const result = await store.loadResult(run.run_id);
+    assert.equal(result?.status, 'completed');
+    assert.equal(result?.summary, 'done');
+    assert.deepStrictEqual(result?.errors, []);
+  });
+
   it('includes parsed worker error events in failed results without final result events', async () => {
     const root = await mkdtemp(join(tmpdir(), 'agent-process-'));
     const cli = join(root, 'worker.js');
