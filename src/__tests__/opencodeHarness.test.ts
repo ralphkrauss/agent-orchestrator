@@ -32,6 +32,7 @@ describe('OpenCode orchestration harness', () => {
         '---',
         '# Create PR',
       ].join('\n'));
+      await mkdir(join(projectSkillRoot, 'orchestrate-empty'), { recursive: true });
 
       const loaded = await loadProjectSkills(projectSkillRoot);
 
@@ -87,9 +88,8 @@ describe('OpenCode orchestration harness', () => {
     assert.deepStrictEqual(agent.permission.external_directory, {
       '*': 'deny',
       '/repo/.agents/orchestration/profiles.json': 'allow',
-      '/repo/.agents/orchestration/*': 'allow',
     });
-    assert.equal(Object.keys(agent.permission.bash as Record<string, string>)[0], '*');
+    assert.equal(agent.permission.bash, 'deny');
     assert.match(agent.prompt, /Target workspace: \/repo/);
     assert.match(agent.prompt, /Shared skill root relative to workspace: \.agents\/skills/);
     assert.match(agent.prompt, /Profiles manifest status:\n- valid/);
@@ -102,6 +102,7 @@ describe('OpenCode orchestration harness', () => {
     assert.match(agent.prompt, /latest_error is fatal/);
     assert.match(agent.prompt, /10-15 minute ceiling/);
     assert.match(agent.prompt, /idle_timeout_seconds/);
+    assert.match(agent.prompt, /Direct bash\/shell execution is disabled/);
   });
 
   it('builds a supervisor config that can explain missing profile setup', () => {
@@ -146,8 +147,53 @@ describe('OpenCode orchestration harness', () => {
     assert.deepStrictEqual(agent.permission.external_directory, {
       '*': 'deny',
       '/home/tester/.config/agent-orchestrator/profiles.json': 'allow',
-      '/home/tester/.config/agent-orchestrator/*': 'allow',
     });
+  });
+
+  it('allows out-of-workspace orchestration skill writes by exact skill pattern only', () => {
+    const config = buildOpenCodeHarnessConfig({
+      targetCwd: '/home/tester/repo',
+      skillRoots: ['/home/tester/shared-skills'],
+      skillRoot: '/home/tester/shared-skills',
+      mcpCliPath: '/pkg/dist/cli.js',
+      profileDiagnostics: ['missing'],
+      orchestrationSkillNames: [],
+      catalog: createWorkerCapabilityCatalog(),
+      manifestPath: '/home/tester/.config/agent-orchestrator/profiles.json',
+    });
+
+    const agent = config.agent['agent-orchestrator'] as { permission: Record<string, unknown> };
+    assert.deepStrictEqual(agent.permission.edit, {
+      '*': 'deny',
+      '/home/tester/.config/agent-orchestrator/profiles.json': 'allow',
+      '../.config/agent-orchestrator/profiles.json': 'allow',
+      '/home/tester/shared-skills/orchestrate-*/SKILL.md': 'allow',
+    });
+    assert.deepStrictEqual(agent.permission.external_directory, {
+      '*': 'deny',
+      '/home/tester/.config/agent-orchestrator/profiles.json': 'allow',
+      '/home/tester/shared-skills/orchestrate-*/SKILL.md': 'allow',
+    });
+  });
+
+  it('surfaces unreadable project skill files during discovery', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-opencode-skills-'));
+    const projectSkillRoot = join(root, '.agents', 'skills');
+    const skillFile = join(projectSkillRoot, 'orchestrate-broken', 'SKILL.md');
+
+    try {
+      await mkdir(join(projectSkillRoot, 'orchestrate-broken'), { recursive: true });
+      await writeFile(skillFile, '# Broken\n');
+      await chmod(skillFile, 0o000);
+
+      await assert.rejects(
+        loadProjectSkills(projectSkillRoot),
+        /EACCES|permission denied/i,
+      );
+    } finally {
+      await chmod(skillFile, 0o600).catch(() => {});
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it('creates the shared skill root before launching OpenCode', async () => {
@@ -208,7 +254,6 @@ describe('OpenCode orchestration harness', () => {
       assert.deepStrictEqual(invocation.config.agent['agent-orchestrator']?.permission.external_directory, {
         '*': 'deny',
         [join(root, '.agents', 'orchestration', 'profiles.json')]: 'allow',
-        [join(root, '.agents', 'orchestration', '*')]: 'allow',
       });
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -233,10 +278,24 @@ describe('OpenCode orchestration harness', () => {
 
     assert.equal(parsed.ok, true);
     assert.equal(parsed.ok && parsed.value.cwd, resolve('/tmp/repo'));
+    assert.equal(parsed.ok && parsed.value.profilesFile, resolve('/tmp/repo/profiles.json'));
     assert.equal(parsed.ok && parsed.value.manifestPath, resolve('/tmp/repo/profiles.json'));
     assert.equal(parsed.ok && parsed.value.skillsPath, resolve('/tmp/repo/.agents/skills'));
     assert.equal(parsed.ok && parsed.value.orchestratorModel, 'openai/gpt-5.5');
     assert.deepStrictEqual(parsed.ok && parsed.value.opencodeArgs, ['run', 'configure profiles']);
+  });
+
+  it('treats --manifest as a true profiles-file alias', () => {
+    const parsed = parseOpenCodeLauncherArgs([
+      '--manifest',
+      'cli-profiles.json',
+    ], {
+      AGENT_ORCHESTRATOR_OPENCODE_PROFILES_FILE: '/env/profiles.json',
+    }, '/tmp/workspace');
+
+    assert.equal(parsed.ok, true);
+    assert.equal(parsed.ok && parsed.value.profilesFile, '/tmp/workspace/cli-profiles.json');
+    assert.equal(parsed.ok && parsed.value.manifestPath, '/tmp/workspace/cli-profiles.json');
   });
 
   it('defaults profiles to the user config directory', () => {
@@ -264,6 +323,39 @@ describe('OpenCode orchestration harness', () => {
 
       assert.equal(code, 1);
       assert.match(stderr.value(), /Invalid --profiles-json/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects unsafe or non-session OpenCode passthrough', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-opencode-passthrough-'));
+    const cases: Array<{ args: string[]; pattern: RegExp }> = [
+      { args: ['mcp', '--help'], pattern: /rejected subcommand mcp/ },
+      { args: ['--agent=build'], pattern: /rejected option --agent=build/ },
+      { args: ['run'], pattern: /requires run to be followed by a positional prompt/ },
+      { args: ['run', '--attach', 'session-id'], pattern: /rejected option --attach/ },
+      { args: ['run', '--dir=/tmp', 'prompt'], pattern: /rejected option --dir=\/tmp/ },
+      { args: ['run', '--dangerously-skip-permissions=true', 'prompt'], pattern: /rejected option --dangerously-skip-permissions=true/ },
+      { args: ['run', '--share', 'prompt'], pattern: /rejected option --share/ },
+      { args: ['run', '--command', 'test'], pattern: /rejected option --command/ },
+      { args: ['run', '--session', 'ses_123', 'prompt'], pattern: /rejected option --session/ },
+      { args: ['run', '--file', 'secret.txt', 'prompt'], pattern: /rejected option --file/ },
+    ];
+
+    try {
+      for (const testCase of cases) {
+        const stdout = captureStream();
+        const stderr = captureStream();
+        const code = await runOpenCodeLauncher(['--cwd', root, '--print-config', '--', ...testCase.args], {
+          stdout: stdout.stream,
+          stderr: stderr.stream,
+          env: process.env,
+        });
+
+        assert.equal(code, 1, testCase.args.join(' '));
+        assert.match(stderr.value(), testCase.pattern);
+      }
     } finally {
       await rm(root, { recursive: true, force: true });
     }

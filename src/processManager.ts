@@ -301,10 +301,12 @@ export class ProcessManager {
       : [];
     const errors: RunError[] = terminalOverride
       ? [terminalOverrideError(backend, terminalOverride, terminalOverrideDetails)]
-      : [
-          ...(exitCode === 0 ? [] : [processExitError(backend, exitCode, signal)]),
-          ...dedupeErrors(observedErrors),
-        ];
+      : exitCode === 0 && resultEvent
+        ? []
+        : [
+            ...(exitCode === 0 ? [] : [processExitError(backend, exitCode, signal)]),
+            ...dedupeErrors(observedErrors),
+          ];
 
     let finalized = backend.finalizeResult({
       runStatusOverride: terminalOverride,

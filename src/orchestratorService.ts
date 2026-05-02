@@ -32,6 +32,7 @@ import {
   type WorkerResult,
 } from './contract.js';
 import type { WorkerBackend } from './backend/WorkerBackend.js';
+import { validateClaudeModelAndEffort } from './backend/claudeValidation.js';
 import { resolveBinary } from './backend/common.js';
 import { getBackendStatus } from './diagnostics.js';
 import { captureGitSnapshot } from './gitSnapshot.js';
@@ -319,7 +320,7 @@ export class OrchestratorService {
     const executionTimeout = this.resolveExecutionTimeout(parsed.data.execution_timeout_seconds);
     if (!executionTimeout.ok) return wrapErr(executionTimeout.error);
     const model = parsed.data.model ?? parent.meta.model;
-    const metadata = { ...parent.meta.metadata, ...parsed.data.metadata };
+    const metadata = metadataForFollowup(parent.meta.metadata, parsed.data.metadata);
     const modelSource: ModelSource = parsed.data.model ? 'explicit' : parent.meta.model ? 'inherited' : 'backend_default';
     const settings = hasModelSettingsInput(parsed.data)
       ? modelSettingsForBackend(backendName, model, parsed.data.reasoning_effort, parsed.data.service_tier)
@@ -704,6 +705,14 @@ function parseProfileModelSettings(
   };
 }
 
+function metadataForFollowup(
+  parentMetadata: Record<string, unknown>,
+  childMetadata: Record<string, unknown>,
+): Record<string, unknown> {
+  const { worker_profile: _workerProfile, ...inheritedMetadata } = parentMetadata;
+  return { ...inheritedMetadata, ...childMetadata };
+}
+
 function modelSettingsForBackend(
   backend: Backend,
   model: string | null | undefined,
@@ -724,14 +733,11 @@ function modelSettingsForBackend(
     };
   }
 
-  if (reasoningEffort === 'none' || reasoningEffort === 'minimal') {
-    return { ok: false, error: orchestratorError('INVALID_INPUT', 'Claude reasoning_effort must be one of low, medium, high, xhigh, or max') };
-  }
   if (serviceTier !== undefined) {
     return { ok: false, error: orchestratorError('INVALID_INPUT', 'Claude does not support service_tier; set reasoning_effort and model only') };
   }
   const claudeModelError = validateClaudeModelAndEffort(model, reasoningEffort);
-  if (claudeModelError) return { ok: false, error: claudeModelError };
+  if (claudeModelError) return { ok: false, error: orchestratorError('INVALID_INPUT', claudeModelError) };
   return {
     ok: true,
     value: {
@@ -742,23 +748,6 @@ function modelSettingsForBackend(
   };
 }
 
-function validateClaudeModelAndEffort(model: string | null | undefined, reasoningEffort: ReasoningEffort | undefined): OrchestratorError | null {
-  const normalized = normalizeClaudeModel(model);
-  if (normalized && isClaudeAlias(normalized)) {
-    return orchestratorError('INVALID_INPUT', 'Claude model must be a direct model id such as claude-opus-4-7 or claude-opus-4-7[1m]; aliases like opus and sonnet can drift');
-  }
-  if (reasoningEffort && !normalized) {
-    return orchestratorError('INVALID_INPUT', 'Claude reasoning_effort requires an explicit direct model id such as claude-opus-4-7 so fallback behavior is visible');
-  }
-  if (reasoningEffort === 'xhigh' && normalized && !isClaudeOpus47(normalized)) {
-    return orchestratorError('INVALID_INPUT', 'Claude xhigh effort requires claude-opus-4-7 or claude-opus-4-7[1m]; other Claude models can fall back to high');
-  }
-  if (reasoningEffort && normalized && isAnthropicClaudeModelId(normalized) && !isKnownClaudeEffortModel(normalized)) {
-    return orchestratorError('INVALID_INPUT', 'Claude effort levels are documented for Opus 4.7, Opus 4.6, and Sonnet 4.6; use one of those direct model ids');
-  }
-  return null;
-}
-
 function validateInheritedModelSettingsForBackend(
   backend: Backend,
   model: string | null | undefined,
@@ -767,40 +756,12 @@ function validateInheritedModelSettingsForBackend(
   if (backend !== 'claude') return { ok: true, value: settings };
   const reasoningEffort = parseReasoningEffort(settings.reasoning_effort);
   const error = validateClaudeModelAndEffort(model, reasoningEffort);
-  return error ? { ok: false, error } : { ok: true, value: settings };
+  return error ? { ok: false, error: orchestratorError('INVALID_INPUT', error) } : { ok: true, value: settings };
 }
 
 function parseReasoningEffort(value: string | null | undefined): ReasoningEffort | undefined {
   const parsed = value ? ReasoningEffortSchema.safeParse(value) : null;
   return parsed?.success ? parsed.data : undefined;
-}
-
-function normalizeClaudeModel(model: string | null | undefined): string | null {
-  const value = model?.trim().toLowerCase();
-  return value ? value.replace(/\[1m\]$/, '') : null;
-}
-
-function isClaudeAlias(model: string): boolean {
-  return model === 'default'
-    || model === 'best'
-    || model === 'opus'
-    || model === 'sonnet'
-    || model === 'haiku'
-    || model === 'opusplan';
-}
-
-function isClaudeOpus47(model: string): boolean {
-  return model.includes('claude-opus-4-7');
-}
-
-function isKnownClaudeEffortModel(model: string): boolean {
-  return model.includes('claude-opus-4-7')
-    || model.includes('claude-opus-4-6')
-    || model.includes('claude-sonnet-4-6');
-}
-
-function isAnthropicClaudeModelId(model: string): boolean {
-  return model.startsWith('claude-') || model.includes('.claude-');
 }
 
 function positiveInt(value: unknown): number | null {

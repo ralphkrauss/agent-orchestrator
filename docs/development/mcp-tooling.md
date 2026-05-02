@@ -85,8 +85,14 @@ That launcher starts OpenCode with a process-local `OPENCODE_CONFIG_CONTENT`
 overlay instead of editing `opencode.json`, user config, or global config. The
 overlay disables the broad `github` and `gh` MCP servers, configures only the
 local `agent-orchestrator` MCP server, loads project-owned `orchestrate-*`
-skills from the shared `.agents/skills/` root, and restricts direct writes to
-the profiles manifest plus `.agents/skills/orchestrate-*/SKILL.md`.
+skills from the shared `.agents/skills/` root, denies bash, and restricts direct
+writes to the profiles manifest plus `.agents/skills/orchestrate-*/SKILL.md`.
+
+Passthrough arguments after `--` are limited to no OpenCode subcommand or `run`
+followed by positional prompt tokens. The launcher rejects non-supervisor
+subcommands and any option token after `run`, including `--agent`, `--attach`,
+`--dir`, `--share`, `--session`, `--file`, and
+`--dangerously-skip-permissions`.
 
 Run it from the workspace where worker agents should operate, or pass
 `--cwd <path>`. Worker profile configuration is read from

@@ -36,8 +36,9 @@ async function readProjectSkillNames(projectSkillRoot: string): Promise<string[]
       try {
         await access(skillFile, constants.R_OK);
         names.push(entry.name);
-      } catch {
-        // Ignore unreadable candidate skill directories.
+      } catch (error) {
+        const code = typeof error === 'object' && error && 'code' in error ? String(error.code) : '';
+        if (code !== 'ENOENT') throw error;
       }
     }
     return names.sort();

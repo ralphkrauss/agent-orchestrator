@@ -50,5 +50,9 @@ jobs:
           cd "$temp_dir"
           npm init -y >/dev/null
           npm install "$GITHUB_WORKSPACE/$package_file" >/dev/null
-          ./node_modules/.bin/agent-orchestrator-mcp --help
-          ./node_modules/.bin/agent-orchestrator-mcp doctor --json
+          ./node_modules/.bin/agent-orchestrator --help
+          ./node_modules/.bin/agent-orchestrator doctor --json
+          ./node_modules/.bin/agent-orchestrator-daemon --help
+          ./node_modules/.bin/agent-orchestrator-opencode --help
+          ./node_modules/.bin/agent-orchestrator-opencode --print-config >/dev/null
+          ./node_modules/.bin/agent-orchestrator opencode --print-config >/dev/null

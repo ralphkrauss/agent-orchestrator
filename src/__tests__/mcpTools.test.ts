@@ -6,6 +6,7 @@ import { tools } from '../mcpTools.js';
 type ObjectSchema = {
   properties: Record<string, unknown>;
   required?: readonly string[];
+  oneOf?: readonly unknown[];
 };
 
 describe('MCP tool registration', () => {
@@ -26,6 +27,23 @@ describe('MCP tool registration', () => {
     assert.equal(Object.hasOwn(start.properties, 'idle_timeout_seconds'), true);
     assert.equal(Object.hasOwn(start.properties, 'execution_timeout_seconds'), true);
     assert.deepStrictEqual(start.required, ['prompt', 'cwd']);
+    assert.deepStrictEqual(start.oneOf, [
+      {
+        required: ['backend'],
+        not: { required: ['profile'] },
+      },
+      {
+        required: ['profile'],
+        not: {
+          anyOf: [
+            { required: ['backend'] },
+            { required: ['model'] },
+            { required: ['reasoning_effort'] },
+            { required: ['service_tier'] },
+          ],
+        },
+      },
+    ]);
 
     const profiles = schemaFor('list_worker_profiles');
     assert.equal(Object.hasOwn(profiles.properties, 'profiles_file'), true);

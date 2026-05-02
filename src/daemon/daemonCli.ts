@@ -25,6 +25,11 @@ const command = process.argv[2] ?? 'status';
 
 async function main(): Promise<void> {
   switch (command) {
+    case '--help':
+    case '-h':
+    case 'help':
+      process.stdout.write(daemonHelp());
+      break;
     case 'start':
       await start();
       break;
@@ -47,9 +52,13 @@ async function main(): Promise<void> {
       await prune();
       break;
     default:
-      process.stderr.write('Usage: daemonCli.js start | stop [--force] | restart [--force] | status [--verbose|--json] | runs [--json] [--prompts] | watch [--interval-ms <ms>] [--limit <n>] | prune --older-than-days <days> [--dry-run]\n');
+      process.stderr.write(daemonHelp());
       process.exit(1);
   }
+}
+
+function daemonHelp(): string {
+  return 'Usage: agent-orchestrator-daemon start | stop [--force] | restart [--force] | status [--verbose|--json] | runs [--json] [--prompts] | watch [--interval-ms <ms>] [--limit <n>] | prune --older-than-days <days> [--dry-run]\n';
 }
 
 async function start(): Promise<void> {

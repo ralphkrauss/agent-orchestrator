@@ -1,4 +1,4 @@
-import { dirname, join, relative } from 'node:path';
+import { isAbsolute, join, relative, sep } from 'node:path';
 import type { ValidatedWorkerProfiles, WorkerCapabilityCatalog } from './capabilities.js';
 
 export const OPENCODE_ORCHESTRATOR_AGENT = 'agent-orchestrator';
@@ -80,8 +80,8 @@ function orchestrationPermission(targetCwd: string, skillRoot: string, manifestP
     webfetch: 'deny',
     websearch: 'deny',
     task: 'deny',
-    external_directory: profileManifestExternalDirectoryPermission(manifestPath),
-    bash: readOnlyGitBashPermission(),
+    external_directory: externalDirectoryPermission(targetCwd, skillRoot, manifestPath),
+    bash: 'deny',
     'agent-orchestrator_*': 'allow',
     'github_*': 'deny',
     'gh_*': 'deny',
@@ -96,12 +96,16 @@ function setupEditPermission(targetCwd: string, skillRoot: string, manifestPath:
   ]);
 }
 
-function profileManifestExternalDirectoryPermission(manifestPath: string): Record<string, string> {
-  return {
+function externalDirectoryPermission(targetCwd: string, skillRoot: string, manifestPath: string): Record<string, string> {
+  const permission: Record<string, string> = {
     '*': 'deny',
     [manifestPath]: 'allow',
-    [join(dirname(manifestPath), '*')]: 'allow',
   };
+  const skillPattern = join(skillRoot, 'orchestrate-*', 'SKILL.md');
+  if (isOutsideTargetCwd(targetCwd, skillPattern)) {
+    permission[skillPattern] = 'allow';
+  }
+  return permission;
 }
 
 function manifestPermissionPaths(manifestPath: string, targetCwd: string): string[] {
@@ -126,16 +130,9 @@ function setupPermissionPaths(
   return Array.from(new Set(paths));
 }
 
-function readOnlyGitBashPermission(): Record<string, string> {
-  return {
-    '*': 'deny',
-    'git status*': 'allow',
-    'git diff*': 'allow',
-    'git log*': 'allow',
-    'git rev-parse*': 'allow',
-    'git branch*': 'allow',
-    pwd: 'allow',
-  };
+function isOutsideTargetCwd(targetCwd: string, absolutePath: string): boolean {
+  const relativePath = relative(targetCwd, absolutePath);
+  return relativePath === '..' || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath);
 }
 
 function orchestrationPrompt(input: OpenCodeHarnessConfigInput): string {
@@ -148,6 +145,7 @@ function orchestrationPrompt(input: OpenCodeHarnessConfigInput): string {
     '- Do not directly edit, write, patch, todowrite, commit, push, publish, create pull requests, or mutate external services except for the writable profiles manifest and orchestrate-* skill SKILL.md files under the shared skill root.',
     '- Direct file edits are allowed only for the writable profiles manifest path and SKILL.md files under the shared skill root.',
     '- Source, docs, package metadata, MCP configs, secrets, commits, pull requests, publishing, and external-service writes must not be done directly from this supervisor.',
+    '- Direct bash/shell execution is disabled. Use read/list/glob/grep and agent-orchestrator MCP tools for supervisor context, or delegate shell inspection to workers.',
     '- Start worker runs either by live profile alias or by direct backend/model settings only when the user explicitly asks for a direct override or profile setup is broken.',
     '- Prefer start_run with profile plus profiles_file so the daemon reads and validates the current profiles manifest at worker-start time.',
     '- Use the target workspace as the default cwd for worker runs unless the user explicitly chooses another workspace.',

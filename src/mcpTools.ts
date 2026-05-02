@@ -45,6 +45,23 @@ export const tools = [
         },
       },
       required: ['prompt', 'cwd'],
+      oneOf: [
+        {
+          required: ['backend'],
+          not: { required: ['profile'] },
+        },
+        {
+          required: ['profile'],
+          not: {
+            anyOf: [
+              { required: ['backend'] },
+              { required: ['model'] },
+              { required: ['reasoning_effort'] },
+              { required: ['service_tier'] },
+            ],
+          },
+        },
+      ],
     },
   },
   {
