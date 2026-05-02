@@ -137,7 +137,8 @@ This lets agents use the orchestrator while developing the orchestrator. Run
 daemon is already running, restart it too so it picks up the new `dist/` code.
 
 `dist/cli.js` starts the stdio MCP server and auto-starts the daemon if the
-daemon socket is not already responding. For manual lifecycle checks, use:
+local daemon IPC endpoint is not already responding. The endpoint is a Unix
+socket on POSIX and a named pipe on Windows. For manual lifecycle checks, use:
 
 ```bash
 just orchestrator-doctor

@@ -5,6 +5,7 @@ import { promisify } from 'node:util';
 import type { Backend, BackendDiagnostic, BackendStatusReport } from './contract.js';
 import { resolveBinary } from './backend/common.js';
 import { daemonPaths } from './daemon/paths.js';
+import { prepareWorkerSpawn } from './processManager.js';
 
 const execFileAsync = promisify(execFile);
 const commandTimeoutMs = 2_000;
@@ -58,14 +59,14 @@ const definitions: BackendCheckDefinition[] = [
   },
 ];
 
-export async function getBackendStatus(): Promise<BackendStatusReport> {
+export async function getBackendStatus(platform: NodeJS.Platform = process.platform): Promise<BackendStatusReport> {
   const paths = daemonPaths();
   const runStore = await checkRunStore(paths.home);
-  const posixSupported = process.platform !== 'win32';
-  const backends = await Promise.all(definitions.map((definition) => diagnoseBackend(definition, posixSupported)));
+  const posixSupported = platform !== 'win32';
+  const backends = await Promise.all(definitions.map((definition) => diagnoseBackend(definition, platform)));
 
   return {
-    platform: process.platform,
+    platform,
     node_version: process.version,
     posix_supported: posixSupported,
     run_store: runStore,
@@ -105,23 +106,10 @@ export function formatBackendStatus(report: BackendStatusReport): string {
   return `${lines.join('\n')}\n`;
 }
 
-async function diagnoseBackend(definition: BackendCheckDefinition, posixSupported: boolean): Promise<BackendDiagnostic> {
+async function diagnoseBackend(definition: BackendCheckDefinition, platform: NodeJS.Platform): Promise<BackendDiagnostic> {
   const checks: BackendDiagnostic['checks'] = [];
   const hints: string[] = [];
-  const path = await resolveBinary(definition.binary);
-
-  if (!posixSupported) {
-    return {
-      name: definition.name,
-      binary: definition.binary,
-      status: 'unsupported',
-      path,
-      version: null,
-      auth: { status: 'unknown', hint: 'Windows named-pipe support is not implemented in v1.' },
-      checks: [{ name: 'POSIX platform support', ok: false, message: 'Unix sockets and POSIX process groups are required.' }],
-      hints: ['Use Linux, macOS, or WSL for v1.'],
-    };
-  }
+  const path = await resolveBinary(definition.binary, platform);
 
   if (!path) {
     return {
@@ -137,9 +125,9 @@ async function diagnoseBackend(definition: BackendCheckDefinition, posixSupporte
   }
 
   checks.push({ name: `${definition.binary} binary on PATH`, ok: true, message: path });
-  const version = await readVersion(path);
+  const version = await readVersion(path, platform);
   for (const required of definition.requiredHelp) {
-    const output = await runCommand(path, required.args);
+    const output = await runCommand(path, required.args, platform);
     if (!output.ok) {
       checks.push({ name: required.name, ok: false, message: output.message });
       hints.push(`Upgrade ${definition.binary}; failed to verify ${required.args.join(' ')}.`);
@@ -181,8 +169,8 @@ async function diagnoseBackend(definition: BackendCheckDefinition, posixSupporte
   };
 }
 
-async function readVersion(binaryPath: string): Promise<string | null> {
-  const output = await runCommand(binaryPath, ['--version']);
+async function readVersion(binaryPath: string, platform: NodeJS.Platform): Promise<string | null> {
+  const output = await runCommand(binaryPath, ['--version'], platform);
   if (!output.ok) return null;
   return output.text.split('\n').map((line) => line.trim()).find(Boolean) ?? null;
 }
@@ -199,9 +187,10 @@ function detectAuth(definition: BackendCheckDefinition): BackendDiagnostic['auth
   };
 }
 
-async function runCommand(binaryPath: string, args: string[]): Promise<{ ok: true; text: string } | { ok: false; message: string }> {
+async function runCommand(binaryPath: string, args: string[], platform: NodeJS.Platform): Promise<{ ok: true; text: string } | { ok: false; message: string }> {
   try {
-    const result = await execFileAsync(binaryPath, args, {
+    const prepared = prepareWorkerSpawn(binaryPath, args, platform);
+    const result = await execFileAsync(prepared.command, prepared.args, {
       timeout: commandTimeoutMs,
       maxBuffer: 512 * 1024,
       env: { ...process.env, NO_COLOR: '1', TERM: 'dumb' },
@@ -227,7 +216,7 @@ async function checkRunStore(path: string): Promise<BackendStatusReport['run_sto
     return { path, accessible: true };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return { path, accessible: true, message: 'directory does not exist yet; the daemon will create it with 0700 permissions' };
+      return { path, accessible: true, message: 'directory does not exist yet; the daemon will create it with user-only permissions where supported' };
     }
 
     return {

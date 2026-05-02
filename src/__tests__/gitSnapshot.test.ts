@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmod, mkdir, mkdtemp, symlink, unlink, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -41,7 +41,7 @@ if (args[0] === 'status') {
 process.exit(1);
 `);
     await chmod(git, 0o755);
-    process.env.PATH = `${bin}:${originalPath}`;
+    process.env.PATH = originalPath ? `${bin}${delimiter}${originalPath}` : bin;
 
     const capture = await captureGitSnapshot(root);
     assert.equal(capture.status, 'git_unavailable');
@@ -73,7 +73,7 @@ process.exit(1);
     assert.ok(changed.includes('untracked.txt'));
   });
 
-  it('bounds large file fingerprinting and fingerprints symlinks without following targets', async () => {
+  it('bounds large file fingerprinting and fingerprints symlinks without following targets', { skip: process.platform === 'win32' }, async () => {
     const root = await mkdtemp(join(tmpdir(), 'agent-git-'));
     const repo = join(root, 'repo');
     await mkdir(repo);
@@ -85,18 +85,18 @@ process.exit(1);
     await execFileAsync('git', ['commit', '-m', 'initial'], { cwd: repo });
 
     await writeFile(join(repo, 'large.bin'), Buffer.alloc(1024 * 1024 + 1, 1));
-    await symlink('/dev/zero', join(repo, 'special-link'));
+    await symlink('target-one', join(repo, 'special-link'));
 
     const capture = await captureGitSnapshot(repo);
     assert.equal(capture.status, 'captured');
     assert.ok(capture.snapshot);
     assert.match(capture.snapshot.dirty_fingerprints?.['large.bin'] ?? '', /^file-meta:/);
     assert.match(capture.snapshot.dirty_fingerprints?.['special-link'] ?? '', /^symlink:/);
-    assert.ok(capture.snapshot.dirty_fingerprints?.['special-link']?.includes('/dev/zero'));
+    assert.ok(capture.snapshot.dirty_fingerprints?.['special-link']?.includes('target-one'));
 
     await writeFile(join(repo, 'large.bin'), Buffer.alloc(1024 * 1024 + 2, 2));
     await unlink(join(repo, 'special-link'));
-    await symlink('/dev/null', join(repo, 'special-link'));
+    await symlink('target-two', join(repo, 'special-link'));
 
     const changed = await changedFilesSinceSnapshot(repo, capture.snapshot);
     assert.ok(changed.includes('large.bin'));

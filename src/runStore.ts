@@ -426,9 +426,11 @@ export function resolveStoreRoot(): string {
   return process.env.AGENT_ORCHESTRATOR_HOME || join(homedir(), '.agent-orchestrator');
 }
 
-export async function ensureSecureRoot(root: string): Promise<void> {
+export async function ensureSecureRoot(root: string, platform: NodeJS.Platform = process.platform): Promise<void> {
   await mkdir(root, { recursive: true, mode: rootMode });
   const info = await stat(root);
+  if (platform === 'win32') return;
+
   const getuid = process.getuid?.();
   if (typeof getuid === 'number' && info.uid !== getuid) {
     throw new Error(`Agent orchestrator home ${root} is owned by uid ${info.uid}, expected ${getuid}`);

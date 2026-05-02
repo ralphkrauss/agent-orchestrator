@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createWriteStream } from 'node:fs';
 import { realpath } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
@@ -16,6 +16,14 @@ export interface ManagedRun {
   cancel(status: Extract<RunStatus, 'cancelled' | 'timed_out'>): void;
 }
 
+export type ProcessKill = (pid: number, signal: NodeJS.Signals) => void;
+export type TaskkillSpawn = (command: string, args: string[], options: { stdio: 'ignore'; windowsHide: true }) => ChildProcess;
+
+export interface PreparedWorkerSpawn {
+  command: string;
+  args: string[];
+}
+
 export class ProcessManager {
   constructor(private readonly store: RunStore) {}
 
@@ -26,7 +34,8 @@ export class ProcessManager {
       NO_COLOR: '1',
       TERM: 'dumb',
     };
-    const child = spawn(invocation.command, invocation.args, {
+    const preparedSpawn = prepareWorkerSpawn(invocation.command, invocation.args);
+    const child = spawn(preparedSpawn.command, preparedSpawn.args, {
       cwd: invocation.cwd,
       env,
       shell: false,
@@ -35,7 +44,7 @@ export class ProcessManager {
     });
 
     const workerPid = child.pid ?? null;
-    const workerPgid = workerPid;
+    const workerPgid = process.platform === 'win32' ? null : workerPid;
     await this.store.updateMeta(runId, (meta) => ({
       ...meta,
       started_at: meta.started_at ?? new Date().toISOString(),
@@ -86,19 +95,11 @@ export class ProcessManager {
     const cancel = (status: Extract<RunStatus, 'cancelled' | 'timed_out'>) => {
       if (terminalOverride) return;
       terminalOverride = status;
-      const pgid = child.pid ? -child.pid : null;
-      if (pgid !== null) {
-        try {
-          process.kill(pgid, 'SIGTERM');
-        } catch {
-          // The process may already have exited.
-        }
+      const pid = child.pid;
+      if (pid) {
+        terminateProcessTree(pid, false);
         killTimer = setTimeout(() => {
-          try {
-            process.kill(pgid, 'SIGKILL');
-          } catch {
-            // Already gone.
-          }
+          terminateProcessTree(pid, true);
         }, 5_000);
       }
     };
@@ -273,4 +274,60 @@ function relativeInside(cwd: string, file: string): string | null {
   const relativePath = relative(cwd, file);
   if (!relativePath || relativePath === '..' || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) return null;
   return relativePath;
+}
+
+export function terminateProcessTree(
+  pid: number,
+  force: boolean,
+  platform: NodeJS.Platform = process.platform,
+  killProcess: ProcessKill = process.kill,
+  spawnTaskkill: TaskkillSpawn = spawnTaskkillProcess,
+): void {
+  if (pid <= 0) return;
+
+  if (platform === 'win32') {
+    const args = ['/PID', String(pid), '/T'];
+    if (force) args.push('/F');
+    const child = spawnTaskkill('taskkill', args, { stdio: 'ignore', windowsHide: true });
+    child.on('error', () => {
+      // The process may already have exited, or taskkill may be unavailable.
+    });
+    child.unref();
+    return;
+  }
+
+  try {
+    killProcess(-pid, force ? 'SIGKILL' : 'SIGTERM');
+  } catch {
+    // The process may already have exited.
+  }
+}
+
+function spawnTaskkillProcess(command: string, args: string[], options: { stdio: 'ignore'; windowsHide: true }): ChildProcess {
+  return spawn(command, args, options);
+}
+
+export function prepareWorkerSpawn(
+  command: string,
+  args: string[],
+  platform: NodeJS.Platform = process.platform,
+  commandProcessor = process.env.ComSpec || process.env.COMSPEC || 'cmd.exe',
+): PreparedWorkerSpawn {
+  if (platform === 'win32' && /\.(?:bat|cmd)$/i.test(command)) {
+    return {
+      command: commandProcessor,
+      args: ['/d', '/s', '/c', quoteCmdCommand([command, ...args])],
+    };
+  }
+
+  return { command, args };
+}
+
+function quoteCmdCommand(args: string[]): string {
+  return args.map(quoteCmdArg).join(' ');
+}
+
+function quoteCmdArg(arg: string): string {
+  const escaped = arg.replaceAll('%', '%%').replace(/(["^&|<>()])/g, '^$1');
+  return escaped.length === 0 || /[\s]/.test(escaped) ? `"${escaped}"` : escaped;
 }

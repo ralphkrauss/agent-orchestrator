@@ -12,11 +12,6 @@ const paths = daemonPaths();
 let pidFd: number | null = null;
 let ipcServer: IpcServer | null = null;
 
-if (process.platform === 'win32') {
-  process.stderr.write('agent-orchestrator daemon is POSIX-only in v1; Unix sockets are required.\n');
-  process.exit(1);
-}
-
 function log(message: string): void {
   const line = `[${new Date().toISOString()}] ${message}\n`;
   appendFileSync(paths.log, line, { mode: 0o600 });
@@ -26,21 +21,25 @@ function log(message: string): void {
 async function main(): Promise<void> {
   await ensureSecureRoot(paths.home);
   acquirePidFile();
-  await cleanupSocket();
+  await cleanupIpcEndpoint();
 
   const store = new RunStore(paths.home);
   const service = new OrchestratorService(store, createBackendRegistry(), log);
   await service.initialize();
 
-  ipcServer = new IpcServer(paths.socket, async (method, params) => service.dispatch(method, params));
-  const oldUmask = process.umask(0o177);
-  try {
+  ipcServer = new IpcServer(paths.ipc.path, async (method, params) => service.dispatch(method, params));
+  if (paths.ipc.transport === 'unix_socket') {
+    const oldUmask = process.umask(0o177);
+    try {
+      await ipcServer.listen();
+    } finally {
+      process.umask(oldUmask);
+    }
+  } else {
     await ipcServer.listen();
-  } finally {
-    process.umask(oldUmask);
   }
 
-  log(`daemon started pid=${process.pid} socket=${paths.socket}`);
+  log(`daemon started pid=${process.pid} ipc=${paths.ipc.path}`);
 
   const forceShutdown = () => {
     void service.shutdown({ force: true });
@@ -82,14 +81,14 @@ function isPidAlive(pid: number): boolean {
   }
 }
 
-async function cleanupSocket(): Promise<void> {
-  if (!existsSync(paths.socket)) return;
-  const info = await lstat(paths.socket);
+async function cleanupIpcEndpoint(): Promise<void> {
+  if (!paths.ipc.cleanupPath || !existsSync(paths.ipc.cleanupPath)) return;
+  const info = await lstat(paths.ipc.cleanupPath);
   const uid = process.getuid?.();
   if (typeof uid === 'number' && info.uid !== uid) {
-    throw new Error(`Refusing to remove foreign-owned socket ${paths.socket} owned by uid ${info.uid}`);
+    throw new Error(`Refusing to remove foreign-owned IPC endpoint ${paths.ipc.cleanupPath} owned by uid ${info.uid}`);
   }
-  await rm(paths.socket, { force: true });
+  await rm(paths.ipc.cleanupPath, { force: true });
 }
 
 async function cleanup(): Promise<void> {
@@ -99,7 +98,7 @@ async function cleanup(): Promise<void> {
     // Ignore during process shutdown.
   }
   try {
-    await rm(paths.socket, { force: true });
+    if (paths.ipc.cleanupPath) await rm(paths.ipc.cleanupPath, { force: true });
   } catch {
     // Ignore during process shutdown.
   }
@@ -115,7 +114,7 @@ process.on('exit', () => {
   try {
     if (pidFd !== null) closeSync(pidFd);
     if (existsSync(paths.pid) && readExistingPid() === process.pid) unlinkSync(paths.pid);
-    if (existsSync(paths.socket)) unlinkSync(paths.socket);
+    if (paths.ipc.cleanupPath && existsSync(paths.ipc.cleanupPath)) unlinkSync(paths.ipc.cleanupPath);
   } catch {
     // Process is exiting; best effort only.
   }

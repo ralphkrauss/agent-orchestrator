@@ -14,7 +14,7 @@ import { orchestratorError, wrapErr } from './contract.js';
 import { ipcTimeoutForTool } from './toolTimeout.js';
 
 const paths = daemonPaths();
-const client = new IpcClient(paths.socket);
+const client = new IpcClient(paths.ipc.path);
 
 const tools = [
   {
