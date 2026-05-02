@@ -35,7 +35,7 @@ describe('observability snapshot builder', () => {
       errors: [],
     });
 
-    const childActivityAt = new Date().toISOString();
+    const childActivityAt = new Date(Date.now() - 60_000).toISOString();
     const child = await store.createRun({
       backend: 'codex',
       cwd: root,
@@ -97,6 +97,9 @@ describe('observability snapshot builder', () => {
     assert.equal(childRun?.run.idle_timeout_seconds, 1200);
     assert.equal(typeof childRun?.activity.idle_seconds, 'number');
     assert.ok(childRun?.artifacts.some((artifact) => artifact.name === 'prompt.txt' && artifact.exists && artifact.bytes));
+    const latestChildEventAt = childRun?.activity.last_event_at ?? null;
+    assert.ok(latestChildEventAt);
+    assert.notEqual(latestChildEventAt, childActivityAt);
 
     const parentRun = snapshot.runs.find((run) => run.run.run_id === parent.run_id);
     assert.equal(parentRun?.response.status, 'completed');
@@ -111,6 +114,8 @@ describe('observability snapshot builder', () => {
     const childSession = snapshot.sessions.find((session) => session.session_id === 'session-2');
     assert.deepStrictEqual(childSession?.settings, [{ reasoning_effort: 'xhigh', service_tier: 'fast', mode: null }]);
     assert.deepStrictEqual(childSession?.prompts[0]?.settings, { reasoning_effort: 'xhigh', service_tier: 'fast', mode: null });
+    assert.equal(childSession?.updated_at, latestChildEventAt);
+    assert.equal(childSession?.prompts[0]?.last_activity_at, latestChildEventAt);
   });
 
   it('uses the last assistant message as the final response when result summaries are empty', async () => {

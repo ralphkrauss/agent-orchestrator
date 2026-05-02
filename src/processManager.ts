@@ -144,18 +144,23 @@ export class ProcessManager {
       }, () => recordActivity('backend_event')));
     });
 
-    child.stderr.on('data', (chunk: Buffer) => {
+    const stderrLines = createInterface({ input: child.stderr, crlfDelay: Infinity });
+    const stderrClosed = new Promise<void>((resolve) => {
+      stderrLines.on('close', resolve);
+    });
+    child.stderr.on('data', () => {
       recordActivity('stderr');
-      const text = chunk.toString('utf8');
-      const message = text.trim();
-      if (!message) return;
+    });
+    stderrLines.on('line', (line) => {
+      const text = line.trim();
+      if (!text) return;
       const error = classifyBackendError({
         backend: backend.name,
         source: 'stderr',
-        message,
+        message: text,
         context: { stream: 'stderr' },
       });
-      if (!shouldSurfaceStderrError(message, error)) return;
+      if (!shouldSurfaceStderrError(text, error)) return;
       recordObservedError(error);
       trackPersistence(this.store.appendEvent(runId, { type: 'error', payload: { stream: 'stderr', text, error } }));
     });
@@ -181,6 +186,7 @@ export class ProcessManager {
         stderrStream.end();
         void (async () => {
           await stdoutClosed;
+          await stderrClosed;
           await Promise.allSettled(parseTasks);
           await Promise.allSettled(persistenceTasks);
           try {

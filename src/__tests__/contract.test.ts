@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { BackendStatusReportSchema, ObservabilitySnapshotSchema, RunLatestErrorSchema, RunSummarySchema, StartRunInputSchema, SendFollowupInputSchema, WorkerResultSchema, wrapErr, wrapOk, orchestratorError } from '../contract.js';
+import { BackendStatusReportSchema, ObservabilitySnapshotSchema, RunLatestErrorSchema, RunSummarySchema, RunTerminalReasonSchema, StartRunInputSchema, SendFollowupInputSchema, WorkerResultSchema, wrapErr, wrapOk, orchestratorError } from '../contract.js';
 import { deriveObservedResult } from '../backend/resultDerivation.js';
 
 describe('contract schemas and envelopes', () => {
@@ -154,6 +154,11 @@ describe('contract schemas and envelopes', () => {
     assert.equal(parsed.idle_timeout_seconds, 1200);
     assert.equal(parsed.timeout_reason, 'idle_timeout');
     assert.equal(parsed.latest_error?.category, 'auth');
+  });
+
+  it('parses known and future terminal reasons in run summaries', () => {
+    assert.equal(RunTerminalReasonSchema.parse('backend_fatal_error'), 'backend_fatal_error');
+    assert.equal(RunTerminalReasonSchema.parse('future_terminal_reason'), 'future_terminal_reason');
   });
 
   it('accepts idle timeout input for starts and follow-ups', () => {

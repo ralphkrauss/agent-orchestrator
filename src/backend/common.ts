@@ -187,21 +187,33 @@ export function classifyBackendError(input: {
 }
 
 function classifyErrorCategory(message: string, context: Record<string, unknown> | undefined): RunErrorCategory {
-  const haystack = [
-    message,
-    stringContext(context, 'code'),
-    stringContext(context, 'type'),
-    stringContext(context, 'status'),
-  ].join(' ').toLowerCase();
+  const normalizedMessage = message.toLowerCase();
+  const code = stringContext(context, 'code').toLowerCase();
+  const type = stringContext(context, 'type').toLowerCase();
+  const status = stringContext(context, 'status').toLowerCase();
+  const structured = [code, type, status].join(' ');
+  const haystack = [normalizedMessage, structured].join(' ');
 
   if (/\b(auth|authentication|unauthorized|unauthorised|credential|api key|login)\b/.test(haystack)) return 'auth';
   if (/\b(rate.?limit|too many requests|429)\b/.test(haystack)) return 'rate_limit';
   if (/\b(quota|insufficient_quota|billing|credit|credits)\b/.test(haystack)) return 'quota';
   if (/\b(invalid.?model|unknown model|model .*not found|model .*does not exist|model .*not supported|unsupported model)\b/.test(haystack)) return 'invalid_model';
   if (/\b(permission denied|access denied|not allowed|policy|forbidden)\b/.test(haystack)) return 'permission';
-  if (/\b(protocol|schema|malformed|invalid request|bad request|parse|json|400)\b/.test(haystack)) return 'protocol';
-  if (/\b(unavailable|connection|network|econn|etimedout|timeout|503|502|500)\b/.test(haystack)) return 'backend_unavailable';
+  if (isProtocolError(normalizedMessage, structured, status)) return 'protocol';
+  if (isBackendUnavailableError(normalizedMessage, structured, status)) return 'backend_unavailable';
   return 'unknown';
+}
+
+function isProtocolError(message: string, structured: string, status: string): boolean {
+  return status === '400'
+    || /\b(?:invalid[_-]request|bad[_-]request|schema[_-]validation|json[_-]parse)(?:[_-]error)?\b/.test(structured)
+    || /\b(protocol error|schema validation|schema error|malformed|invalid request|bad request|json parse|parse error|failed to parse|invalid json|unexpected token)\b/.test(message);
+}
+
+function isBackendUnavailableError(message: string, structured: string, status: string): boolean {
+  return ['500', '502', '503', '504'].includes(status)
+    || /\b(econnrefused|econnreset|econnaborted|etimedout|(?:service[_-]unavailable|backend[_-]unavailable)(?:[_-]error)?)\b/.test(structured)
+    || /\b(service unavailable|backend unavailable|network error|connection refused|connection reset|connection failed|connection timed out|request timed out|timeout exceeded|econnrefused|econnreset|etimedout)\b/.test(message);
 }
 
 function stringContext(context: Record<string, unknown> | undefined, key: string): string {

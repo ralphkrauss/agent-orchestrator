@@ -347,13 +347,16 @@ process.stdin.on('end', () => {
     assert.equal(result?.errors.some((error) => error.message === 'worker result event missing'), false);
   });
 
-  it('fails fast when stderr contains a fatal backend error', async () => {
+  it('fails fast when split stderr chunks contain a fatal backend error', async () => {
     const root = await mkdtemp(join(tmpdir(), 'agent-process-'));
     const cli = join(root, 'worker.js');
     await writeFile(cli, `#!/usr/bin/env node
 process.stdin.on('data', () => {});
 process.stdin.on('end', () => {
-  console.error('Authentication failed: invalid API key');
+  process.stderr.write('Authentication failed:');
+  setTimeout(() => {
+    process.stderr.write(' invalid API key\\n');
+  }, 10);
   setInterval(() => {}, 1000);
 });
 `);
@@ -380,6 +383,6 @@ process.stdin.on('end', () => {
     assert.equal(meta.latest_error?.category, 'auth');
     assert.equal(meta.latest_error?.source, 'stderr');
     assert.equal(result?.summary, 'Authentication failed: invalid API key');
-    assert.ok(events.events.some((event) => event.type === 'error' && String(event.payload.text ?? '').includes('Authentication failed')));
+    assert.ok(events.events.some((event) => event.type === 'error' && event.payload.text === 'Authentication failed: invalid API key'));
   });
 });

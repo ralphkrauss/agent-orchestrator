@@ -49,7 +49,7 @@ export const RunTimeoutReasonSchema = z.enum([
 ]);
 export type RunTimeoutReason = z.infer<typeof RunTimeoutReasonSchema>;
 
-export const RunTerminalReasonSchema = z.enum([
+export const KnownRunTerminalReasonSchema = z.enum([
   'completed',
   'worker_failed',
   'cancelled',
@@ -59,8 +59,9 @@ export const RunTerminalReasonSchema = z.enum([
   'pre_spawn_failed',
   'backend_fatal_error',
   'finalization_failed',
-]).or(z.string().trim().min(1));
-export type RunTerminalReason = z.infer<typeof RunTerminalReasonSchema>;
+]);
+export type RunTerminalReason = z.infer<typeof KnownRunTerminalReasonSchema>;
+export const RunTerminalReasonSchema = KnownRunTerminalReasonSchema.or(z.string().trim().min(1));
 
 export const RunErrorCategorySchema = z.enum([
   'auth',

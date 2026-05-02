@@ -203,7 +203,7 @@ function buildSessions(runs: ObservabilityRun[], allMetas: RunMeta[]): Observabi
     const chronological = group.slice().sort((a, b) => a.run.created_at.localeCompare(b.run.created_at));
     const root = rootRun(chronological[0]!, byRunId);
     const sessionStats = stats.get(sessionKeyValue);
-    const updatedAt = maxIso(group.map((run) => run.activity.last_activity_at ?? run.activity.last_event_at ?? run.run.finished_at ?? run.run.started_at ?? run.run.created_at));
+    const updatedAt = maxIso(group.map(latestObservedAt));
     const runningCount = sessionStats?.running_count ?? group.filter((run) => run.run.status === 'running').length;
     const status = sessionStatus(group);
     const latestSessionSummary = lastNonNull(chronological.map((run) => run.run.display.session_summary));
@@ -308,8 +308,18 @@ function sessionPrompt(run: ObservabilityRun): ObservabilitySessionPrompt {
     model: run.model,
     settings: run.settings,
     created_at: run.run.created_at,
-    last_activity_at: run.activity.last_activity_at ?? run.activity.last_event_at,
+    last_activity_at: latestObservedAt(run),
   };
+}
+
+function latestObservedAt(run: ObservabilityRun): string {
+  return maxIso([
+    run.activity.last_activity_at,
+    run.activity.last_event_at,
+    run.run.finished_at,
+    run.run.started_at,
+    run.run.created_at,
+  ].filter((value): value is string => typeof value === 'string'));
 }
 
 function sessionKey(meta: RunMeta, byRunId: Map<string, RunMeta>): string {
