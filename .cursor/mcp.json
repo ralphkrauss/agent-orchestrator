@@ -1,0 +1,36 @@
+{
+  "_comment": "Cursor MCP configuration. Secret-bearing stdio servers route through scripts/mcp-secret-bridge.mjs.",
+  "mcpServers": {
+    "github": {
+      "command": "node",
+      "args": [
+        "scripts/mcp-secret-bridge.mjs",
+        "github",
+        "--",
+        "docker",
+        "run",
+        "-i",
+        "--rm",
+        "-e",
+        "GITHUB_PERSONAL_ACCESS_TOKEN",
+        "ghcr.io/github/github-mcp-server"
+      ]
+    },
+    "gh": {
+      "command": "node",
+      "args": [
+        "scripts/mcp-secret-bridge.mjs",
+        "gh",
+        "--",
+        "node",
+        "scripts/gh-mcp-server.mjs"
+      ]
+    },
+    "agent-orchestrator": {
+      "command": "node",
+      "args": [
+        "dist/cli.js"
+      ]
+    }
+  }
+}

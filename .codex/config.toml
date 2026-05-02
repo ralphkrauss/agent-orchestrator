@@ -1,0 +1,33 @@
+# Shared Codex configuration for this repository.
+#
+# Bridged stdio servers use scripts/mcp-secret-bridge.mjs so the repo can keep
+# project-scoped MCP definitions without committing credentials.
+
+project_doc_fallback_filenames = ["AGENTS.md", "CLAUDE.md"]
+
+[mcp_servers.github]
+command = "node"
+args = ["scripts/mcp-secret-bridge.mjs", "github", "--", "docker", "run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghcr.io/github/github-mcp-server"]
+startup_timeout_sec = 10
+
+[mcp_servers.gh]
+command = "node"
+args = ["scripts/mcp-secret-bridge.mjs", "gh", "--", "node", "scripts/gh-mcp-server.mjs"]
+startup_timeout_sec = 5
+
+[mcp_servers.gh.tools.execute]
+approval_mode = "approve"
+
+[mcp_servers.agent-orchestrator]
+command = "node"
+args = ["dist/cli.js"]
+startup_timeout_sec = 5
+
+[mcp_servers.agent-orchestrator.tools.start_run]
+approval_mode = "approve"
+
+[mcp_servers.agent-orchestrator.tools.send_followup]
+approval_mode = "approve"
+
+[mcp_servers.agent-orchestrator.tools.cancel_run]
+approval_mode = "approve"

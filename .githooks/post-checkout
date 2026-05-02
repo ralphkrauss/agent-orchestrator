@@ -1,0 +1,10 @@
+#!/bin/sh
+# Optional hook: sync generated AI workspace projections after branch checkout.
+
+if [ "$3" = "0" ]; then
+  exit 0
+fi
+
+if command -v node >/dev/null 2>&1 && [ -f scripts/sync-ai-workspace.mjs ]; then
+  node scripts/sync-ai-workspace.mjs >/dev/null 2>&1 || true
+fi

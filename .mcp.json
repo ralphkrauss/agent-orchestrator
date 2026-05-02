@@ -1,0 +1,41 @@
+{
+  "mcpServers": {
+    "github": {
+      "_comment": "GitHub API via the official GitHub MCP server. The bridge maps GITHUB_TOKEN to GITHUB_PERSONAL_ACCESS_TOKEN and can fall back to local gh auth.",
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "scripts/mcp-secret-bridge.mjs",
+        "github",
+        "--",
+        "docker",
+        "run",
+        "-i",
+        "--rm",
+        "-e",
+        "GITHUB_PERSONAL_ACCESS_TOKEN",
+        "ghcr.io/github/github-mcp-server"
+      ]
+    },
+    "gh": {
+      "_comment": "GitHub CLI MCP wrapper. Uses local gh plus bridge-provided GH_TOKEN when available.",
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "scripts/mcp-secret-bridge.mjs",
+        "gh",
+        "--",
+        "node",
+        "scripts/gh-mcp-server.mjs"
+      ]
+    },
+    "agent-orchestrator": {
+      "_comment": "Local dogfood instance of this package. Prerequisite: pnpm build so dist/cli.js exists. Worker CLIs and their auth stay host-local.",
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "dist/cli.js"
+      ]
+    }
+  }
+}

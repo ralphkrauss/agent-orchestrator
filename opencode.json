@@ -1,0 +1,39 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "github": {
+      "type": "local",
+      "command": [
+        "node",
+        "scripts/mcp-secret-bridge.mjs",
+        "github",
+        "--",
+        "docker",
+        "run",
+        "-i",
+        "--rm",
+        "-e",
+        "GITHUB_PERSONAL_ACCESS_TOKEN",
+        "ghcr.io/github/github-mcp-server"
+      ]
+    },
+    "gh": {
+      "type": "local",
+      "command": [
+        "node",
+        "scripts/mcp-secret-bridge.mjs",
+        "gh",
+        "--",
+        "node",
+        "scripts/gh-mcp-server.mjs"
+      ]
+    },
+    "agent-orchestrator": {
+      "type": "local",
+      "command": [
+        "node",
+        "dist/cli.js"
+      ]
+    }
+  }
+}
