@@ -190,8 +190,8 @@ const defaultRunModelSettings = {
 };
 
 export const RunModelSettingsSchema = z.object({
-  reasoning_effort: z.string().nullable().optional().default(null),
-  service_tier: z.string().nullable().optional().default(null),
+  reasoning_effort: ReasoningEffortSchema.nullable().optional().default(null),
+  service_tier: ServiceTierSchema.nullable().optional().default(null),
   mode: z.string().nullable().optional().default(null),
 }).default(defaultRunModelSettings);
 export type RunModelSettings = z.infer<typeof RunModelSettingsSchema>;

@@ -184,5 +184,5 @@ Existing architecture already has durable run metadata, event logs, stdout/stder
 ### OBS-9: Verify affected checks
 
 - **Status:** complete
-- **Evidence:** `pnpm build` passed. `pnpm test` passed with 52 tests across 14 suites. `git diff --check` passed.
+- **Evidence:** `pnpm build` passed. `pnpm test` passed with 70 tests total, 69 passed and 1 skipped. `git diff --check` passed.
 - **Notes:** Hardening pass addressed prompt creation atomicity, event-summary refresh cost, MCP tool registration tests, CLI formatter tests, full prompt history counts under limited snapshots, and observed model mismatch warnings.
