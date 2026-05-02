@@ -46,11 +46,11 @@ orchestrator-help: orchestrator-build
 
 # Print the generated OpenCode orchestration config for inspection.
 orchestrator-opencode-config *args: orchestrator-build
-    node dist/opencodeCli.js --print-config {{args}}
+    node dist/cli.js opencode --print-config {{args}}
 
 # Start OpenCode in constrained orchestration mode.
 orchestrator-opencode *args: orchestrator-build
-    node dist/opencodeCli.js {{args}}
+    node dist/cli.js opencode {{args}}
 
 # Check local worker CLI availability from the current build.
 orchestrator-doctor: orchestrator-build
@@ -58,35 +58,35 @@ orchestrator-doctor: orchestrator-build
 
 # Show the current daemon status. Pass --verbose or --json for observability output.
 orchestrator-status *args: orchestrator-build
-    node dist/daemonCli.js status {{args}}
+    node dist/cli.js status {{args}}
 
 # Show session and run observability output.
 orchestrator-runs *args: orchestrator-build
-    node dist/daemonCli.js runs {{args}}
+    node dist/cli.js runs {{args}}
 
 # Open the interactive terminal observability dashboard.
 orchestrator-watch *args: orchestrator-build
-    node dist/daemonCli.js watch {{args}}
+    node dist/cli.js watch {{args}}
 
 # Explicitly start the daemon. MCP clients also auto-start it via node dist/cli.js.
 orchestrator-start: orchestrator-build
-    node dist/daemonCli.js start
+    node dist/cli.js start
 
 # Stop the daemon. Pass --force to cancel active runs first.
 orchestrator-stop *args: orchestrator-build
-    node dist/daemonCli.js stop {{args}}
+    node dist/cli.js stop {{args}}
 
 # Restart the daemon so it picks up the current build.
 orchestrator-restart: orchestrator-build
-    node dist/daemonCli.js restart --force
+    node dist/cli.js restart --force
 
 # Preview terminal run pruning for runs older than the requested age.
 orchestrator-prune-dry-run days="30": orchestrator-build
-    node dist/daemonCli.js prune --older-than-days {{days}} --dry-run
+    node dist/cli.js prune --older-than-days {{days}} --dry-run
 
 # Prune terminal runs older than the requested age.
 orchestrator-prune days="30": orchestrator-build
-    node dist/daemonCli.js prune --older-than-days {{days}}
+    node dist/cli.js prune --older-than-days {{days}}
 
 # Show AI workspace files.
 ai-files:

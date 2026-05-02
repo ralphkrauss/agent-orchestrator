@@ -21,9 +21,14 @@ import {
 import type { ObservabilitySnapshot, OrchestratorError } from '../contract.js';
 
 const paths = daemonPaths();
-const command = process.argv[2] ?? 'status';
+const daemonCommands = new Set(['start', 'stop', 'restart', 'status', 'runs', 'watch', 'prune']);
 
-async function main(): Promise<void> {
+export function isDaemonCliCommand(command: string | undefined): boolean {
+  return command !== undefined && daemonCommands.has(command);
+}
+
+export async function runDaemonCli(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
+  const command = argv[0] ?? 'status';
   switch (command) {
     case '--help':
     case '-h':
@@ -34,22 +39,22 @@ async function main(): Promise<void> {
       await start();
       break;
     case 'stop':
-      await stop(process.argv.includes('--force'));
+      await stop(argv.includes('--force'));
       break;
     case 'restart':
-      await restart(process.argv.includes('--force'));
+      await restart(argv.includes('--force'));
       break;
     case 'status':
-      await status();
+      await status(argv);
       break;
     case 'runs':
-      await runs();
+      await runs(argv);
       break;
     case 'watch':
-      await watch();
+      await watch(argv);
       break;
     case 'prune':
-      await prune();
+      await prune(argv);
       break;
     default:
       process.stderr.write(daemonHelp());
@@ -58,7 +63,20 @@ async function main(): Promise<void> {
 }
 
 function daemonHelp(): string {
-  return 'Usage: agent-orchestrator-daemon start | stop [--force] | restart [--force] | status [--verbose|--json] | runs [--json] [--prompts] | watch [--interval-ms <ms>] [--limit <n>] | prune --older-than-days <days> [--dry-run]\n';
+  return [
+    'Usage:',
+    '  agent-orchestrator start | stop [--force] | restart [--force] | status [--verbose|--json] | runs [--json] [--prompts] | watch [--interval-ms <ms>] [--limit <n>] | prune --older-than-days <days> [--dry-run]',
+    '  agent-orchestrator-daemon start | stop [--force] | restart [--force] | status [--verbose|--json] | runs [--json] [--prompts] | watch [--interval-ms <ms>] [--limit <n>] | prune --older-than-days <days> [--dry-run]',
+    '',
+  ].join('\n');
+}
+
+function pruneUsage(): string {
+  return [
+    'Usage: agent-orchestrator prune --older-than-days <days> [--dry-run]',
+    '   or: agent-orchestrator-daemon prune --older-than-days <days> [--dry-run]',
+    '',
+  ].join('\n');
 }
 
 async function start(): Promise<void> {
@@ -105,10 +123,10 @@ async function restart(force: boolean): Promise<void> {
   await start();
 }
 
-async function status(): Promise<void> {
-  if (process.argv.includes('--verbose') || process.argv.includes('--json')) {
-    const envelope = await readSnapshotFromDaemonOrStore(snapshotOptionsFromArgs({ includePrompts: process.argv.includes('--prompts') }));
-    if (process.argv.includes('--json')) {
+async function status(argv: readonly string[]): Promise<void> {
+  if (argv.includes('--verbose') || argv.includes('--json')) {
+    const envelope = await readSnapshotFromDaemonOrStore(snapshotOptionsFromArgs(argv, { includePrompts: argv.includes('--prompts') }));
+    if (argv.includes('--json')) {
       process.stdout.write(`${JSON.stringify(envelope, null, 2)}\n`);
     } else {
       process.stdout.write(formatSnapshot(envelope));
@@ -140,18 +158,18 @@ async function status(): Promise<void> {
   }
 }
 
-async function runs(): Promise<void> {
-  const envelope = await readSnapshotFromDaemonOrStore(snapshotOptionsFromArgs({ includePrompts: process.argv.includes('--prompts') }));
-  if (process.argv.includes('--json')) {
+async function runs(argv: readonly string[]): Promise<void> {
+  const envelope = await readSnapshotFromDaemonOrStore(snapshotOptionsFromArgs(argv, { includePrompts: argv.includes('--prompts') }));
+  if (argv.includes('--json')) {
     process.stdout.write(`${JSON.stringify(envelope, null, 2)}\n`);
   } else {
     process.stdout.write(formatSnapshot(envelope));
   }
 }
 
-async function watch(): Promise<void> {
-  const intervalMs = readPositiveIntOption('--interval-ms') ?? 1_000;
-  const options = snapshotOptionsFromArgs({ includePrompts: true });
+async function watch(argv: readonly string[]): Promise<void> {
+  const intervalMs = readPositiveIntOption(argv, '--interval-ms') ?? 1_000;
+  const options = snapshotOptionsFromArgs(argv, { includePrompts: true });
   if (!process.stdout.isTTY || !process.stdin.isTTY) {
     process.stdout.write(formatSnapshot(await readSnapshotFromDaemonOrStore(options)));
     return;
@@ -244,16 +262,16 @@ async function watch(): Promise<void> {
   await done;
 }
 
-async function prune(): Promise<void> {
-  const olderThanDays = readPositiveIntOption('--older-than-days');
+async function prune(argv: readonly string[]): Promise<void> {
+  const olderThanDays = readPositiveIntOption(argv, '--older-than-days');
   if (!olderThanDays) {
-    process.stderr.write('Usage: daemonCli.js prune --older-than-days <days> [--dry-run]\n');
+    process.stderr.write(pruneUsage());
     process.exit(1);
   }
 
   const params = {
     older_than_days: olderThanDays,
-    dry_run: process.argv.includes('--dry-run'),
+    dry_run: argv.includes('--dry-run'),
   };
   let result: PruneRunsResult;
   if (await ping()) {
@@ -278,12 +296,12 @@ interface SnapshotOptions {
   diagnostics: boolean;
 }
 
-function snapshotOptionsFromArgs(defaults: Partial<SnapshotOptions> = {}): SnapshotOptions {
+function snapshotOptionsFromArgs(argv: readonly string[], defaults: Partial<SnapshotOptions> = {}): SnapshotOptions {
   return {
-    limit: readPositiveIntOption('--limit') ?? defaults.limit ?? 50,
+    limit: readPositiveIntOption(argv, '--limit') ?? defaults.limit ?? 50,
     includePrompts: defaults.includePrompts ?? false,
-    recentEventLimit: readPositiveIntOption('--recent-events') ?? defaults.recentEventLimit ?? 5,
-    diagnostics: process.argv.includes('--diagnostics') || defaults.diagnostics === true,
+    recentEventLimit: readPositiveIntOption(argv, '--recent-events') ?? defaults.recentEventLimit ?? 5,
+    diagnostics: argv.includes('--diagnostics') || defaults.diagnostics === true,
   };
 }
 
@@ -386,11 +404,11 @@ async function readPid(): Promise<string | null> {
   return (await readFile(paths.pid, 'utf8')).trim();
 }
 
-function readPositiveIntOption(name: string): number | null {
-  for (let index = 3; index < process.argv.length; index += 1) {
-    const arg = process.argv[index];
+function readPositiveIntOption(argv: readonly string[], name: string): number | null {
+  for (let index = 1; index < argv.length; index += 1) {
+    const arg = argv[index];
     if (arg === name) {
-      const value = Number.parseInt(process.argv[index + 1] ?? '', 10);
+      const value = Number.parseInt(argv[index + 1] ?? '', 10);
       return Number.isInteger(value) && value > 0 ? value : null;
     }
     if (arg?.startsWith(`${name}=`)) {
@@ -400,8 +418,3 @@ function readPositiveIntOption(name: string): number | null {
   }
   return null;
 }
-
-main().catch((error) => {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-  process.exit(1);
-});

@@ -77,8 +77,8 @@ Normal OpenCode development sessions use `opencode.json`. The orchestration
 launcher is intentionally separate:
 
 ```bash
-agent-orchestrator-opencode
 agent-orchestrator opencode
+agent-orchestrator-opencode
 ```
 
 That launcher starts OpenCode with a process-local `OPENCODE_CONFIG_CONTENT`
@@ -200,8 +200,8 @@ dogfooding, restart the daemon so the frontend and daemon package versions
 match:
 
 ```bash
-node dist/daemonCli.js restart
-node dist/daemonCli.js restart --force
+node dist/cli.js restart
+node dist/cli.js restart --force
 just orchestrator-restart
 ```
 

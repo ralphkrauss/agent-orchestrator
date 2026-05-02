@@ -146,9 +146,10 @@ writes allowed in OpenCode orchestration mode.
 Launch from the repository where workers should run:
 
 ```bash
+agent-orchestrator opencode
+agent-orchestrator opencode --cwd /path/to/workspace
 agent-orchestrator-opencode
 agent-orchestrator-opencode --cwd /path/to/workspace
-agent-orchestrator opencode --cwd /path/to/workspace
 ```
 
 OpenCode passthrough arguments after `--` are intentionally limited to no
@@ -228,12 +229,12 @@ configured backend/model settings.
 Useful options:
 
 ```bash
-agent-orchestrator-opencode --print-config
-agent-orchestrator-opencode --profiles-file ~/.config/agent-orchestrator/profiles.json
-agent-orchestrator-opencode --profiles-json '{"version":1,"profiles":{}}'
-agent-orchestrator-opencode --skills .agents/skills
-agent-orchestrator-opencode --orchestrator-model anthropic/claude-sonnet-4-6
-agent-orchestrator-opencode --orchestrator-small-model openai/gpt-5.4-mini
+agent-orchestrator opencode --print-config
+agent-orchestrator opencode --profiles-file ~/.config/agent-orchestrator/profiles.json
+agent-orchestrator opencode --profiles-json '{"version":1,"profiles":{}}'
+agent-orchestrator opencode --skills .agents/skills
+agent-orchestrator opencode --orchestrator-model anthropic/claude-sonnet-4-6
+agent-orchestrator opencode --orchestrator-small-model openai/gpt-5.4-mini
 ```
 
 Environment fallbacks use the `AGENT_ORCHESTRATOR_OPENCODE_*` prefix, including
@@ -277,30 +278,31 @@ The guarantee is deliberately scoped:
 When installed locally or globally, use:
 
 ```bash
-agent-orchestrator-daemon status
-agent-orchestrator-daemon status --verbose
-agent-orchestrator-daemon runs
-agent-orchestrator-daemon runs --json --prompts
-agent-orchestrator-daemon watch
-agent-orchestrator-daemon start
-agent-orchestrator-daemon stop
-agent-orchestrator-daemon stop --force
-agent-orchestrator-daemon restart
-agent-orchestrator-daemon restart --force
-agent-orchestrator-daemon prune --older-than-days 30 --dry-run
-agent-orchestrator-daemon prune --older-than-days 30
+agent-orchestrator status
+agent-orchestrator status --verbose
+agent-orchestrator runs
+agent-orchestrator runs --json --prompts
+agent-orchestrator watch
+agent-orchestrator start
+agent-orchestrator stop
+agent-orchestrator stop --force
+agent-orchestrator restart
+agent-orchestrator restart --force
+agent-orchestrator prune --older-than-days 30 --dry-run
+agent-orchestrator prune --older-than-days 30
 ```
 
-With `npx`, target the daemon bin explicitly:
+`agent-orchestrator-daemon` remains available as a standalone daemon-control
+alias for scripts. With `npx`, run daemon commands through the main bin:
 
 ```bash
-npx -y --package @ralphkrauss/agent-orchestrator@latest agent-orchestrator-daemon status
-npx -y --package @ralphkrauss/agent-orchestrator@latest agent-orchestrator-daemon runs
-npx -y --package @ralphkrauss/agent-orchestrator@latest agent-orchestrator-daemon watch
-npx -y --package @ralphkrauss/agent-orchestrator@latest agent-orchestrator-daemon stop --force
-npx -y --package @ralphkrauss/agent-orchestrator@latest agent-orchestrator-daemon restart
-npx -y --package @ralphkrauss/agent-orchestrator@latest agent-orchestrator-daemon restart --force
-npx -y --package @ralphkrauss/agent-orchestrator@latest agent-orchestrator-daemon prune --older-than-days 30 --dry-run
+npx -y @ralphkrauss/agent-orchestrator@latest status
+npx -y @ralphkrauss/agent-orchestrator@latest runs
+npx -y @ralphkrauss/agent-orchestrator@latest watch
+npx -y @ralphkrauss/agent-orchestrator@latest stop --force
+npx -y @ralphkrauss/agent-orchestrator@latest restart
+npx -y @ralphkrauss/agent-orchestrator@latest restart --force
+npx -y @ralphkrauss/agent-orchestrator@latest prune --older-than-days 30 --dry-run
 ```
 
 `stop` refuses while runs are active and prints the active run IDs. `stop --force` cancels active runs through the normal cancellation path, waits for terminal statuses, and exits. `restart` uses the same safe default and refuses active runs; `restart --force` cancels active runs before starting a fresh daemon. Direct `SIGTERM`/`SIGINT` to the daemon behaves like `stop --force`; `SIGKILL` cannot be caught and any in-flight runs become `orphaned` on next daemon startup.
@@ -308,21 +310,21 @@ npx -y --package @ralphkrauss/agent-orchestrator@latest agent-orchestrator-daemo
 After changing the configured npm version or dist-tag, restart the daemon so it picks up the same package build as the MCP frontend:
 
 ```bash
-npx -y --package @ralphkrauss/agent-orchestrator@latest agent-orchestrator-daemon restart
+npx -y @ralphkrauss/agent-orchestrator@latest restart
 ```
 
 `prune` deletes only terminal runs with `finished_at` older than the requested age. Use `--dry-run` first to inspect the matching run IDs.
 
 ## Observability
 
-Use the daemon CLI to inspect sessions and runs:
+Use the main CLI to inspect sessions and runs:
 
 ```bash
-agent-orchestrator-daemon status --verbose
-agent-orchestrator-daemon runs
-agent-orchestrator-daemon runs --json
-agent-orchestrator-daemon runs --json --prompts
-agent-orchestrator-daemon watch
+agent-orchestrator status --verbose
+agent-orchestrator runs
+agent-orchestrator runs --json
+agent-orchestrator runs --json --prompts
+agent-orchestrator watch
 ```
 
 `watch` opens an interactive terminal dashboard. Use arrow keys to move through
@@ -401,9 +403,9 @@ Secrets and CLI credentials are not stored by the MCP package. Worker authentica
 Manual cleanup:
 
 ```bash
-agent-orchestrator-daemon prune --older-than-days 30 --dry-run
-agent-orchestrator-daemon prune --older-than-days 30
-agent-orchestrator-daemon stop --force
+agent-orchestrator prune --older-than-days 30 --dry-run
+agent-orchestrator prune --older-than-days 30
+agent-orchestrator stop --force
 rm -rf "${AGENT_ORCHESTRATOR_HOME:-$HOME/.agent-orchestrator}"
 ```
 

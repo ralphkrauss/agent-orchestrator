@@ -302,7 +302,6 @@ export class RunStore {
         terminal_context: terminal?.context ?? current.terminal_context,
         latest_error: terminal?.latest_error ?? current.latest_error,
       });
-      await writeAtomicJson(this.metaPath(runId), next);
       const finalResult = result ?? WorkerResultSchema.parse({
         status: status === 'completed' ? 'completed' : 'failed',
         summary: '',
@@ -312,6 +311,7 @@ export class RunStore {
         errors,
       });
       await writeAtomicJson(this.resultPath(runId), finalResult);
+      await writeAtomicJson(this.metaPath(runId), next);
       const lastSeq = await this.getLastSequence(runId);
       const event = WorkerEventSchema.parse({
         seq: lastSeq + 1,

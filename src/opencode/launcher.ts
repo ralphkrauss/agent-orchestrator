@@ -117,7 +117,7 @@ export async function runOpenCodeLauncher(
 ): Promise<number> {
   const parsed = parseOpenCodeLauncherArgs(argv, io.env ?? process.env);
   if (!parsed.ok) {
-    io.stderr.write(`${parsed.error}\nRun agent-orchestrator-opencode --help for usage.\n`);
+    io.stderr.write(`${parsed.error}\nRun agent-orchestrator opencode --help for usage.\n`);
     return 1;
   }
   const options = parsed.value;
@@ -188,11 +188,11 @@ export async function runOpenCodeLauncher(
 }
 
 export function openCodeLauncherHelp(): string {
-  return `agent-orchestrator-opencode
+  return `agent-orchestrator opencode
 
 Usage:
-  agent-orchestrator-opencode [options] [-- <opencode args>]
   agent-orchestrator opencode [options] [-- <opencode args>]
+  agent-orchestrator-opencode [options] [-- <opencode args>]
 
 Options:
   --cwd <path>                         Target workspace. Defaults to current directory.

@@ -7,7 +7,7 @@ import { join, resolve } from 'node:path';
 import { Writable } from 'node:stream';
 import { createWorkerCapabilityCatalog, validateWorkerProfiles, type WorkerProfileManifest } from '../opencode/capabilities.js';
 import { buildOpenCodeHarnessConfig } from '../opencode/config.js';
-import { parseOpenCodeLauncherArgs, runOpenCodeLauncher } from '../opencode/launcher.js';
+import { openCodeLauncherHelp, parseOpenCodeLauncherArgs, runOpenCodeLauncher } from '../opencode/launcher.js';
 import { loadProjectSkills } from '../opencode/skills.js';
 
 describe('OpenCode orchestration harness', () => {
@@ -309,6 +309,14 @@ describe('OpenCode orchestration harness', () => {
     assert.equal(parsed.ok && parsed.value.skillsPath, resolve('/repo/.agents/skills'));
   });
 
+  it('documents the canonical top-level OpenCode command first', () => {
+    const help = openCodeLauncherHelp();
+
+    assert.match(help, /^agent-orchestrator opencode/);
+    assert.match(help, /agent-orchestrator opencode \[options\]/);
+    assert.match(help, /agent-orchestrator-opencode \[options\]/);
+  });
+
   it('rejects malformed inline profile JSON', async () => {
     const root = await mkdtemp(join(tmpdir(), 'agent-opencode-harness-'));
     const stdout = captureStream();
@@ -359,6 +367,21 @@ describe('OpenCode orchestration harness', () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  it('points launcher option errors to the canonical top-level help command', async () => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+
+    const code = await runOpenCodeLauncher(['--unknown'], {
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      env: process.env,
+    });
+
+    assert.equal(code, 1);
+    assert.match(stderr.value(), /Unknown option: --unknown/);
+    assert.match(stderr.value(), /Run agent-orchestrator opencode --help/);
   });
 });
 
