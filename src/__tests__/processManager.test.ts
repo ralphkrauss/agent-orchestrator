@@ -187,6 +187,38 @@ process.stdin.on('end', () => {
     assert.deepStrictEqual(result?.errors, []);
   });
 
+  it('persists timeout latest_error from terminal overrides', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-process-'));
+    const cli = join(root, 'worker.js');
+    await writeFile(cli, `#!/usr/bin/env node
+process.stdin.resume();
+setInterval(() => {}, 1000);
+`);
+    await chmod(cli, 0o755);
+
+    const store = new RunStore(root);
+    const run = await store.createRun({ backend: 'codex', cwd: root });
+    const manager = new ProcessManager(store);
+    const managed = await manager.start(run.run_id, new CodexBackend(), {
+      command: cli,
+      args: [],
+      cwd: root,
+      stdinPayload: 'wait',
+    });
+
+    managed.cancel('timed_out', { reason: 'idle_timeout', timeout_reason: 'idle_timeout' });
+
+    const meta = await managed.completion;
+    const result = await store.loadResult(run.run_id);
+    assert.equal(meta.status, 'timed_out');
+    assert.equal(meta.timeout_reason, 'idle_timeout');
+    assert.equal(meta.terminal_reason, 'idle_timeout');
+    assert.equal(meta.latest_error?.category, 'timeout');
+    assert.equal(meta.latest_error?.source, 'watchdog');
+    assert.equal(result?.status, 'failed');
+    assert.equal(result?.errors[0]?.message, 'idle timeout exceeded');
+  });
+
   it('fails fast on parsed fatal worker errors even if a result event follows', async () => {
     const root = await mkdtemp(join(tmpdir(), 'agent-process-'));
     const cli = join(root, 'worker.js');

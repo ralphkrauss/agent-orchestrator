@@ -348,9 +348,14 @@ export class ProcessManager {
       ? workerResultError(backend, finalized.result.errors[0])
       : null;
     const latestError = validationLatestError ?? errors[0] ?? resultLatestError;
-    const terminalDetails = terminalOverrideDetails ?? (runStatus === 'failed' && latestError
-      ? { reason: validationLatestError ? 'finalization_failed' as const : 'worker_failed' as const, latest_error: latestError, context: latestError.context }
-      : undefined);
+    const terminalDetails = terminalOverrideDetails
+      ? {
+          ...terminalOverrideDetails,
+          latest_error: terminalOverrideDetails.latest_error ?? (runStatus === 'timed_out' ? latestError : undefined),
+        }
+      : runStatus === 'failed' && latestError
+        ? { reason: validationLatestError ? 'finalization_failed' as const : 'worker_failed' as const, latest_error: latestError, context: latestError.context }
+        : undefined;
     return this.store.markTerminal(runId, runStatus, finalized.result.errors, finalized.result, terminalDetails);
   }
 }
