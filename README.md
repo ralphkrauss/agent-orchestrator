@@ -147,6 +147,10 @@ When installed locally or globally, use:
 
 ```bash
 agent-orchestrator-mcp-daemon status
+agent-orchestrator-mcp-daemon status --verbose
+agent-orchestrator-mcp-daemon runs
+agent-orchestrator-mcp-daemon runs --json --prompts
+agent-orchestrator-mcp-daemon watch
 agent-orchestrator-mcp-daemon start
 agent-orchestrator-mcp-daemon stop
 agent-orchestrator-mcp-daemon stop --force
@@ -158,6 +162,8 @@ With `npx`, target the daemon bin explicitly:
 
 ```bash
 npx -y --package @ralphkrauss/agent-orchestrator-mcp@latest agent-orchestrator-mcp-daemon status
+npx -y --package @ralphkrauss/agent-orchestrator-mcp@latest agent-orchestrator-mcp-daemon runs
+npx -y --package @ralphkrauss/agent-orchestrator-mcp@latest agent-orchestrator-mcp-daemon watch
 npx -y --package @ralphkrauss/agent-orchestrator-mcp@latest agent-orchestrator-mcp-daemon stop --force
 npx -y --package @ralphkrauss/agent-orchestrator-mcp@latest agent-orchestrator-mcp-daemon prune --older-than-days 30 --dry-run
 ```
@@ -165,6 +171,53 @@ npx -y --package @ralphkrauss/agent-orchestrator-mcp@latest agent-orchestrator-m
 `stop` refuses while runs are active and prints the active run IDs. `stop --force` cancels active runs through the normal cancellation path, waits for terminal statuses, and exits. Direct `SIGTERM`/`SIGINT` to the daemon behaves like `stop --force`; `SIGKILL` cannot be caught and any in-flight runs become `orphaned` on next daemon startup.
 
 `prune` deletes only terminal runs with `finished_at` older than the requested age. Use `--dry-run` first to inspect the matching run IDs.
+
+## Observability
+
+Use the daemon CLI to inspect sessions and runs:
+
+```bash
+agent-orchestrator-mcp-daemon status --verbose
+agent-orchestrator-mcp-daemon runs
+agent-orchestrator-mcp-daemon runs --json
+agent-orchestrator-mcp-daemon runs --json --prompts
+agent-orchestrator-mcp-daemon watch
+```
+
+`watch` opens an interactive terminal dashboard. Use arrow keys to move through
+sessions and prompts, Enter to open details, Backspace or Escape to return, and
+`q` to quit. Detail views include the raw prompt, recent activity, model/source,
+session-resume audit state, artifact paths, and size indicators.
+
+The dashboard groups runs by backend session ID when available and falls back to
+the parent/child run chain while a backend session is still pending. Follow-up
+runs record both the requested session ID and the backend-observed session ID so
+the dashboard can warn when a resume appears to start or report a different
+session.
+
+Prompts are stored as `prompt.txt` in each private run directory so operators can
+inspect exactly what was sent to a worker. The run store is local and permission
+restricted, but prompts may contain sensitive instructions or secrets supplied by
+callers. Do not pass API keys or other credentials in prompts unless you are
+comfortable with them being written to the local run store.
+
+For human-readable dashboard labels, pass metadata on `start_run` or
+`send_followup`:
+
+```json
+{
+  "metadata": {
+    "session_title": "Release readiness",
+    "session_summary": "Prepare and verify the npm package",
+    "prompt_title": "Run release checks",
+    "prompt_summary": "Build, test, and inspect publish readiness"
+  }
+}
+```
+
+`title` and `summary` are also accepted as shorthand. Follow-up runs inherit the
+session title and summary from the parent unless overridden. Prompt title and
+summary are per run.
 
 ## Run Store
 
@@ -180,6 +233,7 @@ Default location:
     <run-id>/
       meta.json
       events.jsonl
+      prompt.txt
       stdout.log
       stderr.log
       result.json
@@ -228,18 +282,37 @@ Expected operational failures use `{ ok: false, error }`. MCP `isError: true` is
 | Tool | Input | Success payload |
 |---|---|---|
 | `get_backend_status` | `{}` | `{ status: BackendStatusReport }` |
-| `start_run` | `{ backend: "codex" \| "claude", prompt: string, cwd: string, model?: string, metadata?: object, execution_timeout_seconds?: number }` | `{ run_id: string }` |
+| `get_observability_snapshot` | `{ limit?: number, include_prompts?: boolean, recent_event_limit?: number, diagnostics?: boolean }` | `{ snapshot: ObservabilitySnapshot }` |
+| `start_run` | `{ backend: "codex" \| "claude", prompt: string, cwd: string, model?: string, reasoning_effort?: string, service_tier?: string, metadata?: object, execution_timeout_seconds?: number }` | `{ run_id: string }` |
 | `list_runs` | `{}` | `{ runs: RunSummary[] }` |
 | `get_run_status` | `{ run_id: string }` | `{ run_summary: RunSummary }` |
 | `get_run_events` | `{ run_id: string, after_sequence?: number, limit?: number }` | `{ events: WorkerEvent[], next_sequence: number, has_more: boolean }` |
 | `wait_for_run` | `{ run_id: string, wait_seconds: number }` | Terminal status or `{ status: "still_running", wait_exceeded: true, run_summary }` |
 | `get_run_result` | `{ run_id: string }` | `{ run_summary: RunSummary, result: WorkerResult \| null }` |
-| `send_followup` | `{ run_id: string, prompt: string, model?: string, execution_timeout_seconds?: number }` | `{ run_id: string }` for a new child run |
+| `send_followup` | `{ run_id: string, prompt: string, model?: string, reasoning_effort?: string, service_tier?: string, metadata?: object, execution_timeout_seconds?: number }` | `{ run_id: string }` for a new child run |
 | `cancel_run` | `{ run_id: string }` | `{ accepted: true, status: RunStatus }` |
 
 Most worker preparation failures are run failures rather than envelope failures. For example, if `codex` is missing, `start_run` creates a durable run and that run lands in `failed` with `WORKER_BINARY_MISSING` details.
 
-`model` is passed through to the selected worker CLI as provided. Codex and Claude model names change over time, so the orchestrator validates only that the value is a non-empty string. Follow-up runs inherit the parent run model unless a new `model` is supplied.
+`model` is passed through to the selected worker CLI as provided. Codex model
+names change over time, so Codex validates only that the value is a non-empty
+string. Claude aliases such as `opus` and `sonnet` are rejected when supplied
+explicitly; pass a direct model id such as `claude-opus-4-7` or
+`claude-opus-4-7[1m]` so the dashboard and worker invocation are auditable.
+Follow-up runs inherit the parent run model unless a new `model` is supplied.
+
+`reasoning_effort` is mapped to Codex `model_reasoning_effort` or Claude
+`--effort`. Codex accepts `none`, `minimal`, `low`, `medium`, `high`, and
+`xhigh`. Claude accepts `low`, `medium`, `high`, `xhigh`, and `max` on supported
+direct model ids; `xhigh` is accepted only for Opus 4.7 to avoid Claude Code's
+documented fallback to `high` on older models. `service_tier` is Codex-only:
+`fast` and `flex` are passed through, while `normal` runs Codex without loading
+the user's config so a global fast setting is not inherited.
+
+The observability snapshot includes additive fields for model source, display
+metadata, raw prompt artifacts, activity summaries, artifact sizes, and
+session-resume audit state. Older runs without these fields load with
+`legacy_unknown` or `null` defaults.
 
 ## Operational Notes
 

@@ -80,15 +80,36 @@ describe('agent orchestrator integration with mock CLIs', () => {
     const repo = await createGitRepo(fixture.root);
     const service = await createService(fixture.home);
 
-    const start = await service.startRun({ backend: 'codex', prompt: 'hello', cwd: repo, model: 'gpt-5.2' });
+    const start = await service.startRun({
+      backend: 'codex',
+      prompt: 'hello',
+      cwd: repo,
+      model: 'gpt-5.2',
+      reasoning_effort: 'xhigh',
+      service_tier: 'fast',
+      metadata: {
+        session_title: 'Model session',
+        prompt_title: 'Initial model prompt',
+      },
+    });
     const parentId = start.ok ? (start as unknown as { run_id: string }).run_id : '';
     await service.waitForRun({ run_id: parentId, wait_seconds: 5 });
 
-    const inherited = await service.sendFollowup({ run_id: parentId, prompt: 'follow up' });
+    const inherited = await service.sendFollowup({
+      run_id: parentId,
+      prompt: 'follow up',
+      metadata: { prompt_title: 'Inherited model prompt' },
+    });
     const inheritedId = inherited.ok ? (inherited as unknown as { run_id: string }).run_id : '';
     await service.waitForRun({ run_id: inheritedId, wait_seconds: 5 });
 
-    const overridden = await service.sendFollowup({ run_id: parentId, prompt: 'follow up override', model: 'gpt-5.4' });
+    const overridden = await service.sendFollowup({
+      run_id: parentId,
+      prompt: 'follow up override',
+      model: 'gpt-5.4',
+      reasoning_effort: 'medium',
+      service_tier: 'normal',
+    });
     const overriddenId = overridden.ok ? (overridden as unknown as { run_id: string }).run_id : '';
     await service.waitForRun({ run_id: overriddenId, wait_seconds: 5 });
 
@@ -98,11 +119,135 @@ describe('agent orchestrator integration with mock CLIs', () => {
     assert.equal(parent.ok && (parent as unknown as { run_summary: { model: string } }).run_summary.model, 'gpt-5.2');
     assert.equal(childInherited.ok && (childInherited as unknown as { run_summary: { model: string } }).run_summary.model, 'gpt-5.2');
     assert.equal(childOverridden.ok && (childOverridden as unknown as { run_summary: { model: string } }).run_summary.model, 'gpt-5.4');
+    assert.equal(parent.ok && (parent as unknown as { run_summary: { model_source: string; display: { session_title: string; prompt_title: string }; observed_session_id: string } }).run_summary.model_source, 'explicit');
+    assert.equal(childInherited.ok && (childInherited as unknown as { run_summary: { model_source: string; requested_session_id: string; display: { session_title: string; prompt_title: string } } }).run_summary.model_source, 'inherited');
+    assert.equal(childInherited.ok && (childInherited as unknown as { run_summary: { requested_session_id: string } }).run_summary.requested_session_id, 'codex-session-1');
+    assert.deepStrictEqual(parent.ok && (parent as unknown as { run_summary: { model_settings: unknown } }).run_summary.model_settings, { reasoning_effort: 'xhigh', service_tier: 'fast', mode: null });
+    assert.deepStrictEqual(childInherited.ok && (childInherited as unknown as { run_summary: { model_settings: unknown } }).run_summary.model_settings, { reasoning_effort: 'xhigh', service_tier: 'fast', mode: null });
+    assert.deepStrictEqual(childOverridden.ok && (childOverridden as unknown as { run_summary: { model_settings: unknown } }).run_summary.model_settings, { reasoning_effort: 'medium', service_tier: null, mode: 'normal' });
+    assert.deepStrictEqual(
+      parent.ok && (parent as unknown as { run_summary: { worker_invocation: { args: string[] } } }).run_summary.worker_invocation.args,
+      ['exec', '--json', '--skip-git-repo-check', '--cd', repo, '--model', 'gpt-5.2', '-c', 'model_reasoning_effort="xhigh"', '-c', 'service_tier="fast"', '-'],
+    );
+    assert.equal(parent.ok && (parent as unknown as { run_summary: { display: { session_title: string; prompt_title: string } } }).run_summary.display.session_title, 'Model session');
+    assert.equal(childInherited.ok && (childInherited as unknown as { run_summary: { display: { session_title: string; prompt_title: string } } }).run_summary.display.prompt_title, 'Inherited model prompt');
+    assert.equal(await service.store.readPrompt(parentId), 'hello');
 
     const args = await readJsonLines<string[]>(join(repo, 'codex-args.jsonl'));
-    assert.deepStrictEqual(args[0], ['exec', '--json', '--skip-git-repo-check', '--cd', repo, '--model', 'gpt-5.2', '-']);
-    assert.deepStrictEqual(args[1], ['exec', 'resume', '--json', '--skip-git-repo-check', '--model', 'gpt-5.2', 'codex-session-1', '-']);
-    assert.deepStrictEqual(args[2], ['exec', 'resume', '--json', '--skip-git-repo-check', '--model', 'gpt-5.4', 'codex-session-1', '-']);
+    assert.deepStrictEqual(args[0], ['exec', '--json', '--skip-git-repo-check', '--cd', repo, '--model', 'gpt-5.2', '-c', 'model_reasoning_effort="xhigh"', '-c', 'service_tier="fast"', '-']);
+    assert.deepStrictEqual(args[1], ['exec', 'resume', '--json', '--skip-git-repo-check', '--model', 'gpt-5.2', '-c', 'model_reasoning_effort="xhigh"', '-c', 'service_tier="fast"', 'codex-session-1', '-']);
+    assert.deepStrictEqual(args[2], ['exec', 'resume', '--json', '--skip-git-repo-check', '--ignore-user-config', '--model', 'gpt-5.4', '-c', 'model_reasoning_effort="medium"', 'codex-session-1', '-']);
+  });
+
+  it('rejects model settings that a backend cannot apply', async () => {
+    const fixture = await createFixture();
+    const repo = await createGitRepo(fixture.root);
+    const service = await createService(fixture.home);
+
+    const claudeTier = await service.startRun({
+      backend: 'claude',
+      prompt: 'hello',
+      cwd: repo,
+      model: 'claude-opus-4-7',
+      service_tier: 'fast',
+    });
+    assert.equal(claudeTier.ok, false);
+
+    const claudeAlias = await service.startRun({
+      backend: 'claude',
+      prompt: 'hello',
+      cwd: repo,
+      model: 'opus',
+    });
+    assert.equal(claudeAlias.ok, false);
+
+    const claudeUnknownEffortModel = await service.startRun({
+      backend: 'claude',
+      prompt: 'hello',
+      cwd: repo,
+      model: 'claude-sonnet-4-5',
+      reasoning_effort: 'high',
+    });
+    assert.equal(claudeUnknownEffortModel.ok, false);
+
+    const claudeXhighFallback = await service.startRun({
+      backend: 'claude',
+      prompt: 'hello',
+      cwd: repo,
+      model: 'claude-sonnet-4-6',
+      reasoning_effort: 'xhigh',
+    });
+    assert.equal(claudeXhighFallback.ok, false);
+
+    const claudeMax = await service.startRun({
+      backend: 'claude',
+      prompt: 'hello',
+      cwd: repo,
+      model: 'claude-opus-4-7',
+      reasoning_effort: 'max',
+    });
+    assert.equal(claudeMax.ok, true);
+    if (claudeMax.ok) {
+      await service.waitForRun({ run_id: (claudeMax as unknown as { run_id: string }).run_id, wait_seconds: 5 });
+    }
+
+    const codexMax = await service.startRun({
+      backend: 'codex',
+      prompt: 'hello',
+      cwd: repo,
+      model: 'gpt-5.5',
+      reasoning_effort: 'max',
+    });
+    assert.equal(codexMax.ok, false);
+  });
+
+  it('records requested and observed backend session ids separately for resume auditing', async () => {
+    const fixture = await createFixture();
+    const repo = await createGitRepo(fixture.root);
+    const service = await createService(fixture.home);
+
+    const start = await service.startRun({ backend: 'claude', prompt: 'hello', cwd: repo });
+    const parentId = start.ok ? (start as unknown as { run_id: string }).run_id : '';
+    await service.waitForRun({ run_id: parentId, wait_seconds: 5 });
+
+    const follow = await service.sendFollowup({ run_id: parentId, prompt: 'session-mismatch' });
+    const childId = follow.ok ? (follow as unknown as { run_id: string }).run_id : '';
+    await service.waitForRun({ run_id: childId, wait_seconds: 5 });
+
+    const child = await service.getRunStatus({ run_id: childId });
+    assert.equal(child.ok, true);
+    const summary = child.ok ? (child as unknown as {
+      run_summary: {
+        session_id: string;
+        requested_session_id: string;
+        observed_session_id: string;
+      };
+    }).run_summary : null;
+    assert.equal(summary?.session_id, 'claude-session-1');
+    assert.equal(summary?.requested_session_id, 'claude-session-1');
+    assert.equal(summary?.observed_session_id, 'claude-session-mismatch');
+
+    const followObserved = await service.sendFollowup({ run_id: childId, prompt: 'continue observed session' });
+    const observedChildId = followObserved.ok ? (followObserved as unknown as { run_id: string }).run_id : '';
+    await service.waitForRun({ run_id: observedChildId, wait_seconds: 5 });
+
+    const observedChild = await service.getRunStatus({ run_id: observedChildId });
+    assert.equal(observedChild.ok, true);
+    const observedSummary = observedChild.ok ? (observedChild as unknown as {
+      run_summary: {
+        session_id: string;
+        requested_session_id: string;
+        observed_session_id: string;
+        worker_invocation: { args: string[] };
+      };
+    }).run_summary : null;
+    assert.equal(observedSummary?.session_id, 'claude-session-mismatch');
+    assert.equal(observedSummary?.requested_session_id, 'claude-session-mismatch');
+    assert.equal(observedSummary?.observed_session_id, 'claude-session-mismatch');
+    assert.deepStrictEqual(
+      observedSummary?.worker_invocation.args.slice(0, 3),
+      ['-p', '--resume', 'claude-session-mismatch'],
+    );
   });
 
   it('normalizes event-derived absolute files under cwd before unioning with git files', async () => {
@@ -217,8 +362,10 @@ process.stdin.on('data', chunk => prompt += chunk);
 process.stdin.on('end', () => {
   process.on('SIGTERM', () => process.exit(0));
   const cwd = process.cwd();
-  fs.appendFileSync(path.join(cwd, '${name}-args.jsonl'), JSON.stringify(process.argv.slice(2)) + '\\n');
-  console.log(JSON.stringify({ type: 'system', subtype: 'init', session_id: '${sessionId}' }));
+  const args = process.argv.slice(2);
+  const activeSessionId = prompt.includes('session-mismatch') ? '${sessionId.replace('-1', '-mismatch')}' : resumedSessionId(args) ?? '${sessionId}';
+  fs.appendFileSync(path.join(cwd, '${name}-args.jsonl'), JSON.stringify(args) + '\\n');
+  console.log(JSON.stringify({ type: 'system', subtype: 'init', session_id: activeSessionId }));
   if (prompt.includes('event-file') && !prompt.includes('absolute-event-file')) {
     console.log(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Write', input: { file_path: 'event.txt' } }] } }));
   }
@@ -242,14 +389,23 @@ process.stdin.on('end', () => {
   }
   if (prompt.includes('slow')) {
     setTimeout(() => {
-      console.log(JSON.stringify({ type: 'result', subtype: 'success', result: 'slow done', session_id: '${sessionId}' }));
+      console.log(JSON.stringify({ type: 'result', subtype: 'success', result: 'slow done', session_id: activeSessionId }));
       process.exit(0);
     }, 10000);
     return;
   }
   console.log(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'done' }] } }));
-  console.log(JSON.stringify({ type: 'result', subtype: 'success', result: 'done', session_id: '${sessionId}' }));
+  console.log(JSON.stringify({ type: 'result', subtype: 'success', result: 'done', session_id: activeSessionId }));
 });
+
+function resumedSessionId(args) {
+  const resumeFlag = args.indexOf('--resume');
+  if (resumeFlag >= 0 && args[resumeFlag + 1]) return args[resumeFlag + 1];
+  const resumeCommand = args.indexOf('resume');
+  const promptDash = args.lastIndexOf('-');
+  if (resumeCommand >= 0 && promptDash > resumeCommand + 1) return args[promptDash - 1];
+  return null;
+}
 `);
   await chmod(path, 0o755);
 }

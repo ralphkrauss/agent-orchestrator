@@ -30,8 +30,9 @@ export async function captureGitSnapshot(cwd: string): Promise<GitSnapshotCaptur
 }
 
 async function doCaptureGitSnapshot(cwd: string): Promise<GitSnapshotCapture> {
+  let root: string;
   try {
-    await git(cwd, ['rev-parse', '--show-toplevel']);
+    root = (await git(cwd, ['rev-parse', '--show-toplevel'])).trim();
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return { status: 'git_unavailable', snapshot: null };
@@ -39,6 +40,7 @@ async function doCaptureGitSnapshot(cwd: string): Promise<GitSnapshotCapture> {
     return { status: 'not_a_repo', snapshot: null };
   }
 
+  const branch = await currentBranch(cwd);
   let sha: string;
   try {
     sha = (await git(cwd, ['rev-parse', 'HEAD'])).trim();
@@ -63,6 +65,8 @@ async function doCaptureGitSnapshot(cwd: string): Promise<GitSnapshotCapture> {
     status: 'captured',
     snapshot: {
       sha,
+      root,
+      branch,
       dirty_count: dirty.length,
       dirty,
       dirty_fingerprints: await fingerprintPaths(cwd, dirty),
@@ -122,6 +126,22 @@ async function git(cwd: string, args: string[]): Promise<string> {
     env: { ...process.env, NO_COLOR: '1', TERM: 'dumb' },
   });
   return stdout;
+}
+
+async function currentBranch(cwd: string): Promise<string | null> {
+  try {
+    const branch = (await git(cwd, ['branch', '--show-current'])).trim();
+    if (branch) return branch;
+  } catch {
+    // Detached HEADs and older Git versions can fail here; fall back below.
+  }
+
+  try {
+    const branch = (await git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
+    return branch && branch !== 'HEAD' ? branch : null;
+  } catch {
+    return null;
+  }
 }
 
 function parseNameOnly(output: string): string[] {

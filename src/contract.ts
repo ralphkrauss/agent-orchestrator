@@ -32,6 +32,14 @@ export type WorkerResultStatus = z.infer<typeof WorkerResultStatusSchema>;
 export const BackendSchema = z.enum(['codex', 'claude']);
 export type Backend = z.infer<typeof BackendSchema>;
 
+export const ModelSourceSchema = z.enum([
+  'explicit',
+  'inherited',
+  'backend_default',
+  'legacy_unknown',
+]);
+export type ModelSource = z.infer<typeof ModelSourceSchema>;
+
 export const BackendAvailabilityStatusSchema = z.enum([
   'available',
   'missing',
@@ -86,6 +94,8 @@ export type GitSnapshotStatus = z.infer<typeof GitSnapshotStatusSchema>;
 
 export const GitSnapshotSchema = z.object({
   sha: z.string(),
+  root: z.string().nullable().optional().default(null),
+  branch: z.string().nullable().optional().default(null),
   dirty_count: z.number().int().nonnegative(),
   dirty: z.array(z.string()).optional(),
   dirty_fingerprints: z.record(z.string()).optional(),
@@ -111,10 +121,13 @@ export const OrchestratorErrorSchema = z.object({
 });
 export type OrchestratorError = z.infer<typeof OrchestratorErrorSchema>;
 
+export const WorkerEventTypeSchema = z.enum(['assistant_message', 'tool_use', 'tool_result', 'error', 'lifecycle']);
+export type WorkerEventType = z.infer<typeof WorkerEventTypeSchema>;
+
 export const WorkerEventSchema = z.object({
   seq: z.number().int().positive(),
   ts: z.string(),
-  type: z.enum(['assistant_message', 'tool_use', 'tool_result', 'error', 'lifecycle']),
+  type: WorkerEventTypeSchema,
   payload: z.record(z.unknown()),
 });
 export type WorkerEvent = z.infer<typeof WorkerEventSchema>;
@@ -132,6 +145,58 @@ export const WorkerResultSchema = z.object({
 });
 export type WorkerResult = z.infer<typeof WorkerResultSchema>;
 
+const defaultRunDisplayMetadata = {
+  session_title: null,
+  session_summary: null,
+  prompt_title: null,
+  prompt_summary: null,
+};
+
+export const RunDisplayMetadataSchema = z.object({
+  session_title: z.string().nullable().optional().default(null),
+  session_summary: z.string().nullable().optional().default(null),
+  prompt_title: z.string().nullable().optional().default(null),
+  prompt_summary: z.string().nullable().optional().default(null),
+}).default(defaultRunDisplayMetadata);
+export type RunDisplayMetadata = z.infer<typeof RunDisplayMetadataSchema>;
+
+export const ReasoningEffortSchema = z.enum([
+  'none',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+]);
+export type ReasoningEffort = z.infer<typeof ReasoningEffortSchema>;
+
+export const ServiceTierSchema = z.enum([
+  'fast',
+  'flex',
+  'normal',
+]);
+export type ServiceTier = z.infer<typeof ServiceTierSchema>;
+
+const defaultRunModelSettings = {
+  reasoning_effort: null,
+  service_tier: null,
+  mode: null,
+};
+
+export const RunModelSettingsSchema = z.object({
+  reasoning_effort: z.string().nullable().optional().default(null),
+  service_tier: z.string().nullable().optional().default(null),
+  mode: z.string().nullable().optional().default(null),
+}).default(defaultRunModelSettings);
+export type RunModelSettings = z.infer<typeof RunModelSettingsSchema>;
+
+export const RunWorkerInvocationSchema = z.object({
+  command: z.string(),
+  args: z.array(z.string()),
+}).nullable().default(null);
+export type RunWorkerInvocation = z.infer<typeof RunWorkerInvocationSchema>;
+
 export const RunSummarySchema = z.object({
   run_id: z.string(),
   backend: BackendSchema,
@@ -139,6 +204,12 @@ export const RunSummarySchema = z.object({
   parent_run_id: z.string().nullable(),
   session_id: z.string().nullable(),
   model: z.string().nullable().optional().default(null),
+  model_source: ModelSourceSchema.optional().default('legacy_unknown'),
+  model_settings: RunModelSettingsSchema.optional().default(defaultRunModelSettings),
+  requested_session_id: z.string().nullable().optional().default(null),
+  observed_session_id: z.string().nullable().optional().default(null),
+  observed_model: z.string().nullable().optional().default(null),
+  display: RunDisplayMetadataSchema.optional().default(defaultRunDisplayMetadata),
   cwd: z.string(),
   created_at: z.string(),
   started_at: z.string().nullable(),
@@ -146,6 +217,7 @@ export const RunSummarySchema = z.object({
   worker_pid: z.number().int().nullable(),
   worker_pgid: z.number().int().nullable(),
   daemon_pid_at_spawn: z.number().int().nullable(),
+  worker_invocation: RunWorkerInvocationSchema.optional().default(null),
   git_snapshot_status: GitSnapshotStatusSchema,
   git_snapshot: GitSnapshotSchema.nullable(),
   metadata: z.record(z.unknown()),
@@ -183,6 +255,8 @@ export const StartRunInputSchema = z.object({
   prompt: z.string().min(1),
   cwd: z.string().min(1),
   model: z.string().trim().min(1).optional(),
+  reasoning_effort: ReasoningEffortSchema.optional(),
+  service_tier: ServiceTierSchema.optional(),
   metadata: z.record(z.unknown()).optional().default({}),
   execution_timeout_seconds: z.number().int().positive().optional(),
 });
@@ -193,6 +267,9 @@ export const SendFollowupInputSchema = z.object({
   run_id: z.string().min(1),
   prompt: z.string().min(1),
   model: z.string().trim().min(1).optional(),
+  reasoning_effort: ReasoningEffortSchema.optional(),
+  service_tier: ServiceTierSchema.optional(),
+  metadata: z.record(z.unknown()).optional().default({}),
   execution_timeout_seconds: z.number().int().positive().optional(),
 });
 export type SendFollowupInput = z.input<typeof SendFollowupInputSchema>;
@@ -228,6 +305,148 @@ export const PruneRunsInputSchema = z.object({
 });
 export type PruneRunsInput = z.input<typeof PruneRunsInputSchema>;
 
+export const GetObservabilitySnapshotInputSchema = z.object({
+  limit: z.number().int().positive().max(500).optional().default(50),
+  include_prompts: z.boolean().optional().default(false),
+  recent_event_limit: z.number().int().nonnegative().max(50).optional().default(5),
+  diagnostics: z.boolean().optional().default(false),
+});
+export type GetObservabilitySnapshotInput = z.input<typeof GetObservabilitySnapshotInputSchema>;
+export type GetObservabilitySnapshot = z.output<typeof GetObservabilitySnapshotInputSchema>;
+
+export const ObservabilityArtifactSchema = z.object({
+  name: z.string(),
+  path: z.string(),
+  exists: z.boolean(),
+  bytes: z.number().int().nonnegative().nullable(),
+});
+export type ObservabilityArtifact = z.infer<typeof ObservabilityArtifactSchema>;
+
+export const ObservabilityPromptSchema = z.object({
+  title: z.string(),
+  summary: z.string().nullable(),
+  preview: z.string(),
+  text: z.string().nullable(),
+  path: z.string().nullable(),
+  bytes: z.number().int().nonnegative().nullable(),
+});
+export type ObservabilityPrompt = z.infer<typeof ObservabilityPromptSchema>;
+
+export const ObservabilityResponseSchema = z.object({
+  status: WorkerResultStatusSchema.nullable(),
+  summary: z.string().nullable(),
+  path: z.string().nullable(),
+  bytes: z.number().int().nonnegative().nullable(),
+});
+export type ObservabilityResponse = z.infer<typeof ObservabilityResponseSchema>;
+
+export const ObservabilityActivitySchema = z.object({
+  last_event_sequence: z.number().int().nonnegative(),
+  last_event_at: z.string().nullable(),
+  last_event_type: WorkerEventTypeSchema.nullable(),
+  last_interaction_preview: z.string().nullable(),
+  event_count: z.number().int().nonnegative(),
+  recent_errors: z.array(z.string()),
+  recent_events: z.array(WorkerEventSchema),
+});
+export type ObservabilityActivity = z.infer<typeof ObservabilityActivitySchema>;
+
+export const ObservabilitySessionAuditStatusSchema = z.enum([
+  'new_session',
+  'pending',
+  'resumed',
+  'mismatch',
+  'unknown',
+]);
+export type ObservabilitySessionAuditStatus = z.infer<typeof ObservabilitySessionAuditStatusSchema>;
+
+export const ObservabilitySessionAuditSchema = z.object({
+  requested_session_id: z.string().nullable(),
+  observed_session_id: z.string().nullable(),
+  effective_session_id: z.string().nullable(),
+  status: ObservabilitySessionAuditStatusSchema,
+  warnings: z.array(z.string()),
+});
+export type ObservabilitySessionAudit = z.infer<typeof ObservabilitySessionAuditSchema>;
+
+export const ObservabilityModelSchema = z.object({
+  name: z.string().nullable(),
+  source: ModelSourceSchema,
+  requested_name: z.string().nullable().optional().default(null),
+  observed_name: z.string().nullable().optional().default(null),
+});
+export type ObservabilityModel = z.infer<typeof ObservabilityModelSchema>;
+
+export const ObservabilityRunSettingsSchema = RunModelSettingsSchema;
+export type ObservabilityRunSettings = z.infer<typeof ObservabilityRunSettingsSchema>;
+
+export const ObservabilityRunSchema = z.object({
+  run: RunSummarySchema,
+  prompt: ObservabilityPromptSchema,
+  response: ObservabilityResponseSchema,
+  model: ObservabilityModelSchema,
+  settings: ObservabilityRunSettingsSchema,
+  session: ObservabilitySessionAuditSchema,
+  activity: ObservabilityActivitySchema,
+  artifacts: z.array(ObservabilityArtifactSchema),
+  duration_seconds: z.number().int().nonnegative().nullable(),
+});
+export type ObservabilityRun = z.infer<typeof ObservabilityRunSchema>;
+
+export const ObservabilitySessionPromptSchema = z.object({
+  run_id: z.string(),
+  status: RunStatusSchema,
+  title: z.string(),
+  summary: z.string().nullable(),
+  preview: z.string(),
+  model: ObservabilityModelSchema,
+  settings: ObservabilityRunSettingsSchema,
+  created_at: z.string(),
+  last_activity_at: z.string().nullable(),
+});
+export type ObservabilitySessionPrompt = z.infer<typeof ObservabilitySessionPromptSchema>;
+
+export const ObservabilityWorkspaceSchema = z.object({
+  cwd: z.string(),
+  repository_root: z.string().nullable(),
+  repository_name: z.string().nullable(),
+  branch: z.string().nullable(),
+  dirty_count: z.number().int().nonnegative().nullable(),
+  label: z.string(),
+});
+export type ObservabilityWorkspace = z.infer<typeof ObservabilityWorkspaceSchema>;
+
+export const ObservabilitySessionSchema = z.object({
+  session_key: z.string(),
+  session_id: z.string().nullable(),
+  root_run_id: z.string(),
+  backend: BackendSchema,
+  cwd: z.string(),
+  workspace: ObservabilityWorkspaceSchema,
+  title: z.string(),
+  summary: z.string().nullable(),
+  status: RunStatusSchema,
+  created_at: z.string(),
+  updated_at: z.string(),
+  run_count: z.number().int().nonnegative(),
+  running_count: z.number().int().nonnegative(),
+  models: z.array(ObservabilityModelSchema),
+  settings: z.array(ObservabilityRunSettingsSchema),
+  warnings: z.array(z.string()),
+  prompts: z.array(ObservabilitySessionPromptSchema),
+});
+export type ObservabilitySession = z.infer<typeof ObservabilitySessionSchema>;
+
+export const ObservabilitySnapshotSchema = z.object({
+  generated_at: z.string(),
+  daemon_pid: z.number().int().nullable(),
+  store_root: z.string(),
+  sessions: z.array(ObservabilitySessionSchema),
+  runs: z.array(ObservabilityRunSchema),
+  backend_status: BackendStatusReportSchema.nullable().optional().default(null),
+});
+export type ObservabilitySnapshot = z.infer<typeof ObservabilitySnapshotSchema>;
+
 export const RpcMethodSchema = z.enum([
   'ping',
   'shutdown',
@@ -241,6 +460,7 @@ export const RpcMethodSchema = z.enum([
   'send_followup',
   'cancel_run',
   'get_backend_status',
+  'get_observability_snapshot',
 ]);
 export type RpcMethod = z.infer<typeof RpcMethodSchema>;
 

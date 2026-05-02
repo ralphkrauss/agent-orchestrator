@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, stat, utimes, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, stat, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { RunStore } from '../runStore.js';
@@ -9,13 +9,17 @@ describe('RunStore', () => {
   it('creates, reloads, lists, paginates events, and marks terminal atomically', async () => {
     const root = await mkdtemp(join(tmpdir(), 'agent-store-'));
     const store = new RunStore(root);
-    const run = await store.createRun({ backend: 'codex', cwd: root, metadata: { task: 'T2' } });
+    const run = await store.createRun({ backend: 'codex', cwd: root, prompt: 'raw prompt text', metadata: { task: 'T2' } });
     await store.appendEvent(run.run_id, { type: 'lifecycle', payload: { status: 'one' } });
     await store.appendEvent(run.run_id, { type: 'assistant_message', payload: { text: 'hello' } });
 
     const loaded = await store.loadRun(run.run_id);
     assert.equal(loaded?.meta.metadata.task, 'T2');
+    assert.deepStrictEqual(loaded?.meta.model_settings, { reasoning_effort: null, service_tier: null, mode: null });
+    assert.equal(loaded?.meta.worker_invocation, null);
     assert.equal(loaded?.events.length, 2);
+    assert.equal(await store.readPrompt(run.run_id), 'raw prompt text');
+    assert.ok(store.defaultArtifacts(run.run_id).some((artifact) => artifact.name === 'prompt.txt'));
 
     const page = await store.readEvents(run.run_id, 1, 1);
     assert.equal(page.events.length, 1);
@@ -32,6 +36,15 @@ describe('RunStore', () => {
     const listed = await store.listRuns();
     assert.equal(listed[0]?.run_id, run.run_id);
     assert.equal((await stat(root)).mode & 0o777, 0o700);
+  });
+
+  it('does not publish a run if initial prompt persistence fails', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-store-'));
+    const store = new RunStore(root);
+    store.promptPath = () => join(root, 'missing-directory', 'prompt.txt');
+
+    await assert.rejects(() => store.createRun({ backend: 'codex', cwd: root, prompt: 'must be durable' }));
+    assert.deepStrictEqual(await store.listRuns(), []);
   });
 
   it('serializes concurrent event appends without sequence collisions', async () => {
@@ -59,6 +72,22 @@ describe('RunStore', () => {
     assert.equal(page.events[0]?.seq, 101);
     assert.equal(page.next_sequence, 110);
     assert.equal(page.has_more, true);
+    const summary = await store.readEventSummary(run.run_id, 5);
+    assert.equal(summary.event_count, 150);
+    assert.equal(summary.last_event?.seq, 150);
+    assert.deepStrictEqual(summary.recent_events.map((event) => event.seq), [146, 147, 148, 149, 150]);
+
+    const largeRun = await store.createRun({ backend: 'codex', cwd: root });
+    await store.appendEvent(largeRun.run_id, { type: 'assistant_message', payload: { text: 'x'.repeat(80_000) } });
+    for (let index = 0; index < 20; index += 1) {
+      await store.appendEvent(largeRun.run_id, { type: 'lifecycle', payload: { index } });
+    }
+    const eventLog = await readFile(store.eventsPath(largeRun.run_id), 'utf8');
+    const firstNewline = eventLog.indexOf('\n');
+    await writeFile(store.eventsPath(largeRun.run_id), `not-json ${'x'.repeat(80_000)}${eventLog.slice(firstNewline)}`);
+    const tailSummary = await store.readEventSummary(largeRun.run_id, 3);
+    assert.equal(tailSummary.event_count, 21);
+    assert.deepStrictEqual(tailSummary.recent_events.map((event) => event.seq), [19, 20, 21]);
 
     const oldTerminal = await store.createRun({ backend: 'codex', cwd: root });
     await store.markTerminal(oldTerminal.run_id, 'completed');
@@ -79,6 +108,34 @@ describe('RunStore', () => {
     assert.equal(await store.loadRun(oldTerminal.run_id), null);
     assert.equal((await store.loadRun(freshTerminal.run_id))?.meta.status, 'completed');
     assert.equal((await store.loadRun(running.run_id))?.meta.status, 'running');
+  });
+
+  it('persists observability metadata with backward-compatible defaults', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-store-'));
+    const store = new RunStore(root);
+    const run = await store.createRun({
+      backend: 'codex',
+      cwd: root,
+      model: 'gpt-5.2',
+      model_source: 'explicit',
+      model_settings: { reasoning_effort: 'xhigh', service_tier: 'fast', mode: null },
+      requested_session_id: 'session-1',
+      observed_session_id: 'session-1',
+      display: {
+        session_title: 'Session title',
+        session_summary: 'Session summary',
+        prompt_title: 'Prompt title',
+        prompt_summary: 'Prompt summary',
+      },
+    });
+
+    const loaded = await store.loadMeta(run.run_id);
+    assert.equal(loaded.model_source, 'explicit');
+    assert.deepStrictEqual(loaded.model_settings, { reasoning_effort: 'xhigh', service_tier: 'fast', mode: null });
+    assert.equal(loaded.requested_session_id, 'session-1');
+    assert.equal(loaded.observed_session_id, 'session-1');
+    assert.equal(loaded.display.session_title, 'Session title');
+    assert.equal(loaded.display.prompt_title, 'Prompt title');
   });
 
   it('reclaims a stale per-run lock left by a dead process', async () => {

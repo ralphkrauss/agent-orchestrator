@@ -9,7 +9,10 @@ import {
   type GitSnapshot,
   type GitSnapshotStatus,
   isTerminalStatus,
+  type ModelSource,
+  type RunDisplayMetadata,
   type RunMeta,
+  type RunModelSettings,
   RunMetaSchema,
   type RunStatus,
   type TerminalRunStatus,
@@ -31,9 +34,16 @@ interface LockMetadata {
 export interface CreateRunInput {
   backend: Backend;
   cwd: string;
+  prompt?: string;
   model?: string | null;
+  model_source?: ModelSource;
+  model_settings?: RunModelSettings;
   parent_run_id?: string | null;
   session_id?: string | null;
+  requested_session_id?: string | null;
+  observed_session_id?: string | null;
+  observed_model?: string | null;
+  display?: RunDisplayMetadata;
   metadata?: Record<string, unknown>;
   execution_timeout_seconds?: number | null;
   git_snapshot_status?: GitSnapshotStatus;
@@ -98,6 +108,21 @@ export class RunStore {
       parent_run_id: input.parent_run_id ?? null,
       session_id: input.session_id ?? null,
       model: input.model ?? null,
+      model_source: input.model_source ?? 'legacy_unknown',
+      model_settings: input.model_settings ?? {
+        reasoning_effort: null,
+        service_tier: null,
+        mode: null,
+      },
+      requested_session_id: input.requested_session_id ?? null,
+      observed_session_id: input.observed_session_id ?? null,
+      observed_model: input.observed_model ?? null,
+      display: input.display ?? {
+        session_title: null,
+        session_summary: null,
+        prompt_title: null,
+        prompt_summary: null,
+      },
       cwd: input.cwd,
       created_at: now,
       started_at: null,
@@ -105,6 +130,7 @@ export class RunStore {
       worker_pid: null,
       worker_pgid: null,
       daemon_pid_at_spawn: null,
+      worker_invocation: null,
       git_snapshot_status: input.git_snapshot_status ?? 'not_a_repo',
       git_snapshot: input.git_snapshot ?? null,
       git_snapshot_at_start: input.git_snapshot ?? null,
@@ -114,11 +140,12 @@ export class RunStore {
 
     const dir = this.runDir(runId);
     await mkdir(dir, { recursive: false, mode: rootMode });
-    await writeAtomicJson(this.metaPath(runId), meta);
     await writeFile(this.eventsPath(runId), '', { mode: fileMode });
     await writeFile(this.eventSeqPath(runId), '0\n', { mode: fileMode });
+    await writeFile(this.promptPath(runId), input.prompt ?? '', { mode: fileMode });
     await writeFile(this.stdoutPath(runId), '', { mode: fileMode });
     await writeFile(this.stderrPath(runId), '', { mode: fileMode });
+    await writeAtomicJson(this.metaPath(runId), meta);
     return meta;
   }
 
@@ -147,6 +174,15 @@ export class RunStore {
 
   async writeResult(runId: string, result: WorkerResult): Promise<void> {
     await writeAtomicJson(this.resultPath(runId), WorkerResultSchema.parse(result));
+  }
+
+  async readPrompt(runId: string): Promise<string | null> {
+    try {
+      return await readFile(this.promptPath(runId), 'utf8');
+    } catch (error) {
+      if (isNotFound(error)) return null;
+      throw error;
+    }
   }
 
   async loadRun(runId: string): Promise<RunRecord | null> {
@@ -200,6 +236,20 @@ export class RunStore {
     return this.readEventsPage(runId, afterSequence, limit);
   }
 
+  async readEventSummary(runId: string, recentLimit = 5): Promise<{
+    event_count: number;
+    last_event: WorkerEvent | null;
+    recent_events: WorkerEvent[];
+  }> {
+    const event_count = await this.getLastSequence(runId, true);
+    const recent_events = await this.readRecentEventsFromLog(runId, recentLimit);
+    return {
+      event_count,
+      last_event: recent_events.at(-1) ?? null,
+      recent_events,
+    };
+  }
+
   async markTerminal(
     runId: string,
     status: TerminalRunStatus,
@@ -234,6 +284,7 @@ export class RunStore {
         payload: { status, errors },
       });
       await appendFile(this.eventsPath(runId), `${JSON.stringify(event)}\n`, { mode: fileMode });
+      await writeFile(this.eventSeqPath(runId), `${event.seq}\n`, { mode: fileMode });
       return next;
     });
   }
@@ -241,6 +292,7 @@ export class RunStore {
   defaultArtifacts(runId: string): { name: string; path: string }[] {
     return [
       { name: 'result.json', path: this.resultPath(runId) },
+      { name: 'prompt.txt', path: this.promptPath(runId) },
       { name: 'stdout.log', path: this.stdoutPath(runId) },
       { name: 'stderr.log', path: this.stderrPath(runId) },
       { name: 'events.jsonl', path: this.eventsPath(runId) },
@@ -253,6 +305,10 @@ export class RunStore {
 
   resultPath(runId: string): string {
     return join(this.runDir(runId), 'result.json');
+  }
+
+  promptPath(runId: string): string {
+    return join(this.runDir(runId), 'prompt.txt');
   }
 
   eventsPath(runId: string): string {
@@ -283,10 +339,18 @@ export class RunStore {
       .map((line) => WorkerEventSchema.parse(JSON.parse(line)));
   }
 
-  private async getLastSequence(runId: string): Promise<number> {
+  private async getLastSequence(runId: string, reconcileLog = false): Promise<number> {
     try {
       const seq = Number.parseInt((await readFile(this.eventSeqPath(runId), 'utf8')).trim(), 10);
-      if (Number.isInteger(seq) && seq >= 0) return seq;
+      if (Number.isInteger(seq) && seq >= 0) {
+        if (!reconcileLog) return seq;
+        const logSeq = await this.readLastEventSequenceFromLog(runId);
+        if (logSeq > seq) {
+          await writeFile(this.eventSeqPath(runId), `${logSeq}\n`, { mode: fileMode });
+          return logSeq;
+        }
+        return seq;
+      }
     } catch (error) {
       if (!isNotFound(error)) throw error;
     }
@@ -373,6 +437,37 @@ export class RunStore {
       return events.at(-1)?.seq ?? 0;
     } finally {
       await handle.close();
+    }
+  }
+
+  private async readRecentEventsFromLog(runId: string, limit: number): Promise<WorkerEvent[]> {
+    if (limit <= 0) return [];
+    const path = this.eventsPath(runId);
+    const info = await stat(path);
+    if (info.size === 0) return [];
+
+    let bytesToRead = Math.min(info.size, 64 * 1024);
+    while (true) {
+      const handle = await open(path, 'r');
+      try {
+        const buffer = Buffer.alloc(bytesToRead);
+        await handle.read(buffer, 0, bytesToRead, info.size - bytesToRead);
+        const text = buffer.toString('utf8');
+        const lines = text.split('\n').filter(Boolean);
+        const hasFileStart = bytesToRead === info.size;
+        if (hasFileStart || lines.length > limit) {
+          const completeLines = hasFileStart ? lines : lines.slice(1);
+          return completeLines
+            .slice(-limit)
+            .map((line) => WorkerEventSchema.parse(JSON.parse(line)));
+        }
+      } finally {
+        await handle.close();
+      }
+
+      const nextBytes = Math.min(info.size, bytesToRead * 2);
+      if (nextBytes === bytesToRead) return this.readAllEvents(runId).then((events) => events.slice(-limit));
+      bytesToRead = nextBytes;
     }
   }
 

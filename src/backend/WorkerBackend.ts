@@ -1,5 +1,6 @@
 import type {
   Backend,
+  RunModelSettings,
   RunStatus,
   WorkerEvent,
   WorkerResult,
@@ -17,6 +18,7 @@ export interface BackendStartInput {
   prompt: string;
   cwd: string;
   model?: string | null;
+  modelSettings: RunModelSettings;
 }
 
 export interface ParsedBackendEvent {

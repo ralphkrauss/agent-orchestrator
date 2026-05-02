@@ -42,6 +42,10 @@ export class ProcessManager {
       worker_pid: workerPid,
       worker_pgid: workerPgid,
       daemon_pid_at_spawn: process.pid,
+      worker_invocation: {
+        command: invocation.command,
+        args: invocation.args,
+      },
     }));
     await this.store.appendEvent(runId, {
       type: 'lifecycle',
@@ -154,9 +158,17 @@ export class ProcessManager {
     }
 
     const parsed = backend.parseEvent(raw);
-    if (parsed.sessionId) {
-      sinks.setSessionId(parsed.sessionId);
-      await this.store.updateMeta(runId, (meta) => ({ ...meta, session_id: meta.session_id ?? parsed.sessionId! }));
+    const observedModel = extractObservedModel(raw);
+    if (parsed.sessionId || observedModel) {
+      if (parsed.sessionId) sinks.setSessionId(parsed.sessionId);
+      await this.store.updateMeta(runId, (meta) => ({
+        ...meta,
+        session_id: parsed.sessionId ? meta.session_id ?? parsed.sessionId : meta.session_id,
+        observed_session_id: parsed.sessionId ?? meta.observed_session_id,
+        observed_model: observedModel ?? meta.observed_model,
+        model: meta.model ?? observedModel,
+        model_source: !meta.model && observedModel && meta.model_source === 'legacy_unknown' ? 'backend_default' : meta.model_source,
+      }));
     }
     if (parsed.resultEvent) sinks.setResultEvent(parsed.resultEvent);
     for (const file of parsed.filesChanged) sinks.addFile(file);
@@ -273,4 +285,27 @@ function relativeInside(cwd: string, file: string): string | null {
   const relativePath = relative(cwd, file);
   if (!relativePath || relativePath === '..' || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) return null;
   return relativePath;
+}
+
+function extractObservedModel(raw: unknown): string | null {
+  const rec = record(raw);
+  if (!rec) return null;
+
+  return stringValue(rec.model)
+    ?? stringValue(record(rec.message)?.model)
+    ?? stringValue(record(rec.response)?.model)
+    ?? firstModelUsageKey(record(rec.modelUsage));
+}
+
+function firstModelUsageKey(modelUsage: Record<string, unknown> | null): string | null {
+  if (!modelUsage) return null;
+  return Object.keys(modelUsage)[0] ?? null;
+}
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
 }

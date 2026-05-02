@@ -7,6 +7,16 @@ import { existsSync } from 'node:fs';
 import { IpcClient, IpcRequestError } from '../ipc/client.js';
 import { daemonPaths } from './paths.js';
 import { RunStore, type PruneRunsResult } from '../runStore.js';
+import { buildObservabilitySnapshot } from '../observability.js';
+import { getBackendStatus } from '../diagnostics.js';
+import {
+  clampDashboardState,
+  formatSnapshot,
+  renderDashboard,
+  type DashboardState,
+  type SnapshotEnvelope,
+} from './observabilityFormat.js';
+import type { ObservabilitySnapshot } from '../contract.js';
 
 const paths = daemonPaths();
 const command = process.argv[2] ?? 'status';
@@ -22,11 +32,17 @@ async function main(): Promise<void> {
     case 'status':
       await status();
       break;
+    case 'runs':
+      await runs();
+      break;
+    case 'watch':
+      await watch();
+      break;
     case 'prune':
       await prune();
       break;
     default:
-      process.stderr.write('Usage: daemonCli.js start | stop [--force] | status | prune --older-than-days <days> [--dry-run]\n');
+      process.stderr.write('Usage: daemonCli.js start | stop [--force] | status [--verbose|--json] | runs [--json] [--prompts] | watch [--interval-ms <ms>] [--limit <n>] | prune --older-than-days <days> [--dry-run]\n');
       process.exit(1);
   }
 }
@@ -66,6 +82,16 @@ async function stop(force: boolean): Promise<void> {
 }
 
 async function status(): Promise<void> {
+  if (process.argv.includes('--verbose') || process.argv.includes('--json')) {
+    const envelope = await readSnapshotFromDaemonOrStore(snapshotOptionsFromArgs({ includePrompts: process.argv.includes('--prompts') }));
+    if (process.argv.includes('--json')) {
+      process.stdout.write(`${JSON.stringify(envelope, null, 2)}\n`);
+    } else {
+      process.stdout.write(formatSnapshot(envelope));
+    }
+    return;
+  }
+
   const client = new IpcClient(paths.socket);
   try {
     const pingResult = await client.request('ping', {}) as { ok: true; pong: true; daemon_pid: number };
@@ -77,6 +103,110 @@ async function status(): Promise<void> {
     process.stdout.write('stopped\n');
     process.exitCode = 1;
   }
+}
+
+async function runs(): Promise<void> {
+  const envelope = await readSnapshotFromDaemonOrStore(snapshotOptionsFromArgs({ includePrompts: process.argv.includes('--prompts') }));
+  if (process.argv.includes('--json')) {
+    process.stdout.write(`${JSON.stringify(envelope, null, 2)}\n`);
+  } else {
+    process.stdout.write(formatSnapshot(envelope));
+  }
+}
+
+async function watch(): Promise<void> {
+  const intervalMs = readPositiveIntOption('--interval-ms') ?? 1_000;
+  const options = snapshotOptionsFromArgs({ includePrompts: true });
+  if (!process.stdout.isTTY || !process.stdin.isTTY) {
+    process.stdout.write(formatSnapshot(await readSnapshotFromDaemonOrStore(options)));
+    return;
+  }
+
+  let envelope = await readSnapshotFromDaemonOrStore(options);
+  let state: DashboardState = { view: 'sessions', selectedSession: 0, selectedPrompt: 0 };
+  let stopped = false;
+  let refreshTimer: NodeJS.Timeout | null = null;
+  let resolveDone: (() => void) | null = null;
+
+  const finish = () => {
+    if (stopped) return;
+    stopped = true;
+    if (refreshTimer) clearTimeout(refreshTimer);
+    process.stdin.off('data', onKey);
+    if (process.stdin.isTTY) process.stdin.setRawMode(false);
+    process.stdin.pause();
+    process.stdout.write('\x1b[?25h\x1b[0m\n');
+    resolveDone?.();
+  };
+
+  const repaint = () => {
+    state = clampDashboardState(state, envelope.snapshot);
+    process.stdout.write('\x1b[?25l\x1b[H\x1b[2J');
+    process.stdout.write(renderDashboard(envelope, state, process.stdout.columns ?? 100, process.stdout.rows ?? 30));
+  };
+
+  const refresh = async () => {
+    if (stopped) return;
+    try {
+      envelope = await readSnapshotFromDaemonOrStore(options);
+    } catch (error) {
+      envelope = {
+        running: false,
+        snapshot: {
+          generated_at: new Date().toISOString(),
+          daemon_pid: null,
+          store_root: paths.home,
+          sessions: [],
+          runs: [],
+          backend_status: null,
+        },
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+    if (stopped) return;
+    repaint();
+    refreshTimer = setTimeout(refresh, intervalMs);
+  };
+
+  const onKey = (chunk: Buffer) => {
+    const key = chunk.toString('utf8');
+    if (key === '\u0003' || key === 'q') {
+      finish();
+      return;
+    }
+    if (key === '\x1b[A') {
+      if (state.view === 'sessions') state.selectedSession -= 1;
+      if (state.view === 'prompts' || state.view === 'detail') state.selectedPrompt -= 1;
+      repaint();
+      return;
+    }
+    if (key === '\x1b[B') {
+      if (state.view === 'sessions') state.selectedSession += 1;
+      if (state.view === 'prompts' || state.view === 'detail') state.selectedPrompt += 1;
+      repaint();
+      return;
+    }
+    if (key === '\r' || key === '\n') {
+      if (state.view === 'sessions') state.view = 'prompts';
+      else if (state.view === 'prompts') state.view = 'detail';
+      repaint();
+      return;
+    }
+    if (key === '\x7f' || key === '\x1b') {
+      if (state.view === 'detail') state.view = 'prompts';
+      else if (state.view === 'prompts') state.view = 'sessions';
+      repaint();
+    }
+  };
+
+  process.stdin.setRawMode(true);
+  process.stdin.resume();
+  process.stdin.on('data', onKey);
+  process.once('SIGINT', finish);
+  process.once('SIGTERM', finish);
+  const done = new Promise<void>((resolve) => { resolveDone = resolve; });
+  await refresh();
+  await done;
 }
 
 async function prune(): Promise<void> {
@@ -104,6 +234,52 @@ async function prune(): Promise<void> {
   for (const run of result.matched) {
     process.stdout.write(`${run.run_id} ${run.status} ${run.finished_at ?? ''}\n`);
   }
+}
+
+interface SnapshotOptions {
+  limit: number;
+  includePrompts: boolean;
+  recentEventLimit: number;
+  diagnostics: boolean;
+}
+
+function snapshotOptionsFromArgs(defaults: Partial<SnapshotOptions> = {}): SnapshotOptions {
+  return {
+    limit: readPositiveIntOption('--limit') ?? defaults.limit ?? 50,
+    includePrompts: defaults.includePrompts ?? false,
+    recentEventLimit: readPositiveIntOption('--recent-events') ?? defaults.recentEventLimit ?? 5,
+    diagnostics: process.argv.includes('--diagnostics') || defaults.diagnostics === true,
+  };
+}
+
+async function readSnapshotFromDaemonOrStore(options: SnapshotOptions): Promise<SnapshotEnvelope> {
+  const params = {
+    limit: options.limit,
+    include_prompts: options.includePrompts,
+    recent_event_limit: options.recentEventLimit,
+    diagnostics: options.diagnostics,
+  };
+  if (await ping()) {
+    const client = new IpcClient(paths.socket);
+    const result = await client.request('get_observability_snapshot', params, 30_000) as {
+      ok: boolean;
+      snapshot?: ObservabilitySnapshot;
+      error?: { message?: string };
+    };
+    if (result.ok && result.snapshot) return { running: true, snapshot: result.snapshot };
+    throw new Error(result.error?.message ?? 'failed to read observability snapshot');
+  }
+
+  return {
+    running: false,
+    snapshot: await buildObservabilitySnapshot(new RunStore(paths.home), {
+      limit: options.limit,
+      includePrompts: options.includePrompts,
+      recentEventLimit: options.recentEventLimit,
+      daemonPid: null,
+      backendStatus: options.diagnostics ? await getBackendStatus() : null,
+    }),
+  };
 }
 
 async function ping(): Promise<boolean> {
