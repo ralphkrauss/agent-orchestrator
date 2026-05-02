@@ -74,6 +74,15 @@ describe('daemon CLI', () => {
       assert.match(staleStatus.stdout, /version_match=false/);
       assert.match(staleStatus.stdout, /runs=unavailable/);
 
+      const staleRuns = await execFileAsync(process.execPath, [daemonCliPath, 'runs'], { env, timeout: 10_000 });
+      assert.match(staleRuns.stdout, /agent-orchestrator daemon: running pid=/);
+      assert.match(staleRuns.stdout, /error: Frontend package version .* does not match daemon package version 0\.0\.0-stale/);
+      assert.match(staleRuns.stdout, /sessions: 0 runs: 0/);
+
+      const staleVerboseStatus = await execFileAsync(process.execPath, [daemonCliPath, 'status', '--verbose'], { env, timeout: 10_000 });
+      assert.match(staleVerboseStatus.stdout, /agent-orchestrator daemon: running pid=/);
+      assert.match(staleVerboseStatus.stdout, /error: Frontend package version .* does not match daemon package version 0\.0\.0-stale/);
+
       const restart = await execFileAsync(process.execPath, [daemonCliPath, 'restart'], { env, timeout: 10_000 });
       assert.match(restart.stdout, /agent-orchestrator daemon stopping/);
       assert.match(restart.stdout, /agent-orchestrator daemon started pid=/);

@@ -6,6 +6,7 @@ import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { IpcClient, IpcRequestError } from '../ipc/client.js';
 import { daemonPaths } from './paths.js';
+import { checkDaemonVersion } from '../daemonVersion.js';
 import { getPackageVersion } from '../packageMetadata.js';
 import { RunStore, type PruneRunsResult } from '../runStore.js';
 import { buildObservabilitySnapshot } from '../observability.js';
@@ -17,7 +18,7 @@ import {
   type DashboardState,
   type SnapshotEnvelope,
 } from './observabilityFormat.js';
-import type { ObservabilitySnapshot } from '../contract.js';
+import type { ObservabilitySnapshot, OrchestratorError } from '../contract.js';
 
 const paths = daemonPaths();
 const command = process.argv[2] ?? 'status';
@@ -284,7 +285,18 @@ async function readSnapshotFromDaemonOrStore(options: SnapshotOptions): Promise<
     recent_event_limit: options.recentEventLimit,
     diagnostics: options.diagnostics,
   };
-  if (await ping()) {
+  const pingResult = await pingDaemon();
+  if (pingResult) {
+    const versionCheck = checkDaemonVersion(pingResult);
+    if (!versionCheck.ok) {
+      return readSnapshotFromStore(options, {
+        running: true,
+        daemonPid: errorDetailNumber(versionCheck.error, 'daemon_pid'),
+        daemonVersion: errorDetailString(versionCheck.error, 'daemon_version'),
+        error: versionCheck.error.message,
+      });
+    }
+
     const client = new IpcClient(paths.ipc.path);
     const result = await client.request('get_observability_snapshot', params, 30_000) as {
       ok: boolean;
@@ -295,30 +307,51 @@ async function readSnapshotFromDaemonOrStore(options: SnapshotOptions): Promise<
     throw new Error(result.error?.message ?? 'failed to read observability snapshot');
   }
 
+  return readSnapshotFromStore(options, { running: false });
+}
+
+async function readSnapshotFromStore(
+  options: SnapshotOptions,
+  state: { running: boolean; daemonPid?: number | null; daemonVersion?: string | null; error?: string },
+): Promise<SnapshotEnvelope> {
   return {
-    running: false,
+    running: state.running,
     snapshot: await buildObservabilitySnapshot(new RunStore(paths.home), {
       limit: options.limit,
       includePrompts: options.includePrompts,
       recentEventLimit: options.recentEventLimit,
-      daemonPid: null,
+      daemonPid: state.daemonPid ?? null,
       backendStatus: options.diagnostics ? await getBackendStatus({
         frontendVersion: getPackageVersion(),
-        daemonVersion: null,
-        daemonPid: null,
+        daemonVersion: state.daemonVersion ?? null,
+        daemonPid: state.daemonPid ?? null,
       }) : null,
     }),
+    error: state.error,
   };
 }
 
 async function ping(): Promise<boolean> {
+  return (await pingDaemon()) !== null;
+}
+
+async function pingDaemon(): Promise<unknown | null> {
   try {
     const client = new IpcClient(paths.ipc.path);
-    await client.request('ping', {}, 1000);
-    return true;
+    return await client.request('ping', {}, 1000);
   } catch {
-    return false;
+    return null;
   }
+}
+
+function errorDetailString(error: OrchestratorError, key: string): string | null {
+  const value = error.details?.[key];
+  return typeof value === 'string' ? value : null;
+}
+
+function errorDetailNumber(error: OrchestratorError, key: string): number | null {
+  const value = error.details?.[key];
+  return typeof value === 'number' ? value : null;
 }
 
 async function waitForDaemon(timeoutMs: number): Promise<void> {
