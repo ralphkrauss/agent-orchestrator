@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { delimiter, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -150,7 +150,7 @@ describe('agent orchestrator integration with mock CLIs', () => {
     const fixture = await createFixture();
     const repo = await createGitRepo(fixture.root);
     const service = await createService(fixture.home);
-    process.env.PATH = '/tmp/agent-orchestrator-no-binaries';
+    process.env.PATH = join(fixture.root, 'missing-bin');
 
     const start = await service.startRun({ backend: 'codex', prompt: 'hello', cwd: repo });
     assert.equal(start.ok, true);
@@ -183,7 +183,7 @@ async function createFixture(): Promise<{ root: string; home: string }> {
   await writeFile(join(root, 'placeholder'), '');
   await mkMockCli(bin, 'codex', 'codex-session-1');
   await mkMockCli(bin, 'claude', 'claude-session-1');
-  process.env.PATH = `${bin}:${originalPath}`;
+  process.env.PATH = prependPath(bin, originalPath);
   return { root, home };
 }
 
@@ -195,7 +195,7 @@ async function createService(home: string): Promise<OrchestratorService> {
 
 async function createGitRepo(root: string): Promise<string> {
   const repo = join(root, 'repo');
-  await execFileAsync('mkdir', ['-p', repo]);
+  await mkdir(repo, { recursive: true });
   await execFileAsync('git', ['init'], { cwd: repo });
   await execFileAsync('git', ['config', 'user.email', 'test@example.com'], { cwd: repo });
   await execFileAsync('git', ['config', 'user.name', 'Test'], { cwd: repo });
@@ -206,9 +206,8 @@ async function createGitRepo(root: string): Promise<string> {
 }
 
 async function mkMockCli(binDir: string, name: string, sessionId: string): Promise<void> {
-  await execFileAsync('mkdir', ['-p', binDir]);
-  const path = join(binDir, name);
-  await writeFile(path, `#!/usr/bin/env node
+  await mkdir(binDir, { recursive: true });
+  const script = `#!/usr/bin/env node
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
@@ -235,7 +234,7 @@ process.stdin.on('end', () => {
   if (prompt.includes('slow-grandchild')) {
     process.removeAllListeners('SIGTERM');
     process.on('SIGTERM', () => {});
-    const grandchild = spawn('sleep', ['60'], { stdio: 'ignore' });
+    const grandchild = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
     fs.writeFileSync(path.join(cwd, 'grandchild.pid'), String(grandchild.pid));
     setInterval(() => {}, 1000);
     return;
@@ -250,7 +249,17 @@ process.stdin.on('end', () => {
   console.log(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'done' }] } }));
   console.log(JSON.stringify({ type: 'result', subtype: 'success', result: 'done', session_id: '${sessionId}' }));
 });
-`);
+`;
+
+  if (process.platform === 'win32') {
+    const scriptPath = join(binDir, `${name}.js`);
+    await writeFile(scriptPath, script);
+    await writeFile(join(binDir, `${name}.cmd`), `@echo off\r\n"${process.execPath}" "%~dp0\\${name}.js" %*\r\n`);
+    return;
+  }
+
+  const path = join(binDir, name);
+  await writeFile(path, script);
   await chmod(path, 0o755);
 }
 
@@ -281,4 +290,8 @@ async function waitForFile(path: string): Promise<void> {
     }
   }
   throw new Error(`Timed out waiting for ${path}`);
+}
+
+function prependPath(entry: string, current: string | undefined): string {
+  return current ? `${entry}${delimiter}${current}` : entry;
 }

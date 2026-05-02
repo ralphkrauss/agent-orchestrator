@@ -1,14 +1,19 @@
 import { access } from 'node:fs/promises';
 import { constants } from 'node:fs';
-import { delimiter, isAbsolute, join } from 'node:path';
+import { delimiter, extname, isAbsolute, join } from 'node:path';
 import type { WorkerBackend, WorkerInvocation, BackendStartInput, FinalizeContext, FinalizedWorkerResult, ParsedBackendEvent } from './WorkerBackend.js';
 import { WorkerResultSchema } from '../contract.js';
 import { deriveObservedResult } from './resultDerivation.js';
 
-export async function resolveBinary(binary: string): Promise<string | null> {
+export async function resolveBinary(
+  binary: string,
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<string | null> {
+  const pathValue = env.PATH ?? env.Path ?? '';
   const candidates = binary.includes('/') || binary.includes('\\')
     ? [binary]
-    : (process.env.PATH ?? '').split(delimiter).filter(Boolean).map((dir) => join(dir, binary));
+    : pathValue.split(pathDelimiter(platform)).filter(Boolean).flatMap((dir) => binaryCandidates(dir, binary, platform, env));
 
   for (const candidate of candidates) {
     try {
@@ -21,6 +26,21 @@ export async function resolveBinary(binary: string): Promise<string | null> {
   }
 
   return null;
+}
+
+function pathDelimiter(platform: NodeJS.Platform): string {
+  return platform === 'win32' ? ';' : delimiter;
+}
+
+function binaryCandidates(dir: string, binary: string, platform: NodeJS.Platform, env: NodeJS.ProcessEnv): string[] {
+  const exact = join(dir, binary);
+  if (platform !== 'win32' || extname(binary)) return [exact];
+
+  const extensions = (env.PATHEXT || env.Pathext || '.COM;.EXE;.BAT;.CMD')
+    .split(';')
+    .map((extension) => extension.trim())
+    .filter(Boolean);
+  return [exact, ...extensions.map((extension) => join(dir, `${binary}${extension}`))];
 }
 
 export function invocation(

@@ -53,7 +53,7 @@ async function start(): Promise<void> {
 }
 
 async function stop(force: boolean): Promise<void> {
-  const client = new IpcClient(paths.socket);
+  const client = new IpcClient(paths.ipc.path);
   try {
     const result = await client.request('shutdown', { force }, 10_000) as { ok: boolean; error?: { details?: { active_runs?: unknown } } };
     if (!result.ok) {
@@ -80,7 +80,7 @@ async function restart(force: boolean): Promise<void> {
 }
 
 async function status(): Promise<void> {
-  const client = new IpcClient(paths.socket);
+  const client = new IpcClient(paths.ipc.path);
   try {
     const pingResult = await client.request('ping', {}) as { ok: true; pong: true; daemon_pid: number; daemon_version?: string };
     let runs = 'unavailable';
@@ -117,7 +117,7 @@ async function prune(): Promise<void> {
   };
   let result: PruneRunsResult;
   if (await ping()) {
-    const client = new IpcClient(paths.socket);
+    const client = new IpcClient(paths.ipc.path);
     result = await client.request('prune_runs', params, 30_000) as PruneRunsResult;
   } else {
     result = await new RunStore(paths.home).pruneTerminalRuns(params.older_than_days, params.dry_run);
@@ -133,7 +133,7 @@ async function prune(): Promise<void> {
 
 async function ping(): Promise<boolean> {
   try {
-    const client = new IpcClient(paths.socket);
+    const client = new IpcClient(paths.ipc.path);
     await client.request('ping', {}, 1000);
     return true;
   } catch {

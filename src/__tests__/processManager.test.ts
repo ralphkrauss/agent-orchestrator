@@ -1,10 +1,11 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import type { ChildProcess } from 'node:child_process';
 import { chmod, mkdtemp, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { CodexBackend } from '../backend/codex.js';
-import { ProcessManager } from '../processManager.js';
+import { prepareWorkerSpawn, ProcessManager, terminateProcessTree } from '../processManager.js';
 import { RunStore } from '../runStore.js';
 import type { RunMeta, TerminalRunStatus, WorkerResult } from '../contract.js';
 
@@ -24,6 +25,66 @@ class ThrowingTerminalStore extends RunStore {
 }
 
 describe('ProcessManager', () => {
+  it('wraps Windows cmd shims with the command processor', () => {
+    assert.deepStrictEqual(
+      prepareWorkerSpawn('C:\\Tools\\codex.cmd', ['exec', '--model', 'gpt-5.2', '-'], 'win32', 'cmd.exe'),
+      {
+        command: 'cmd.exe',
+        args: ['/d', '/s', '/c', 'C:\\Tools\\codex.cmd exec --model gpt-5.2 -'],
+      },
+    );
+    assert.deepStrictEqual(
+      prepareWorkerSpawn('/usr/bin/codex', ['exec', '-'], 'linux'),
+      { command: '/usr/bin/codex', args: ['exec', '-'] },
+    );
+  });
+
+  it('terminates POSIX process groups with escalating signals', () => {
+    const calls: { pid: number; signal: NodeJS.Signals }[] = [];
+
+    terminateProcessTree(1234, false, 'linux', (pid, signal) => {
+      calls.push({ pid, signal });
+    });
+    terminateProcessTree(1234, true, 'linux', (pid, signal) => {
+      calls.push({ pid, signal });
+    });
+
+    assert.deepStrictEqual(calls, [
+      { pid: -1234, signal: 'SIGTERM' },
+      { pid: -1234, signal: 'SIGKILL' },
+    ]);
+  });
+
+  it('terminates Windows process trees with taskkill', () => {
+    const calls: { command: string; args: string[]; options: { stdio: 'ignore'; windowsHide: true } }[] = [];
+    const child = {
+      on() {
+        return child;
+      },
+      unref() {
+        return child;
+      },
+    } as unknown as ChildProcess;
+
+    terminateProcessTree(4321, false, 'win32', () => {
+      throw new Error('process.kill should not be used on Windows');
+    }, (command, args, options) => {
+      calls.push({ command, args, options });
+      return child;
+    });
+    terminateProcessTree(4321, true, 'win32', () => {
+      throw new Error('process.kill should not be used on Windows');
+    }, (command, args, options) => {
+      calls.push({ command, args, options });
+      return child;
+    });
+
+    assert.deepStrictEqual(calls, [
+      { command: 'taskkill', args: ['/PID', '4321', '/T'], options: { stdio: 'ignore', windowsHide: true } },
+      { command: 'taskkill', args: ['/PID', '4321', '/T', '/F'], options: { stdio: 'ignore', windowsHide: true } },
+    ]);
+  });
+
   it('settles completion even when terminal finalization throws', async () => {
     const root = await mkdtemp(join(tmpdir(), 'agent-process-'));
     const cli = join(root, 'worker.js');

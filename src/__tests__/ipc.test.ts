@@ -4,6 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { connect } from 'node:net';
+import { daemonIpcEndpoint } from '../daemon/paths.js';
 import { IpcClient, IpcRequestError } from '../ipc/client.js';
 import { IpcServer } from '../ipc/server.js';
 import { encodeFrame, FrameReader, writeFrame } from '../ipc/protocol.js';
@@ -14,23 +15,36 @@ import { getPackageVersion } from '../packageMetadata.js';
 describe('IPC protocol', () => {
   it('round-trips JSON-RPC requests', async () => {
     const root = await mkdtemp(join(tmpdir(), 'agent-ipc-'));
-    const socket = join(root, 'daemon.sock');
-    const server = new IpcServer(socket, async (method, params, context) => ({ method, params, frontend_version: context.frontend_version }));
+    const endpoint = daemonIpcEndpoint(root);
+    const server = new IpcServer(endpoint.path, async (method, params, context) => ({ method, params, frontend_version: context.frontend_version }));
     await server.listen();
-    const client = new IpcClient(socket);
+    const client = new IpcClient(endpoint.path);
     const result = await client.request('ping', { hello: true });
     assert.deepStrictEqual(result, { method: 'ping', params: { hello: true }, frontend_version: getPackageVersion() });
     await server.close();
     await rm(root, { recursive: true, force: true });
   });
 
+  it('round-trips JSON-RPC requests over a Windows named pipe', { skip: process.platform !== 'win32' }, async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-ipc-win-'));
+    const endpoint = daemonIpcEndpoint(root, 'win32');
+    assert.equal(endpoint.transport, 'windows_pipe');
+    const server = new IpcServer(endpoint.path, async (method, params, context) => ({ method, params, frontend_version: context.frontend_version }));
+    await server.listen();
+    const client = new IpcClient(endpoint.path);
+    const result = await client.request('ping', { hello: 'windows' });
+    assert.deepStrictEqual(result, { method: 'ping', params: { hello: 'windows' }, frontend_version: getPackageVersion() });
+    await server.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
   it('returns protocol mismatch as an orchestrator error', async () => {
     const root = await mkdtemp(join(tmpdir(), 'agent-ipc-'));
-    const socket = join(root, 'daemon.sock');
-    const server = new IpcServer(socket, async () => ({ ok: true }));
+    const endpoint = daemonIpcEndpoint(root);
+    const server = new IpcServer(endpoint.path, async () => ({ ok: true }));
     await server.listen();
 
-    const raw = connect(socket);
+    const raw = connect(endpoint.path);
     await new Promise<void>((resolve) => raw.once('connect', resolve));
     raw.write(encodeFrame({ protocol_version: 999, id: 'bad', method: 'ping' }));
     const reader = new FrameReader();
@@ -46,15 +60,15 @@ describe('IPC protocol', () => {
 
   it('allows ping and shutdown during daemon version mismatch for recovery', async () => {
     const root = await mkdtemp(join(tmpdir(), 'agent-ipc-'));
-    const socket = join(root, 'daemon.sock');
+    const endpoint = daemonIpcEndpoint(root);
     const calls: string[] = [];
-    const server = new IpcServer(socket, async (method) => {
+    const server = new IpcServer(endpoint.path, async (method) => {
       calls.push(method);
       return { method };
     }, '0.0.0-stale');
     await server.listen();
 
-    const raw = connect(socket);
+    const raw = connect(endpoint.path);
     await new Promise<void>((resolve) => raw.once('connect', resolve));
     raw.write(encodeFrame({ protocol_version: PROTOCOL_VERSION, frontend_version: getPackageVersion(), id: 'ping', method: 'ping' }));
     raw.write(encodeFrame({ protocol_version: PROTOCOL_VERSION, frontend_version: getPackageVersion(), id: 'shutdown', method: 'shutdown' }));
@@ -75,11 +89,11 @@ describe('IPC protocol', () => {
 
   it('returns daemon version mismatch when frontend version differs', async () => {
     const root = await mkdtemp(join(tmpdir(), 'agent-ipc-'));
-    const socket = join(root, 'daemon.sock');
-    const server = new IpcServer(socket, async () => ({ ok: true }));
+    const endpoint = daemonIpcEndpoint(root);
+    const server = new IpcServer(endpoint.path, async () => ({ ok: true }));
     await server.listen();
 
-    const raw = connect(socket);
+    const raw = connect(endpoint.path);
     await new Promise<void>((resolve) => raw.once('connect', resolve));
     raw.write(encodeFrame({ protocol_version: PROTOCOL_VERSION, frontend_version: '0.0.0-stale', id: 'stale', method: 'list_runs' }));
     const reader = new FrameReader();
@@ -105,10 +119,13 @@ describe('IPC protocol', () => {
   });
 
   it('wraps unavailable daemon as DAEMON_UNAVAILABLE', async () => {
-    const client = new IpcClient('/tmp/agent-orchestrator-missing.sock');
+    const root = await mkdtemp(join(tmpdir(), 'agent-ipc-missing-'));
+    const endpoint = daemonIpcEndpoint(root);
+    const client = new IpcClient(endpoint.path);
     await assert.rejects(
       () => client.request('ping', {}, 50),
       (error) => error instanceof IpcRequestError && error.orchestratorError.code === 'DAEMON_UNAVAILABLE',
     );
+    await rm(root, { recursive: true, force: true });
   });
 });
