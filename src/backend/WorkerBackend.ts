@@ -27,6 +27,7 @@ export interface ParsedBackendEvent {
   resultEvent?: BackendResultEvent;
   filesChanged: string[];
   commandsRun: string[];
+  errors: { message: string; context?: Record<string, unknown> }[];
 }
 
 export interface BackendResultEvent {

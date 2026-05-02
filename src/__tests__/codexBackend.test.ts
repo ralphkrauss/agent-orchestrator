@@ -47,4 +47,22 @@ describe('CodexBackend', () => {
       'Done.',
     ]);
   });
+
+  it('extracts structured Codex error events', () => {
+    const backend = new CodexBackend();
+    const parsed = backend.parseEvent({
+      type: 'error',
+      status: 400,
+      error: {
+        type: 'invalid_request_error',
+        message: "The 'openai/gpt-5.5' model is not supported when using Codex with a ChatGPT account.",
+      },
+    });
+
+    assert.equal(parsed.events.length, 1);
+    assert.deepStrictEqual(parsed.errors, [{
+      message: "The 'openai/gpt-5.5' model is not supported when using Codex with a ChatGPT account.",
+      context: { status: 400, type: 'invalid_request_error' },
+    }]);
+  });
 });

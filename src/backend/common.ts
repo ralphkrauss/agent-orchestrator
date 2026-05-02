@@ -61,6 +61,7 @@ export function emptyParsedEvent(): ParsedBackendEvent {
     events: [],
     filesChanged: [],
     commandsRun: [],
+    errors: [],
   };
 }
 
@@ -80,7 +81,7 @@ export function finalizeFromObserved(context: FinalizeContext): FinalizedWorkerR
 
   const files = Array.from(new Set([...context.filesChangedFromGit, ...context.filesChangedFromEvents])).sort();
   const commands = Array.from(new Set(context.commandsRun));
-  const summary = context.resultEvent?.summary ?? '';
+  const summary = context.resultEvent?.summary ?? actionableErrorSummary(errors);
   const result = WorkerResultSchema.parse({
     status: derived.workerStatus,
     summary,
@@ -92,6 +93,17 @@ export function finalizeFromObserved(context: FinalizeContext): FinalizedWorkerR
 
   return { runStatus: derived.runStatus, result };
 }
+
+function actionableErrorSummary(errors: { message: string }[]): string {
+  return errors.find((error) => !genericResultErrors.has(error.message))?.message
+    ?? errors[0]?.message
+    ?? '';
+}
+
+const genericResultErrors = new Set([
+  'worker process exited unsuccessfully',
+  'worker result event missing',
+]);
 
 export abstract class BaseBackend implements WorkerBackend {
   abstract readonly name: WorkerBackend['name'];
@@ -129,6 +141,24 @@ export function extractText(value: unknown): string | undefined {
   const rec = getRecord(value);
   if (rec) return getString(rec.text) ?? getString(rec.content);
   return undefined;
+}
+
+export function errorFromEvent(record: Record<string, unknown>): { message: string; context?: Record<string, unknown> } | null {
+  const nestedError = getRecord(record.error);
+  const message =
+    getString(nestedError?.message)
+    ?? getString(record.message)
+    ?? (typeof record.error === 'string' ? record.error : undefined);
+  if (!message) return null;
+
+  const context: Record<string, unknown> = {};
+  const status = record.status;
+  if (typeof status === 'string' || typeof status === 'number') context.status = status;
+  const type = getString(nestedError?.type) ?? getString(record.type);
+  if (type) context.type = type;
+  const code = getString(nestedError?.code) ?? getString(record.code);
+  if (code) context.code = code;
+  return Object.keys(context).length > 0 ? { message, context } : { message };
 }
 
 export function pathFromToolInput(input: unknown): string[] {

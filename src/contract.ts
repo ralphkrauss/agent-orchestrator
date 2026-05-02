@@ -255,8 +255,12 @@ export function wrapErr<TPayload extends object = Record<string, never>>(
   return { ok: false, error };
 }
 
+const WorkerProfileAliasSchema = z.string().trim().min(1);
+
 export const StartRunInputSchema = z.object({
-  backend: BackendSchema,
+  backend: BackendSchema.optional(),
+  profile: WorkerProfileAliasSchema.optional(),
+  profiles_file: z.string().trim().min(1).optional(),
   prompt: z.string().min(1),
   cwd: z.string().min(1),
   model: z.string().trim().min(1).optional(),
@@ -264,9 +268,32 @@ export const StartRunInputSchema = z.object({
   service_tier: ServiceTierSchema.optional(),
   metadata: z.record(z.unknown()).optional().default({}),
   execution_timeout_seconds: z.number().int().positive().optional(),
+}).superRefine((input, context) => {
+  if (!input.backend && !input.profile) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Provide backend for direct mode, or profile for live profile mode',
+      path: ['backend'],
+    });
+  }
+
+  if (input.profile && (input.backend || input.model || input.reasoning_effort || input.service_tier)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Profile mode cannot be mixed with direct backend/model/reasoning_effort/service_tier settings',
+      path: ['profile'],
+    });
+  }
 });
 export type StartRunInput = z.input<typeof StartRunInputSchema>;
 export type StartRun = z.output<typeof StartRunInputSchema>;
+
+export const ListWorkerProfilesInputSchema = z.object({
+  profiles_file: z.string().trim().min(1).optional(),
+  cwd: z.string().min(1).optional(),
+});
+export type ListWorkerProfilesInput = z.input<typeof ListWorkerProfilesInputSchema>;
+export type ListWorkerProfiles = z.output<typeof ListWorkerProfilesInputSchema>;
 
 export const SendFollowupInputSchema = z.object({
   run_id: z.string().min(1),
@@ -457,6 +484,7 @@ export const RpcMethodSchema = z.enum([
   'shutdown',
   'prune_runs',
   'start_run',
+  'list_worker_profiles',
   'list_runs',
   'get_run_status',
   'get_run_events',

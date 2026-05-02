@@ -1,5 +1,5 @@
 import type { BackendStartInput, ParsedBackendEvent, WorkerInvocation } from './WorkerBackend.js';
-import { BaseBackend, commandFromToolInput, emptyParsedEvent, extractText, getRecord, getString, invocation, pathFromToolInput } from './common.js';
+import { BaseBackend, commandFromToolInput, emptyParsedEvent, errorFromEvent, extractText, getRecord, getString, invocation, pathFromToolInput } from './common.js';
 
 export class ClaudeBackend extends BaseBackend {
   readonly name = 'claude' as const;
@@ -58,6 +58,8 @@ export class ClaudeBackend extends BaseBackend {
 
     if (lowerType === 'error') {
       parsed.events.push({ type: 'error', payload: rec });
+      const error = errorFromEvent(rec);
+      if (error) parsed.errors.push(error);
     }
 
     if (lowerType === 'result') {

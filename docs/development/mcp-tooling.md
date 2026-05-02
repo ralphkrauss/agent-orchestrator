@@ -73,6 +73,40 @@ OpenCode reads:
 opencode.json
 ```
 
+Normal OpenCode development sessions use `opencode.json`. The orchestration
+launcher is intentionally separate:
+
+```bash
+agent-orchestrator-opencode
+agent-orchestrator opencode
+```
+
+That launcher starts OpenCode with a process-local `OPENCODE_CONFIG_CONTENT`
+overlay instead of editing `opencode.json`, user config, or global config. The
+overlay disables the broad `github` and `gh` MCP servers, configures only the
+local `agent-orchestrator` MCP server, loads project-owned `orchestrate-*`
+skills from the shared `.agents/skills/` root, denies bash, and restricts direct
+writes to the profiles manifest plus `.agents/skills/orchestrate-*/SKILL.md`.
+
+Passthrough arguments after `--` are limited to no OpenCode subcommand or `run`
+followed by positional prompt tokens. The launcher rejects non-supervisor
+subcommands and any option token after `run`, including `--agent`, `--attach`,
+`--dir`, `--share`, `--session`, `--file`, and
+`--dangerously-skip-permissions`.
+
+Run it from the workspace where worker agents should operate, or pass
+`--cwd <path>`. Worker profile configuration is read from
+`~/.config/agent-orchestrator/profiles.json` by default so personal model
+preferences stay out of git and can be reused across repositories. If profiles
+are missing or invalid, the same supervisor can discuss the needed profile
+aliases, and can create or update that user-level profiles manifest when you ask
+it to configure profiles. Worker starts should normally use `list_worker_profiles`
+to inspect the live profile aliases and `start_run` with `profile` plus
+`profiles_file`; the daemon reads and validates the current manifest at
+worker-start time. Direct backend/model starts remain available for explicit
+one-off overrides or broken profile setup. The launcher creates the shared skill
+root and profiles-manifest directory before OpenCode starts.
+
 ## Prerequisites
 
 - Node.js 22 or newer
@@ -146,6 +180,8 @@ socket on POSIX and a named pipe on Windows. For manual lifecycle checks, use:
 
 ```bash
 just orchestrator-doctor
+just orchestrator-opencode-config --cwd /path/to/workspace
+just orchestrator-opencode --cwd /path/to/workspace
 just orchestrator-status
 just orchestrator-status --verbose
 just orchestrator-runs

@@ -37,6 +37,25 @@ Check drift:
 node scripts/sync-ai-workspace.mjs --check
 ```
 
+## OpenCode Orchestration Skills
+
+The OpenCode orchestration launcher uses supervisor-only orchestration skills
+from the shared `.agents/skills/` root.
+
+Project-owned orchestration skills live beside normal skills under
+`.agents/skills/orchestrate-{name}/SKILL.md`. At launch,
+`agent-orchestrator-opencode` configures OpenCode `skills.paths` to include the
+shared `.agents/skills/` root and restricts the supervisor agent to
+`orchestrate-*` skills. The package does not generate default orchestration
+skills; project teams manage those files themselves.
+
+The same OpenCode supervisor can discuss and maintain orchestration setup. It
+has write permission only for the configured profiles manifest and
+`.agents/skills/orchestrate-*/SKILL.md`; source files, normal skills, docs, MCP
+configs, secrets, commits, and external services stay outside its direct write
+surface. Orchestration skills should reference profile aliases, not raw model
+names or variants.
+
 ## Hooks
 
 The repository includes hooks that sync AI workspace projections after checkout

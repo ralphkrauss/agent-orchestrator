@@ -131,6 +131,132 @@ If your repository already has a cross-platform `npx` wrapper, use it the same w
 }
 ```
 
+## OpenCode Orchestration Mode
+
+OpenCode orchestration mode starts OpenCode as a constrained supervisor for a
+target workspace. The supervisor can inspect the repository and use
+`agent-orchestrator` MCP tools to start, wait for, inspect, follow up with, and
+cancel worker runs. It cannot directly edit source files, use todo writes,
+commit, push, create pull requests, publish, or mutate external services.
+
+The same supervisor can also create or update project-owned `orchestrate-*`
+skills and the configured profiles manifest. Those paths are the only direct
+writes allowed in OpenCode orchestration mode.
+
+Launch from the repository where workers should run:
+
+```bash
+agent-orchestrator-opencode
+agent-orchestrator-opencode --cwd /path/to/workspace
+agent-orchestrator opencode --cwd /path/to/workspace
+```
+
+OpenCode passthrough arguments after `--` are intentionally limited to no
+subcommand or `run` followed by positional prompt tokens. The launcher rejects
+non-supervisor subcommands and any option token after `run`, including
+`--agent`, `--attach`, `--dir`, `--share`, `--session`, `--file`, and
+`--dangerously-skip-permissions`.
+
+The launcher does not modify normal OpenCode config. It generates an
+`OPENCODE_CONFIG_CONTENT` overlay, loads project-owned orchestration skills from
+the shared `.agents/skills/` root, and does not generate default skills. The
+target workspace path is included in the supervisor prompt and should be passed
+as `cwd` to worker runs unless the user explicitly chooses another workspace.
+
+The supervisor reads worker profiles from:
+
+```text
+~/.config/agent-orchestrator/profiles.json
+```
+
+This keeps personal model preferences out of git and reusable across
+repositories. OpenCode can start before that file exists so you can discuss the
+profile aliases you need. The supervisor may write this profiles manifest when you
+ask it to configure profiles, but it cannot write other config, source, docs,
+normal skills, secrets, commits, pull requests, run bash, or mutate external
+services. It must not start worker runs until the profiles manifest validates.
+
+Example:
+
+```json
+{
+  "version": 1,
+  "profiles": {
+    "deep-implementation": {
+      "backend": "codex",
+      "model": "gpt-5.5",
+      "reasoning_effort": "high",
+      "description": "Implementation and hardening"
+    },
+    "strict-review": {
+      "backend": "claude",
+      "model": "claude-opus-4-7",
+      "reasoning_effort": "xhigh",
+      "description": "Review and risk assessment"
+    }
+  }
+}
+```
+
+Ask the supervisor to create or refine its orchestration skills. The launcher
+creates the shared skill root before OpenCode starts, then grants edit
+permission only to the profiles manifest and:
+
+```text
+.agents/skills/orchestrate-*/SKILL.md
+```
+
+Project-owned orchestration skills use the same OpenCode skill layout as normal
+skills, with an `orchestrate-*` folder and skill name:
+
+```text
+.agents/skills/orchestrate-{name}/SKILL.md
+```
+
+Orchestration skills should reference profile aliases from the manifest, not raw
+model names, variants, backend names, or effort levels. Each user chooses
+concrete models in the profiles manifest.
+
+When starting workers, the supervisor should normally call `start_run` with a
+live `profile` alias plus `profiles_file`. The daemon reads and validates the
+current manifest at worker-start time, so profile edits take effect without
+restarting OpenCode. Direct `backend`/`model` starts remain available for
+explicit one-off user overrides or when the profile setup is broken. The
+`list_worker_profiles` MCP tool returns the validated live profiles and their
+configured backend/model settings.
+
+Useful options:
+
+```bash
+agent-orchestrator-opencode --print-config
+agent-orchestrator-opencode --profiles-file ~/.config/agent-orchestrator/profiles.json
+agent-orchestrator-opencode --profiles-json '{"version":1,"profiles":{}}'
+agent-orchestrator-opencode --skills .agents/skills
+agent-orchestrator-opencode --orchestrator-model anthropic/claude-sonnet-4-6
+agent-orchestrator-opencode --orchestrator-small-model openai/gpt-5.4-mini
+```
+
+Environment fallbacks use the `AGENT_ORCHESTRATOR_OPENCODE_*` prefix, including
+`AGENT_ORCHESTRATOR_OPENCODE_CWD`,
+`AGENT_ORCHESTRATOR_OPENCODE_PROFILES_FILE`,
+`AGENT_ORCHESTRATOR_OPENCODE_PROFILES_JSON`,
+`AGENT_ORCHESTRATOR_OPENCODE_ROUTES_FILE`,
+`AGENT_ORCHESTRATOR_OPENCODE_ROUTES_JSON`,
+`AGENT_ORCHESTRATOR_OPENCODE_MANIFEST`,
+`AGENT_ORCHESTRATOR_OPENCODE_SKILLS_PATH`,
+`AGENT_ORCHESTRATOR_OPENCODE_MODEL`,
+`AGENT_ORCHESTRATOR_OPENCODE_SMALL_MODEL`, and
+`AGENT_ORCHESTRATOR_OPENCODE_BIN`.
+
+The current package supports Codex and Claude worker backends, but the profiles
+manifest is provider-agnostic. Future backends can add capability descriptors
+without changing the supervisor workflow.
+
+OpenCode permissions are application-level guardrails, not an operating-system
+sandbox. For stronger enforcement, run the supervisor in a read-only worktree
+mount, under a separate OS user, or inside a container with only intentional
+writable paths exposed.
+
 ## Architecture
 
 There are two processes:
@@ -299,7 +425,8 @@ Expected operational failures use `{ ok: false, error }`. MCP `isError: true` is
 |---|---|---|
 | `get_backend_status` | `{}` | `{ status: BackendStatusReport }` |
 | `get_observability_snapshot` | `{ limit?: number, include_prompts?: boolean, recent_event_limit?: number, diagnostics?: boolean }` | `{ snapshot: ObservabilitySnapshot }` |
-| `start_run` | `{ backend: "codex" \| "claude", prompt: string, cwd: string, model?: string, reasoning_effort?: string, service_tier?: string, metadata?: object, execution_timeout_seconds?: number }` | `{ run_id: string }` |
+| `list_worker_profiles` | `{ profiles_file?: string, cwd?: string }` | `{ profiles_file: string, profiles: WorkerProfile[] }` |
+| `start_run` | Profile mode: `{ profile: string, profiles_file?: string, prompt: string, cwd: string, metadata?: object, execution_timeout_seconds?: number }`; direct mode: `{ backend: "codex" \| "claude", prompt: string, cwd: string, model?: string, reasoning_effort?: string, service_tier?: string, metadata?: object, execution_timeout_seconds?: number }` | `{ run_id: string }` |
 | `list_runs` | `{}` | `{ runs: RunSummary[] }` |
 | `get_run_status` | `{ run_id: string }` | `{ run_summary: RunSummary }` |
 | `get_run_events` | `{ run_id: string, after_sequence?: number, limit?: number }` | `{ events: WorkerEvent[], next_sequence: number, has_more: boolean }` |

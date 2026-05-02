@@ -1,11 +1,23 @@
 export const tools = [
   {
     name: 'start_run',
-    description: 'Start a Codex or Claude worker run.',
+    description: 'Start a worker run directly with backend/model settings, or by resolving a live profile alias from the profiles file.',
     inputSchema: {
       type: 'object',
       properties: {
-        backend: { type: 'string', enum: ['codex', 'claude'] },
+        backend: {
+          type: 'string',
+          enum: ['codex', 'claude'],
+          description: 'Direct mode backend. Omit when using profile.',
+        },
+        profile: {
+          type: 'string',
+          description: 'Live profile alias to resolve from profiles_file.',
+        },
+        profiles_file: {
+          type: 'string',
+          description: 'Profiles manifest to read at worker start time. Defaults to ~/.config/agent-orchestrator/profiles.json.',
+        },
         prompt: { type: 'string' },
         cwd: { type: 'string' },
         model: {
@@ -25,7 +37,41 @@ export const tools = [
         metadata: { type: 'object', additionalProperties: true },
         execution_timeout_seconds: { type: 'number' },
       },
-      required: ['backend', 'prompt', 'cwd'],
+      required: ['prompt', 'cwd'],
+      oneOf: [
+        {
+          required: ['backend'],
+          not: { required: ['profile'] },
+        },
+        {
+          required: ['profile'],
+          not: {
+            anyOf: [
+              { required: ['backend'] },
+              { required: ['model'] },
+              { required: ['reasoning_effort'] },
+              { required: ['service_tier'] },
+            ],
+          },
+        },
+      ],
+    },
+  },
+  {
+    name: 'list_worker_profiles',
+    description: 'List validated worker profile aliases from the live profiles file.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        profiles_file: {
+          type: 'string',
+          description: 'Profiles manifest to read. Defaults to ~/.config/agent-orchestrator/profiles.json.',
+        },
+        cwd: {
+          type: 'string',
+          description: 'Base directory for resolving a relative profiles_file.',
+        },
+      },
     },
   },
   {

@@ -139,6 +139,105 @@ describe('agent orchestrator integration with mock CLIs', () => {
     assert.deepStrictEqual(args[2], ['exec', 'resume', '--json', '--skip-git-repo-check', '--ignore-user-config', '--model', 'gpt-5.4', '-c', 'model_reasoning_effort="medium"', 'codex-session-1', '-']);
   });
 
+  it('resolves profile aliases from the live profiles file when starting workers', async () => {
+    const fixture = await createFixture();
+    const repo = await createGitRepo(fixture.root);
+    const service = await createService(fixture.home);
+    const profilesFile = join(fixture.root, 'profiles.json');
+
+    await writeProfilesFile(profilesFile, 'gpt-5.2', 'high');
+    const first = await service.startRun({
+      profile: 'live-implementation',
+      profiles_file: profilesFile,
+      prompt: 'hello',
+      cwd: repo,
+    });
+    assert.equal(first.ok, true);
+    const firstId = first.ok ? (first as unknown as { run_id: string }).run_id : '';
+    await service.waitForRun({ run_id: firstId, wait_seconds: 5 });
+
+    await writeProfilesFile(profilesFile, 'gpt-5.4', 'medium');
+    const second = await service.startRun({
+      profile: 'live-implementation',
+      profiles_file: profilesFile,
+      prompt: 'hello again',
+      cwd: repo,
+    });
+    assert.equal(second.ok, true);
+    const secondId = second.ok ? (second as unknown as { run_id: string }).run_id : '';
+    await service.waitForRun({ run_id: secondId, wait_seconds: 5 });
+
+    const firstStatus = await service.getRunStatus({ run_id: firstId });
+    const secondStatus = await service.getRunStatus({ run_id: secondId });
+    assert.equal(firstStatus.ok && (firstStatus as unknown as { run_summary: { model: string } }).run_summary.model, 'gpt-5.2');
+    assert.equal(secondStatus.ok && (secondStatus as unknown as { run_summary: { model: string } }).run_summary.model, 'gpt-5.4');
+    assert.deepStrictEqual(
+      secondStatus.ok && (secondStatus as unknown as { run_summary: { metadata: { worker_profile: unknown } } }).run_summary.metadata.worker_profile,
+      { mode: 'profile', profile: 'live-implementation', profiles_file: profilesFile },
+    );
+
+    const followup = await service.sendFollowup({
+      run_id: secondId,
+      prompt: 'follow profile parent',
+    });
+    assert.equal(followup.ok, true);
+    const followupId = followup.ok ? (followup as unknown as { run_id: string }).run_id : '';
+    await service.waitForRun({ run_id: followupId, wait_seconds: 5 });
+    const followupStatus = await service.getRunStatus({ run_id: followupId });
+    assert.equal(followupStatus.ok, true);
+    const followupMetadata = (followupStatus as unknown as { run_summary: { metadata: Record<string, unknown> } }).run_summary.metadata;
+    assert.equal(Object.hasOwn(followupMetadata, 'worker_profile'), false);
+
+    const explicitMetadata = await service.sendFollowup({
+      run_id: secondId,
+      prompt: 'follow profile parent with metadata',
+      metadata: { worker_profile: { mode: 'explicit-child' } },
+    });
+    assert.equal(explicitMetadata.ok, true);
+    const explicitMetadataId = explicitMetadata.ok ? (explicitMetadata as unknown as { run_id: string }).run_id : '';
+    await service.waitForRun({ run_id: explicitMetadataId, wait_seconds: 5 });
+    const explicitMetadataStatus = await service.getRunStatus({ run_id: explicitMetadataId });
+    assert.equal(explicitMetadataStatus.ok, true);
+    assert.deepStrictEqual(
+      (explicitMetadataStatus as unknown as { run_summary: { metadata: { worker_profile: unknown } } }).run_summary.metadata.worker_profile,
+      { mode: 'explicit-child' },
+    );
+
+    const args = await readJsonLines<string[]>(join(repo, 'codex-args.jsonl'));
+    assert.deepStrictEqual(args[0], ['exec', '--json', '--skip-git-repo-check', '--cd', repo, '--model', 'gpt-5.2', '-c', 'model_reasoning_effort="high"', '-']);
+    assert.deepStrictEqual(args[1], ['exec', '--json', '--skip-git-repo-check', '--cd', repo, '--model', 'gpt-5.4', '-c', 'model_reasoning_effort="medium"', '-']);
+  });
+
+  it('rejects live profile aliases when backend diagnostics report unavailable CLIs', async () => {
+    const fixture = await createFixture();
+    const repo = await createGitRepo(fixture.root);
+    const service = await createService(fixture.home);
+    const profilesFile = join(fixture.root, 'profiles.json');
+    await writeProfilesFile(profilesFile, 'gpt-5.2', 'high');
+
+    process.env.PATH = join(fixture.root, 'missing-bin');
+
+    const listed = await service.listWorkerProfiles({ profiles_file: profilesFile, cwd: repo });
+    assert.equal(listed.ok, false);
+    assert.match(
+      listed.ok ? '' : listed.error.message,
+      /profile live-implementation uses unavailable backend codex \(missing\)/,
+    );
+
+    const start = await service.startRun({
+      profile: 'live-implementation',
+      profiles_file: profilesFile,
+      prompt: 'hello',
+      cwd: repo,
+    });
+    assert.equal(start.ok, false);
+    assert.match(
+      start.ok ? '' : start.error.message,
+      /profile live-implementation uses unavailable backend codex \(missing\)/,
+    );
+    assert.deepStrictEqual(await service.store.listRuns(), []);
+  });
+
   it('rejects model settings that a backend cannot apply', async () => {
     const fixture = await createFixture();
     const repo = await createGitRepo(fixture.root);
@@ -179,6 +278,24 @@ describe('agent orchestrator integration with mock CLIs', () => {
     });
     assertInvalidInput(claudeXhighFallback, /Claude xhigh effort requires claude-opus-4-7/);
 
+    const claudeProviderPrefixedXhigh = await service.startRun({
+      backend: 'claude',
+      prompt: 'hello',
+      cwd: repo,
+      model: 'anthropic/claude-opus-4-7',
+      reasoning_effort: 'xhigh',
+    });
+    assertInvalidInput(claudeProviderPrefixedXhigh, /Claude xhigh effort requires claude-opus-4-7/);
+
+    const claudePaddedXhigh = await service.startRun({
+      backend: 'claude',
+      prompt: 'hello',
+      cwd: repo,
+      model: 'foo-claude-opus-4-7-bar',
+      reasoning_effort: 'xhigh',
+    });
+    assertInvalidInput(claudePaddedXhigh, /Claude xhigh effort requires claude-opus-4-7/);
+
     const claudeMax = await service.startRun({
       backend: 'claude',
       prompt: 'hello',
@@ -189,6 +306,18 @@ describe('agent orchestrator integration with mock CLIs', () => {
     assert.equal(claudeMax.ok, true);
     if (claudeMax.ok) {
       await service.waitForRun({ run_id: (claudeMax as unknown as { run_id: string }).run_id, wait_seconds: 5 });
+    }
+
+    const claudeOneMillionXhigh = await service.startRun({
+      backend: 'claude',
+      prompt: 'hello',
+      cwd: repo,
+      model: 'claude-opus-4-7[1m]',
+      reasoning_effort: 'xhigh',
+    });
+    assert.equal(claudeOneMillionXhigh.ok, true);
+    if (claudeOneMillionXhigh.ok) {
+      await service.waitForRun({ run_id: (claudeOneMillionXhigh as unknown as { run_id: string }).run_id, wait_seconds: 5 });
     }
 
     const codexMax = await service.startRun({
@@ -350,12 +479,42 @@ async function createGitRepo(root: string): Promise<string> {
   return repo;
 }
 
+async function writeProfilesFile(path: string, model: string, reasoningEffort: string): Promise<void> {
+  await writeFile(path, JSON.stringify({
+    version: 1,
+    profiles: {
+      'live-implementation': {
+        backend: 'codex',
+        model,
+        reasoning_effort: reasoningEffort,
+      },
+    },
+  }, null, 2));
+}
+
 async function mkMockCli(binDir: string, name: string, sessionId: string): Promise<void> {
   await mkdir(binDir, { recursive: true });
   const script = `#!/usr/bin/env node
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
+const diagnosticArgs = process.argv.slice(2).join(' ');
+if (diagnosticArgs === '--version') {
+  console.log('${name} 1.2.3');
+  process.exit(0);
+}
+if (${JSON.stringify(name)} === 'codex' && diagnosticArgs === 'exec --help') {
+  console.log('Usage: codex exec --json --cd --skip-git-repo-check --model -');
+  process.exit(0);
+}
+if (${JSON.stringify(name)} === 'codex' && diagnosticArgs === 'exec resume --help') {
+  console.log('Usage: codex exec resume --json --skip-git-repo-check --model <session> -');
+  process.exit(0);
+}
+if (${JSON.stringify(name)} === 'claude' && diagnosticArgs === '--help') {
+  console.log('Usage: claude -p --output-format stream-json --resume --model <session>');
+  process.exit(0);
+}
 let prompt = '';
 process.stdin.on('data', chunk => prompt += chunk);
 process.stdin.on('end', () => {

@@ -6,6 +6,7 @@ import {
   GetObservabilitySnapshotInputSchema,
   GetRunEventsInputSchema,
   isTerminalStatus,
+  ListWorkerProfilesInputSchema,
   orchestratorError,
   PruneRunsInputSchema,
   ReasoningEffortSchema,
@@ -13,6 +14,7 @@ import {
   SendFollowupInputSchema,
   ShutdownInputSchema,
   StartRunInputSchema,
+  ServiceTierSchema,
   WaitForRunInputSchema,
   wrapErr,
   wrapOk,
@@ -21,6 +23,7 @@ import {
   type ReasoningEffort,
   type ModelSource,
   type OrchestratorError,
+  type StartRun,
   type RunStatus,
   type RunModelSettings,
   type ServiceTier,
@@ -28,13 +31,16 @@ import {
   type WorkerResult,
 } from './contract.js';
 import type { WorkerBackend } from './backend/WorkerBackend.js';
+import { validateClaudeModelAndEffort } from './backend/claudeValidation.js';
 import { resolveBinary } from './backend/common.js';
 import { getBackendStatus } from './diagnostics.js';
 import { captureGitSnapshot } from './gitSnapshot.js';
 import { buildObservabilitySnapshot } from './observability.js';
+import { createWorkerCapabilityCatalog, type ValidatedWorkerProfile } from './opencode/capabilities.js';
 import { getPackageVersion } from './packageMetadata.js';
 import { ProcessManager, type ManagedRun } from './processManager.js';
 import { RunStore } from './runStore.js';
+import { loadValidatedWorkerProfilesFromFile, resolveWorkerProfilesFile } from './workerRouting.js';
 
 interface OrchestratorConfig {
   default_execution_timeout_seconds: number;
@@ -51,6 +57,15 @@ type OrchestratorLogger = (message: string) => void;
 
 export interface OrchestratorDispatchContext {
   frontend_version?: string | null;
+}
+
+interface ResolvedStartRunTarget {
+  backendName: Backend;
+  backend: WorkerBackend;
+  model: string | null;
+  reasoningEffort: ReasoningEffort | undefined;
+  serviceTier: ServiceTier | undefined;
+  metadata: Record<string, unknown>;
 }
 
 export class OrchestratorService {
@@ -84,6 +99,8 @@ export class OrchestratorService {
         return this.pruneRuns(params);
       case 'start_run':
         return this.startRun(params);
+      case 'list_worker_profiles':
+        return this.listWorkerProfiles(params);
       case 'list_runs':
         return wrapOk({ runs: await this.store.listRuns() });
       case 'get_run_status':
@@ -117,28 +134,154 @@ export class OrchestratorService {
     const parsed = StartRunInputSchema.safeParse(params);
     if (!parsed.success) return invalidInput(parsed.error.message);
     const input = parsed.data;
-    const backend = this.backends.get(input.backend);
-    if (!backend) return wrapErr(orchestratorError('BACKEND_NOT_FOUND', `Backend not found: ${input.backend}`));
+    const resolved = await this.resolveStartRunTarget(input);
+    if (!resolved.ok) return wrapErr(resolved.error);
+    const { backendName, backend, model, reasoningEffort, serviceTier, metadata } = resolved.value;
     const timeout = this.resolveExecutionTimeout(input.execution_timeout_seconds);
     if (!timeout.ok) return wrapErr(timeout.error);
-    const settings = modelSettingsForBackend(input.backend, input.model ?? null, input.reasoning_effort, input.service_tier);
+    const settings = modelSettingsForBackend(backendName, model, reasoningEffort, serviceTier);
     if (!settings.ok) return wrapErr(settings.error);
 
     const meta = await this.store.createRun({
-      backend: input.backend,
+      backend: backendName,
       cwd: input.cwd,
       prompt: input.prompt,
-      model: input.model ?? null,
-      model_source: input.model ? 'explicit' : 'backend_default',
+      model,
+      model_source: model ? 'explicit' : 'backend_default',
       model_settings: settings.value,
       display: displayMetadata(input.metadata, input.prompt),
-      metadata: input.metadata,
+      metadata,
       execution_timeout_seconds: timeout.value,
     });
     await this.captureAndPersistGitSnapshot(meta.run_id, input.cwd);
 
-    await this.startManagedRun(meta.run_id, backend, input.prompt, input.cwd, timeout.value, settings.value, undefined, input.model);
+    await this.startManagedRun(meta.run_id, backend, input.prompt, input.cwd, timeout.value, settings.value, undefined, model ?? undefined);
     return wrapOk({ run_id: meta.run_id });
+  }
+
+  private async resolveStartRunTarget(input: StartRun): Promise<{ ok: true; value: ResolvedStartRunTarget } | { ok: false; error: OrchestratorError }> {
+    if (!input.profile) {
+      if (!input.backend) {
+        return { ok: false, error: orchestratorError('INVALID_INPUT', 'Direct worker starts require backend') };
+      }
+      const backend = this.backends.get(input.backend);
+      if (!backend) return { ok: false, error: orchestratorError('BACKEND_NOT_FOUND', `Backend not found: ${input.backend}`) };
+      return {
+        ok: true,
+        value: {
+          backendName: input.backend,
+          backend,
+          model: input.model ?? null,
+          reasoningEffort: input.reasoning_effort,
+          serviceTier: input.service_tier,
+          metadata: input.metadata,
+        },
+      };
+    }
+
+    const profilesFile = resolveWorkerProfilesFile(input.profiles_file, input.cwd);
+    const loaded = await this.loadLiveWorkerProfiles(profilesFile);
+    if (!loaded.ok) {
+      return {
+        ok: false,
+        error: orchestratorError('INVALID_INPUT', `Worker profiles manifest is invalid: ${loaded.errors.join('; ')}`, {
+          profiles_file: profilesFile,
+          errors: loaded.errors,
+        }),
+      };
+    }
+
+    const profile = loaded.profiles.profiles[input.profile ?? ''];
+    if (!profile) {
+      return {
+        ok: false,
+        error: orchestratorError('INVALID_INPUT', `Worker profile ${input.profile} was not found in ${profilesFile}`, {
+          profiles_file: profilesFile,
+        }),
+      };
+    }
+
+    const backendName = BackendSchema.safeParse(profile.backend);
+    if (!backendName.success) {
+      return {
+        ok: false,
+        error: orchestratorError('BACKEND_NOT_FOUND', `Backend not found: ${profile.backend}`, {
+          profile: profile.id,
+          profiles_file: profilesFile,
+        }),
+      };
+    }
+    const backend = this.backends.get(backendName.data);
+    if (!backend) {
+      return {
+        ok: false,
+        error: orchestratorError('BACKEND_NOT_FOUND', `Backend not found: ${backendName.data}`, {
+          profile: profile.id,
+          profiles_file: profilesFile,
+        }),
+      };
+    }
+
+    const profileSettings = parseProfileModelSettings(profile, profilesFile);
+    if (!profileSettings.ok) return { ok: false, error: profileSettings.error };
+    return {
+      ok: true,
+      value: {
+        backendName: backendName.data,
+        backend,
+        model: profile.model ?? null,
+        reasoningEffort: profileSettings.reasoningEffort,
+        serviceTier: profileSettings.serviceTier,
+        metadata: {
+          ...input.metadata,
+          worker_profile: {
+            mode: 'profile',
+            profile: profile.id,
+            profiles_file: profilesFile,
+          },
+        },
+      },
+    };
+  }
+
+  async listWorkerProfiles(params: unknown): Promise<ToolResult> {
+    const parsed = ListWorkerProfilesInputSchema.safeParse(params);
+    if (!parsed.success) return invalidInput(parsed.error.message);
+    const profilesFile = resolveWorkerProfilesFile(parsed.data.profiles_file, parsed.data.cwd);
+    const loaded = await this.loadLiveWorkerProfiles(profilesFile);
+    if (!loaded.ok) {
+      return wrapErr(orchestratorError('INVALID_INPUT', `Worker profiles manifest is invalid: ${loaded.errors.join('; ')}`, {
+        profiles_file: profilesFile,
+        errors: loaded.errors,
+      }));
+    }
+    return wrapOk({
+      profiles_file: profilesFile,
+      profiles: Object.values(loaded.profiles.profiles)
+        .sort((a, b) => a.id.localeCompare(b.id))
+        .map((profile) => ({
+          id: profile.id,
+          backend: profile.backend,
+          model: profile.model ?? null,
+          variant: profile.variant ?? null,
+          reasoning_effort: profile.reasoning_effort ?? null,
+          service_tier: profile.service_tier ?? null,
+          description: profile.description ?? null,
+          metadata: profile.metadata ?? {},
+          capability: {
+            backend: profile.capability.backend,
+            display_name: profile.capability.display_name,
+            availability_status: profile.capability.availability_status,
+            supports_start: profile.capability.supports_start,
+            supports_resume: profile.capability.supports_resume,
+          },
+        })),
+    });
+  }
+
+  private async loadLiveWorkerProfiles(profilesFile: string): ReturnType<typeof loadValidatedWorkerProfilesFromFile> {
+    const status = await getBackendStatus();
+    return loadValidatedWorkerProfilesFromFile(profilesFile, createWorkerCapabilityCatalog(status));
   }
 
   async sendFollowup(params: unknown): Promise<ToolResult> {
@@ -160,7 +303,7 @@ export class OrchestratorService {
     const timeout = this.resolveExecutionTimeout(parsed.data.execution_timeout_seconds);
     if (!timeout.ok) return wrapErr(timeout.error);
     const model = parsed.data.model ?? parent.meta.model;
-    const metadata = { ...parent.meta.metadata, ...parsed.data.metadata };
+    const metadata = metadataForFollowup(parent.meta.metadata, parsed.data.metadata);
     const modelSource: ModelSource = parsed.data.model ? 'explicit' : parent.meta.model ? 'inherited' : 'backend_default';
     const settings = hasModelSettingsInput(parsed.data)
       ? modelSettingsForBackend(backendName, model, parsed.data.reasoning_effort, parsed.data.service_tier)
@@ -432,6 +575,51 @@ function hasModelSettingsInput(input: { reasoning_effort?: ReasoningEffort; serv
   return input.reasoning_effort !== undefined || input.service_tier !== undefined;
 }
 
+function parseProfileModelSettings(
+  profile: ValidatedWorkerProfile,
+  profilesFile: string,
+): { ok: true; reasoningEffort: ReasoningEffort | undefined; serviceTier: ServiceTier | undefined } | { ok: false; error: OrchestratorError } {
+  const reasoningEffort = profile.reasoning_effort
+    ? ReasoningEffortSchema.safeParse(profile.reasoning_effort)
+    : null;
+  if (reasoningEffort && !reasoningEffort.success) {
+    return {
+      ok: false,
+      error: orchestratorError('INVALID_INPUT', `Profile ${profile.id} has invalid reasoning_effort ${profile.reasoning_effort}`, {
+        profile: profile.id,
+        profiles_file: profilesFile,
+      }),
+    };
+  }
+
+  const serviceTier = profile.service_tier
+    ? ServiceTierSchema.safeParse(profile.service_tier)
+    : null;
+  if (serviceTier && !serviceTier.success) {
+    return {
+      ok: false,
+      error: orchestratorError('INVALID_INPUT', `Profile ${profile.id} has invalid service_tier ${profile.service_tier}`, {
+        profile: profile.id,
+        profiles_file: profilesFile,
+      }),
+    };
+  }
+
+  return {
+    ok: true,
+    reasoningEffort: reasoningEffort?.data,
+    serviceTier: serviceTier?.data,
+  };
+}
+
+function metadataForFollowup(
+  parentMetadata: Record<string, unknown>,
+  childMetadata: Record<string, unknown>,
+): Record<string, unknown> {
+  const { worker_profile: _workerProfile, ...inheritedMetadata } = parentMetadata;
+  return { ...inheritedMetadata, ...childMetadata };
+}
+
 function modelSettingsForBackend(
   backend: Backend,
   model: string | null | undefined,
@@ -452,14 +640,11 @@ function modelSettingsForBackend(
     };
   }
 
-  if (reasoningEffort === 'none' || reasoningEffort === 'minimal') {
-    return { ok: false, error: orchestratorError('INVALID_INPUT', 'Claude reasoning_effort must be one of low, medium, high, xhigh, or max') };
-  }
   if (serviceTier !== undefined) {
     return { ok: false, error: orchestratorError('INVALID_INPUT', 'Claude does not support service_tier; set reasoning_effort and model only') };
   }
   const claudeModelError = validateClaudeModelAndEffort(model, reasoningEffort);
-  if (claudeModelError) return { ok: false, error: claudeModelError };
+  if (claudeModelError) return { ok: false, error: orchestratorError('INVALID_INPUT', claudeModelError) };
   return {
     ok: true,
     value: {
@@ -470,23 +655,6 @@ function modelSettingsForBackend(
   };
 }
 
-function validateClaudeModelAndEffort(model: string | null | undefined, reasoningEffort: ReasoningEffort | undefined): OrchestratorError | null {
-  const normalized = normalizeClaudeModel(model);
-  if (normalized && isClaudeAlias(normalized)) {
-    return orchestratorError('INVALID_INPUT', 'Claude model must be a direct model id such as claude-opus-4-7 or claude-opus-4-7[1m]; aliases like opus and sonnet can drift');
-  }
-  if (reasoningEffort && !normalized) {
-    return orchestratorError('INVALID_INPUT', 'Claude reasoning_effort requires an explicit direct model id such as claude-opus-4-7 so fallback behavior is visible');
-  }
-  if (reasoningEffort === 'xhigh' && normalized && !isClaudeOpus47(normalized)) {
-    return orchestratorError('INVALID_INPUT', 'Claude xhigh effort requires claude-opus-4-7 or claude-opus-4-7[1m]; other Claude models can fall back to high');
-  }
-  if (reasoningEffort && normalized && isAnthropicClaudeModelId(normalized) && !isKnownClaudeEffortModel(normalized)) {
-    return orchestratorError('INVALID_INPUT', 'Claude effort levels are documented for Opus 4.7, Opus 4.6, and Sonnet 4.6; use one of those direct model ids');
-  }
-  return null;
-}
-
 function validateInheritedModelSettingsForBackend(
   backend: Backend,
   model: string | null | undefined,
@@ -495,40 +663,12 @@ function validateInheritedModelSettingsForBackend(
   if (backend !== 'claude') return { ok: true, value: settings };
   const reasoningEffort = parseReasoningEffort(settings.reasoning_effort);
   const error = validateClaudeModelAndEffort(model, reasoningEffort);
-  return error ? { ok: false, error } : { ok: true, value: settings };
+  return error ? { ok: false, error: orchestratorError('INVALID_INPUT', error) } : { ok: true, value: settings };
 }
 
 function parseReasoningEffort(value: string | null | undefined): ReasoningEffort | undefined {
   const parsed = value ? ReasoningEffortSchema.safeParse(value) : null;
   return parsed?.success ? parsed.data : undefined;
-}
-
-function normalizeClaudeModel(model: string | null | undefined): string | null {
-  const value = model?.trim().toLowerCase();
-  return value ? value.replace(/\[1m\]$/, '') : null;
-}
-
-function isClaudeAlias(model: string): boolean {
-  return model === 'default'
-    || model === 'best'
-    || model === 'opus'
-    || model === 'sonnet'
-    || model === 'haiku'
-    || model === 'opusplan';
-}
-
-function isClaudeOpus47(model: string): boolean {
-  return model.includes('claude-opus-4-7');
-}
-
-function isKnownClaudeEffortModel(model: string): boolean {
-  return model.includes('claude-opus-4-7')
-    || model.includes('claude-opus-4-6')
-    || model.includes('claude-sonnet-4-6');
-}
-
-function isAnthropicClaudeModelId(model: string): boolean {
-  return model.startsWith('claude-') || model.includes('.claude-');
 }
 
 function positiveInt(value: unknown): number | null {

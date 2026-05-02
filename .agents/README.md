@@ -26,6 +26,20 @@ Each skill is a folder containing `SKILL.md`.
 Skills are for repeatable multi-step workflows. Keep them generic where
 possible and move long reference material into a `references/` folder.
 
+OpenCode orchestration skills use the same shared skill root. Name them with an
+`orchestrate-*` prefix so they are clearly distinguishable from normal worker
+skills:
+
+```text
+.agents/skills/orchestrate-{name}/SKILL.md
+```
+
+The `agent-orchestrator-opencode` launcher points OpenCode `skills.paths` at
+`.agents/skills/` and does not generate default skills. The OpenCode supervisor
+can write only the configured profiles manifest and `SKILL.md` files under
+`.agents/skills/orchestrate-*/`. Orchestration skills should reference profile
+aliases, not raw model names or variants.
+
 ## Rules
 
 Rules describe constraints, conventions, and review checks. Use rules for

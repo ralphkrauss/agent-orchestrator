@@ -44,6 +44,14 @@ orchestrator-build:
 orchestrator-help: orchestrator-build
     node dist/cli.js --help
 
+# Print the generated OpenCode orchestration config for inspection.
+orchestrator-opencode-config *args: orchestrator-build
+    node dist/opencodeCli.js --print-config {{args}}
+
+# Start OpenCode in constrained orchestration mode.
+orchestrator-opencode *args: orchestrator-build
+    node dist/opencodeCli.js {{args}}
+
 # Check local worker CLI availability from the current build.
 orchestrator-doctor: orchestrator-build
     node dist/cli.js doctor

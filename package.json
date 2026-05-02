@@ -14,7 +14,8 @@
   },
   "bin": {
     "agent-orchestrator": "dist/cli.js",
-    "agent-orchestrator-daemon": "dist/daemonCli.js"
+    "agent-orchestrator-daemon": "dist/daemonCli.js",
+    "agent-orchestrator-opencode": "dist/opencodeCli.js"
   },
   "scripts": {
     "build": "tsc",
