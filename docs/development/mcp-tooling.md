@@ -200,8 +200,8 @@ dogfooding, restart the daemon so the frontend and daemon package versions
 match:
 
 ```bash
-node dist/daemonCli.js restart
-node dist/daemonCli.js restart --force
+node dist/cli.js restart
+node dist/cli.js restart --force
 just orchestrator-restart
 ```
 

@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,6 +18,10 @@ describe('daemon CLI', () => {
   it('documents restart and dashboard commands in the top-level CLI help', async () => {
     const result = await execFileAsync(process.execPath, [cliPath, '--help'], { timeout: 5_000 });
 
+    assert.match(result.stdout, /agent-orchestrator restart \[--force\]/);
+    assert.match(result.stdout, /agent-orchestrator status --json/);
+    assert.match(result.stdout, /agent-orchestrator runs \[--json\] \[--prompts\]/);
+    assert.match(result.stdout, /agent-orchestrator watch \[--interval-ms <ms>\] \[--limit <n>\]/);
     assert.match(result.stdout, /agent-orchestrator-daemon restart \[--force\]/);
     assert.match(result.stdout, /agent-orchestrator-daemon status --json/);
     assert.match(result.stdout, /agent-orchestrator-daemon runs \[--json\] \[--prompts\]/);
@@ -29,6 +33,46 @@ describe('daemon CLI', () => {
 
     assert.match(result.stdout, /agent-orchestrator-daemon start/);
     assert.equal(result.stderr, '');
+  });
+
+  it('exposes the canonical main CLI and standalone daemon bins', async () => {
+    const packageJson = JSON.parse(await readFile(new URL('../../package.json', import.meta.url), 'utf8')) as {
+      bin?: Record<string, string>;
+    };
+
+    assert.deepStrictEqual(packageJson.bin, {
+      'agent-orchestrator': 'dist/cli.js',
+      'agent-orchestrator-daemon': 'dist/daemonCli.js',
+      'agent-orchestrator-opencode': 'dist/opencodeCli.js',
+    });
+  });
+
+  it('controls the daemon through the top-level CLI', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-main-cli-'));
+    const home = join(root, 'home');
+    const env = { ...process.env, AGENT_ORCHESTRATOR_HOME: home };
+
+    try {
+      const restart = await execFileAsync(process.execPath, [cliPath, 'restart'], { env, timeout: 10_000 });
+      assert.match(restart.stdout, /agent-orchestrator daemon is stopped/);
+      assert.match(restart.stdout, /agent-orchestrator daemon started pid=/);
+
+      const status = await execFileAsync(process.execPath, [cliPath, 'status'], { env, timeout: 10_000 });
+      assert.match(status.stdout, /running pid=/);
+      assert.match(status.stdout, /version_match=true/);
+
+      const jsonStatus = await execFileAsync(process.execPath, [cliPath, 'status', '--json'], { env, timeout: 10_000 });
+      const envelope = JSON.parse(jsonStatus.stdout) as {
+        running?: boolean;
+        snapshot?: { daemon_pid?: number | null };
+      };
+      assert.equal(envelope.running, true);
+      assert.equal(typeof envelope.snapshot?.daemon_pid, 'number');
+    } finally {
+      await execFileAsync(process.execPath, [cliPath, 'stop', '--force'], { env, timeout: 10_000 }).catch(() => undefined);
+      await waitForStopped(env);
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it('restarts a stopped daemon and reports matching versions in status', async () => {

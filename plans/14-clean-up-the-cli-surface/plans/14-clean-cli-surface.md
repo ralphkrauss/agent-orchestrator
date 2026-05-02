@@ -4,7 +4,7 @@ Branch: `14-clean-up-the-cli-surface`
 Plan Slug: `clean-cli-surface`
 Parent Issue: #14
 Created: 2026-05-02
-Status: planning
+Status: completed
 
 ## Context
 
@@ -81,11 +81,11 @@ Affected verification commands:
 | Task ID | Title | Depends On | Status | Acceptance Criteria |
 |---|---|---|---|---|
 | T0 | Merge renamed `main` baseline and resolve stale command names | None | completed | `origin/main` fetched and merged; conflicts in `package.json` and `src/cli.ts` resolved by accepting the package rename and preserving OpenCode wiring; active docs/source no longer reference `agent-orchestrator-mcp`; `git diff --check` passes. |
-| T1 | Refactor daemon CLI into a reusable argv-driven runner | T0 | pending | `src/daemon/daemonCli.ts` exports a runner that accepts daemon args; `src/daemonCli.ts` remains a thin standalone wrapper; option parsing no longer depends on fixed global `process.argv` indexes; existing daemon lifecycle tests still pass. |
-| T2 | Add direct top-level daemon routing | T1 | pending | `agent-orchestrator status`, `runs`, `watch`, `start`, `stop`, `restart`, and `prune` delegate to daemon behavior; no args and `server` still start the stdio MCP server; `doctor` and `opencode` still work. |
-| T3 | Update user-facing docs and help text | T2 | pending | README examples prefer `agent-orchestrator ...` for human shell usage; MCP client config examples use `@ralphkrauss/agent-orchestrator`; daemon and OpenCode help text show the canonical commands; no secret-bearing config examples are introduced. |
-| T4 | Add focused tests for renamed CLI surface compatibility | T1, T2, T3 | pending | Tests cover canonical help output, direct daemon command routing through `dist/cli.js`, standalone daemon bin compatibility, OpenCode help text, and package bin metadata; JSON output touched by daemon routing remains valid. |
-| T5 | Run verification and record evidence | T4 | pending | `pnpm build` passes; targeted CLI/OpenCode tests pass; `pnpm test` passes; `pnpm verify` passes or any failure is documented with concrete output and next action. |
+| T1 | Refactor daemon CLI into a reusable argv-driven runner | T0 | completed | `src/daemon/daemonCli.ts` exports a runner that accepts daemon args; `src/daemonCli.ts` remains a thin standalone wrapper; option parsing no longer depends on fixed global `process.argv` indexes; existing daemon lifecycle tests still pass. |
+| T2 | Add direct top-level daemon routing | T1 | completed | `agent-orchestrator status`, `runs`, `watch`, `start`, `stop`, `restart`, and `prune` delegate to daemon behavior; no args and `server` still start the stdio MCP server; `doctor` and `opencode` still work. |
+| T3 | Update user-facing docs and help text | T2 | completed | README examples prefer `agent-orchestrator ...` for human shell usage; MCP client config examples use `@ralphkrauss/agent-orchestrator`; daemon and OpenCode help text show the canonical commands; no secret-bearing config examples are introduced. |
+| T4 | Add focused tests for renamed CLI surface compatibility | T1, T2, T3 | completed | Tests cover canonical help output, direct daemon command routing through `dist/cli.js`, standalone daemon bin compatibility, OpenCode help text, and package bin metadata; JSON output touched by daemon routing remains valid. |
+| T5 | Run verification and record evidence | T4 | completed | `pnpm build` passes; targeted CLI/OpenCode tests pass; `pnpm test` passes; `pnpm verify` passes or any failure is documented with concrete output and next action. |
 
 ## Rule Candidates
 
@@ -95,41 +95,41 @@ Affected verification commands:
 
 ## Quality Gates
 
-- [ ] Merge-resolution sanity passes: `git diff --check`.
-- [ ] Affected build command passes: `pnpm build`.
-- [ ] Affected tests pass: `node --test dist/__tests__/daemonCli.test.js dist/__tests__/opencodeHarness.test.js`.
-- [ ] Full test suite passes: `pnpm test`.
-- [ ] Release-quality check passes or failure is recorded: `pnpm verify`.
-- [ ] Relevant `.agents/rules/` checks are satisfied, especially Node/TypeScript CLI output and MCP config safety.
+- [x] Merge-resolution sanity passes: `git diff --check`.
+- [x] Affected build command passes: `pnpm build`.
+- [x] Affected tests pass: `node --test dist/__tests__/daemonCli.test.js dist/__tests__/opencodeHarness.test.js`.
+- [x] Full test suite passes: `pnpm test`.
+- [x] Release-quality check passes or failure is recorded: `pnpm verify`.
+- [x] Relevant `.agents/rules/` checks are satisfied, especially Node/TypeScript CLI output and MCP config safety.
 
 ## Execution Log
 
 ### T0: Merge renamed `main` baseline and resolve stale command names
 - **Status:** completed
-- **Evidence:** `git fetch origin main` completed; `git merge origin/main` stopped on `package.json` and `src/cli.ts`; conflicts resolved to `@ralphkrauss/agent-orchestrator`, `agent-orchestrator`, `agent-orchestrator-daemon`, and `agent-orchestrator-opencode`; active docs/source search found no remaining `agent-orchestrator-mcp` references; `git diff --check` passed; `pnpm build` was attempted but could not run because `node_modules` is missing and `tsc` is not installed.
-- **Notes:** User approved concluding the merge commit on 2026-05-02. Run `pnpm install --frozen-lockfile` before build/test verification.
+- **Evidence:** Initial `origin/main` merge resolved `package.json` and `src/cli.ts` conflicts to `@ralphkrauss/agent-orchestrator`, `agent-orchestrator`, `agent-orchestrator-daemon`, and `agent-orchestrator-opencode`. A later `git fetch origin main` brought `origin/main` from `635b679` to `50cb902`; the merge stopped on `README.md`, `docs/development/mcp-tooling.md`, and `src/opencode/launcher.ts`; conflicts were resolved by preserving the #11 OpenCode passthrough hardening while keeping `agent-orchestrator opencode` as the canonical help/docs command. The local CLI refactor was preserved through a temporary stash, reapplied, and second-round conflicts in `src/daemon/daemonCli.ts`, `src/__tests__/daemonCli.test.ts`, and `src/__tests__/opencodeHarness.test.ts` were resolved. `git diff --check` passed.
+- **Notes:** User approved concluding merge commits on 2026-05-02. The temporary stash was dropped after successful verification.
 
 ### T1: Refactor daemon CLI into a reusable argv-driven runner
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed
+- **Evidence:** `src/daemon/daemonCli.ts` now exports `runDaemonCli(argv)` and `isDaemonCliCommand(command)`; `src/daemonCli.ts` calls `runDaemonCli()` as a thin wrapper; daemon option parsing now reads from the passed argv instead of fixed `process.argv` positions; `pnpm build` passed; targeted tests passed.
+- **Notes:** Standalone `agent-orchestrator-daemon` remains available as a wrapper around the same runner.
 
 ### T2: Add direct top-level daemon routing
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed
+- **Evidence:** `src/cli.ts` routes `start`, `stop`, `restart`, `status`, `runs`, `watch`, and `prune` to `runDaemonCli(process.argv.slice(2))`; no-arg and `server` branches still precede daemon dispatch; `doctor` and `opencode` remain separate branches; targeted daemon CLI test controls the daemon through `dist/cli.js` and verifies `status --json`.
+- **Notes:** User clarified that daemon control should use the main CLI command.
 
 ### T3: Update user-facing docs and help text
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed
+- **Evidence:** README daemon lifecycle, npx, observability, cleanup examples now prefer `agent-orchestrator ...`; `src/cli.ts` help lists main daemon commands before the standalone daemon alias; `justfile` dogfood commands now invoke `node dist/cli.js <command>`; `docs/development/mcp-tooling.md` restart examples now use `node dist/cli.js restart`.
+- **Notes:** `agent-orchestrator-daemon` remains documented as a standalone alias for scripts.
 
 ### T4: Add focused tests for renamed CLI surface compatibility
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed
+- **Evidence:** `src/__tests__/daemonCli.test.ts` now covers main-CLI help, package bin metadata, and daemon restart/status/status--json through `dist/cli.js`; existing standalone daemon tests remain; `src/__tests__/opencodeHarness.test.ts` verifies OpenCode help prefers `agent-orchestrator opencode` and launcher option errors point to that command; targeted tests passed with 15 tests passing.
+- **Notes:** The malformed profile JSON test intentionally keeps the JSON-specific error without adding a help hint.
 
 ### T5: Run verification and record evidence
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed
+- **Evidence:** `pnpm install --frozen-lockfile` completed using the existing lockfile; `pnpm build` passed; targeted `node --test dist/__tests__/daemonCli.test.js dist/__tests__/opencodeHarness.test.js` passed with 20 tests passing after the #11 merge; `pnpm test` passed with 98 passing tests and 1 skipped Windows named-pipe test; `pnpm verify` passed, including publish readiness, npm dist-tag resolution to `next`, production audit with no known vulnerabilities, and npm pack dry run.
+- **Notes:** `pnpm verify` emitted npm warnings about unknown environment configs (`verify-deps-before-run`, `npm-globalconfig`, `_jsr-registry`), but exited successfully.

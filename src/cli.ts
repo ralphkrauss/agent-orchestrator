@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { getBackendStatus, formatBackendStatus } from './diagnostics.js';
+import { isDaemonCliCommand, runDaemonCli } from './daemon/daemonCli.js';
 
 const command = process.argv[2];
 
@@ -15,6 +16,13 @@ if (command === 'doctor') {
 } else if (command === 'opencode') {
   const { runOpenCodeLauncher } = await import('./opencode/launcher.js');
   process.exitCode = await runOpenCodeLauncher(process.argv.slice(3));
+} else if (isDaemonCliCommand(command)) {
+  try {
+    await runDaemonCli(process.argv.slice(2));
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.exit(1);
+  }
 } else if (command === '--help' || command === '-h' || command === 'help') {
   process.stdout.write(`agent-orchestrator
 
@@ -24,8 +32,16 @@ Usage:
   agent-orchestrator doctor       Check local worker CLI availability
   agent-orchestrator doctor --json
   agent-orchestrator opencode     Start OpenCode in orchestration mode
+  agent-orchestrator status       Show daemon status
+  agent-orchestrator status --json
+  agent-orchestrator runs [--json] [--prompts]
+  agent-orchestrator watch [--interval-ms <ms>] [--limit <n>]
+  agent-orchestrator start
+  agent-orchestrator stop [--force]
+  agent-orchestrator restart [--force]
+  agent-orchestrator prune --older-than-days <days> [--dry-run]
 
-Daemon lifecycle:
+Standalone daemon alias:
   agent-orchestrator-daemon status
   agent-orchestrator-daemon status --verbose
   agent-orchestrator-daemon status --json
