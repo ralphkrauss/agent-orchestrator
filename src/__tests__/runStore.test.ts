@@ -32,6 +32,7 @@ describe('RunStore', () => {
     assert.equal(again.status, 'completed');
     const withFinal = await store.loadRun(run.run_id);
     assert.equal(withFinal?.events.at(-1)?.payload.status, 'completed');
+    assert.equal(withFinal?.result?.status, 'completed');
 
     const listed = await store.listRuns();
     assert.equal(listed[0]?.run_id, run.run_id);
