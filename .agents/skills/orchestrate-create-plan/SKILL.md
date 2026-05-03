@@ -24,9 +24,14 @@ critiques drafts until the plan is complete.
 
 ## Workflow
 
-1. **Confirm the issue target.** Identify the GitHub issue URL or issue number
-   from the user request. If it is missing, ask the user for it before starting
-   workers.
+1. **Confirm the branch and issue target.** Identify the current branch before
+   asking the human for an issue. Prefer the supervisor context when it already
+   contains the target workspace branch; otherwise ask the plan creator or a
+   lightweight worker to inspect the repository branch with the repo's normal
+   git tooling. If the branch name contains an issue number or issue slug,
+   derive the GitHub issue target from it and have workers fetch/read that
+   issue. Ask the human for an issue URL/number only when the branch and user
+   request do not identify one clearly.
 2. **Start workers through agent-orchestrator.** Start or resume worker runs via
    agent-orchestrator MCP tools, using the selected validated profile alias
    settings for each route and the target workspace cwd from supervisor context.
@@ -57,6 +62,9 @@ critiques drafts until the plan is complete.
    - answer the plan creator's clarification questions when confidence is high;
    - flag when a question depends on product intent or requirements that cannot
      be inferred from the issue or codebase;
+   - flag any proposed scope substitution, such as replacing the user's named
+     technology, API, SDK, product surface, or acceptance target with a different
+     implementation surface;
    - review the plan for unclear, underspecified, incorrect, risky, or missing
      content;
    - provide concise, actionable feedback for the plan creator.
@@ -67,18 +75,32 @@ critiques drafts until the plan is complete.
      acceptance criteria; and
    - the reviewer is not confident answering from the issue and repository
      context.
-6. **Iterate to alignment.** Pass reviewer answers and feedback to the plan
+6. **Escalate scope substitutions before alignment.** If either worker proposes
+   a material scope substitution, pause the loop and ask the human before
+   accepting it. Present the original scope, proposed replacement, why the
+   worker recommends changing scope, risks/tradeoffs, and a clear choice. Do
+   not let reviewer/creator agreement override human intent for product scope,
+   acceptance criteria, named technologies, or user-facing behavior.
+7. **Iterate to alignment.** Pass reviewer answers and feedback to the plan
    creator, wait for an updated plan, then send the updated plan back to the
    reviewer. Continue until:
    - the reviewer says the plan is ready or has no blocking feedback; and
    - the plan creator agrees the open questions are resolved or explicitly
-     documented as assumptions.
-7. **Avoid over-specifying implementation.** The final plan should be complete
+   documented as assumptions.
+8. **Avoid over-specifying implementation.** The final plan should be complete
    enough to guide a developer, with clear scope, decisions, risks, tasks,
    acceptance criteria, and quality gates, but should not micromanage every
    implementation detail.
-8. **Finish with a handoff.** Summarize the final plan location, key decisions,
-   any assumptions, and whether human input was required. Do not directly edit
+9. **Commit and push the plan through the plan creator.** Repository-native plan
+   files and plan index files created by the create-plan workflow are normal
+   workflow artifacts. After the reviewer and plan creator agree the plan is
+   ready, ask the plan creator to commit and push only those plan workflow files
+   unless the human says otherwise. The supervisor must not commit or push
+   directly. The plan creator should report the commit SHA, pushed branch, and
+   exact files included.
+10. **Finish with an online handoff.** Give the human the GitHub URL for the
+   pushed online plan, plus a concise summary of the plan, key decisions,
+   assumptions, risks, and any human scope decisions made. Do not directly edit
    source files or implement the plan from the supervisor.
 
 ## Follow-Up Prompts
@@ -92,9 +114,17 @@ Use short, role-specific follow-ups during the loop:
 - To the plan creator: "Incorporate the reviewer feedback, update the plan, and
   list any remaining questions. Only keep questions open when they materially
   affect implementation or product requirements."
+- To the plan creator after approval: "The reviewer says the plan is ready.
+  Commit and push only the create-plan workflow artifacts for this plan and the
+  branch index. Do not include source changes. Report the commit SHA, pushed
+  branch, files committed, and the GitHub URL for the plan."
 
 ## Human Escalation Criteria
 
 Escalate to the user only for unclear product requirements that the reviewer
 cannot answer confidently, such as final scope boundaries, user-facing behavior,
 business rules, acceptance criteria, or tradeoffs that require product judgment.
+
+Always escalate proposed material scope substitutions, even when the reviewer
+and plan creator agree. The escalation must include the argument for changing
+scope and the consequences of keeping the original scope.
