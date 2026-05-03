@@ -428,13 +428,13 @@ Expected operational failures use `{ ok: false, error }`. MCP `isError: true` is
 | `get_backend_status` | `{}` | `{ status: BackendStatusReport }` |
 | `get_observability_snapshot` | `{ limit?: number, include_prompts?: boolean, recent_event_limit?: number, diagnostics?: boolean }` | `{ snapshot: ObservabilitySnapshot }` |
 | `list_worker_profiles` | `{ profiles_file?: string, cwd?: string }` | `{ profiles_file: string, profiles: WorkerProfile[] }` |
-| `start_run` | Profile mode: `{ profile: string, profiles_file?: string, prompt: string, cwd: string, metadata?: object, execution_timeout_seconds?: number }`; direct mode: `{ backend: "codex" \| "claude", prompt: string, cwd: string, model?: string, reasoning_effort?: string, service_tier?: string, metadata?: object, execution_timeout_seconds?: number }` | `{ run_id: string }` |
+| `start_run` | Profile mode: `{ profile: string, profiles_file?: string, prompt: string, cwd: string, metadata?: object, idle_timeout_seconds?: number, execution_timeout_seconds?: number }`; direct mode: `{ backend: "codex" \| "claude", prompt: string, cwd: string, model?: string, reasoning_effort?: string, service_tier?: string, metadata?: object, idle_timeout_seconds?: number, execution_timeout_seconds?: number }` | `{ run_id: string }` |
 | `list_runs` | `{}` | `{ runs: RunSummary[] }` |
 | `get_run_status` | `{ run_id: string }` | `{ run_summary: RunSummary }` |
 | `get_run_events` | `{ run_id: string, after_sequence?: number, limit?: number }` | `{ events: WorkerEvent[], next_sequence: number, has_more: boolean }` |
 | `wait_for_run` | `{ run_id: string, wait_seconds: number }` | Terminal status or `{ status: "still_running", wait_exceeded: true, run_summary }` |
 | `get_run_result` | `{ run_id: string }` | `{ run_summary: RunSummary, result: WorkerResult \| null }` |
-| `send_followup` | `{ run_id: string, prompt: string, model?: string, reasoning_effort?: string, service_tier?: string, metadata?: object, execution_timeout_seconds?: number }` | `{ run_id: string }` for a new child run |
+| `send_followup` | `{ run_id: string, prompt: string, model?: string, reasoning_effort?: string, service_tier?: string, metadata?: object, idle_timeout_seconds?: number, execution_timeout_seconds?: number }` | `{ run_id: string }` for a new child run |
 | `cancel_run` | `{ run_id: string }` | `{ accepted: true, status: RunStatus }` |
 
 Most worker preparation failures are run failures rather than envelope failures. For example, if `codex` is missing, `start_run` creates a durable run and that run lands in `failed` with `WORKER_BINARY_MISSING` details.
@@ -458,6 +458,33 @@ The observability snapshot includes additive fields for model source, display
 metadata, raw prompt artifacts, activity summaries, artifact sizes, and
 session-resume audit state. Older runs without these fields load with
 `legacy_unknown` or `null` defaults.
+
+### Long-Running Runs
+
+The daemon supervises long work with an idle-progress timeout rather than a long
+default wall-clock timeout. New generated config uses
+`default_idle_timeout_seconds: 1200`, `max_idle_timeout_seconds: 7200`,
+`default_execution_timeout_seconds: null`, and
+`max_execution_timeout_seconds: 14400`. `idle_timeout_seconds` cancels only after
+the worker has been quiet for that many seconds; stdout, stderr, parsed backend
+events, errors, start, and terminalization all count as activity.
+`execution_timeout_seconds` remains available as an explicit hard elapsed-time
+cap for tasks that truly need one.
+
+Supervisors should keep `wait_for_run` bounded. A useful cadence is a first
+check-in around 30 seconds after `start_run`, then roughly 2 minutes, 5 minutes,
+and a 10-15 minute ceiling while `last_activity_at` continues advancing. At each
+check-in, inspect `get_run_status` for `last_activity_at`,
+`last_activity_source`, `idle_timeout_seconds`, `execution_timeout_seconds`,
+`timeout_reason`, `terminal_reason`, and `latest_error`; use `get_run_events`
+when the activity or error state changed.
+
+Known fatal backend errors from structured events or stderr, such as auth,
+quota, rate limit, invalid model, permission, protocol, backend availability,
+or missing worker binaries, are surfaced as `latest_error` and fail the run
+promptly. Do not keep waiting for the idle timeout after `latest_error.fatal` is
+visible. Do not cancel a run only because elapsed time is high when activity is
+still advancing; choose a larger `idle_timeout_seconds` for known quiet work.
 
 ## Operational Notes
 

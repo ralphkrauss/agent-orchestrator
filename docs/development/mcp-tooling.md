@@ -215,6 +215,14 @@ Guardrails:
 - prefer explicit `cwd` values
 - avoid concurrent worker runs against the same dirty working tree unless that
   is the task
+- supervise long-running workers with bounded `wait_for_run` calls and adaptive
+  check-ins: first around 30 seconds, then about 2 minutes, 5 minutes, and a
+  10-15 minute ceiling while `last_activity_at` keeps advancing
+- inspect `latest_error`, `timeout_reason`, `terminal_reason`, and recent events
+  before backing off; fatal backend errors should be reported or routed
+  immediately instead of waiting for the idle timeout
+- use `idle_timeout_seconds` for quiet-but-legitimate work; reserve
+  `execution_timeout_seconds` for an explicit hard elapsed-time cap
 - clients that support per-tool approval should require approval for
   `start_run`, `send_followup`, and `cancel_run`
 

@@ -4,10 +4,12 @@ import { RpcMethodSchema } from '../contract.js';
 import { tools } from '../mcpTools.js';
 
 type ObjectSchema = {
+  type?: string;
   properties: Record<string, unknown>;
   required?: readonly string[];
-  oneOf?: readonly unknown[];
 };
+
+const unsupportedTopLevelSchemaKeys = ['oneOf', 'anyOf', 'allOf', 'enum', 'not'] as const;
 
 describe('MCP tool registration', () => {
   it('registers every exposed tool as a known RPC method', () => {
@@ -24,24 +26,9 @@ describe('MCP tool registration', () => {
     assert.equal(Object.hasOwn(start.properties, 'profiles_file'), true);
     assert.equal(Object.hasOwn(start.properties, 'reasoning_effort'), true);
     assert.equal(Object.hasOwn(start.properties, 'service_tier'), true);
+    assert.equal(Object.hasOwn(start.properties, 'idle_timeout_seconds'), true);
+    assert.equal(Object.hasOwn(start.properties, 'execution_timeout_seconds'), true);
     assert.deepStrictEqual(start.required, ['prompt', 'cwd']);
-    assert.deepStrictEqual(start.oneOf, [
-      {
-        required: ['backend'],
-        not: { required: ['profile'] },
-      },
-      {
-        required: ['profile'],
-        not: {
-          anyOf: [
-            { required: ['backend'] },
-            { required: ['model'] },
-            { required: ['reasoning_effort'] },
-            { required: ['service_tier'] },
-          ],
-        },
-      },
-    ]);
 
     const profiles = schemaFor('list_worker_profiles');
     assert.equal(Object.hasOwn(profiles.properties, 'profiles_file'), true);
@@ -50,12 +37,24 @@ describe('MCP tool registration', () => {
     assert.equal(Object.hasOwn(followup.properties, 'metadata'), true);
     assert.equal(Object.hasOwn(followup.properties, 'reasoning_effort'), true);
     assert.equal(Object.hasOwn(followup.properties, 'service_tier'), true);
+    assert.equal(Object.hasOwn(followup.properties, 'idle_timeout_seconds'), true);
+    assert.equal(Object.hasOwn(followup.properties, 'execution_timeout_seconds'), true);
     assert.deepStrictEqual(followup.required, ['run_id', 'prompt']);
 
     const observability = schemaFor('get_observability_snapshot');
     assert.equal(Object.hasOwn(observability.properties, 'include_prompts'), true);
     assert.equal(Object.hasOwn(observability.properties, 'recent_event_limit'), true);
     assert.equal(Object.hasOwn(observability.properties, 'diagnostics'), true);
+  });
+
+  it('keeps advertised input schemas compatible with OpenCode tool loading', () => {
+    for (const tool of tools) {
+      const schema = schemaFor(tool.name);
+      assert.equal(schema.type, 'object', `${tool.name} input schema must be an object`);
+      for (const key of unsupportedTopLevelSchemaKeys) {
+        assert.equal(Object.hasOwn(schema, key), false, `${tool.name} input schema has unsupported top-level ${key}`);
+      }
+    }
   });
 });
 

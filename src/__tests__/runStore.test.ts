@@ -9,7 +9,21 @@ describe('RunStore', () => {
   it('creates, reloads, lists, paginates events, and marks terminal atomically', async () => {
     const root = await mkdtemp(join(tmpdir(), 'agent-store-'));
     const store = new RunStore(root);
-    const run = await store.createRun({ backend: 'codex', cwd: root, prompt: 'raw prompt text', metadata: { task: 'T2' } });
+    const run = await store.createRun({
+      backend: 'codex',
+      cwd: root,
+      prompt: 'raw prompt text',
+      metadata: { task: 'T2' },
+      idle_timeout_seconds: 1200,
+    });
+    assert.equal(run.last_activity_source, 'created');
+    assert.equal(run.idle_timeout_seconds, 1200);
+
+    const activityAt = new Date(Date.now() + 1000);
+    const active = await store.recordActivity(run.run_id, 'stdout', activityAt);
+    assert.equal(active.last_activity_at, activityAt.toISOString());
+    assert.equal(active.last_activity_source, 'stdout');
+
     await store.appendEvent(run.run_id, { type: 'lifecycle', payload: { status: 'one' } });
     await store.appendEvent(run.run_id, { type: 'assistant_message', payload: { text: 'hello' } });
 
@@ -26,8 +40,14 @@ describe('RunStore', () => {
     assert.equal(page.events[0]?.seq, 2);
     assert.equal(page.has_more, false);
 
-    const terminal = await store.markTerminal(run.run_id, 'completed');
+    const terminal = await store.markTerminal(run.run_id, 'completed', [], undefined, {
+      reason: 'completed',
+      context: { checked: true },
+    });
     assert.equal(terminal.status, 'completed');
+    assert.equal(terminal.last_activity_source, 'terminal');
+    assert.equal(terminal.terminal_reason, 'completed');
+    assert.deepStrictEqual(terminal.terminal_context, { checked: true });
     const again = await store.markTerminal(run.run_id, 'orphaned');
     assert.equal(again.status, 'completed');
     const withFinal = await store.loadRun(run.run_id);

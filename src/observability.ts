@@ -51,7 +51,7 @@ export async function buildObservabilitySnapshot(
       model: buildModel(meta),
       settings: buildSettings(meta),
       session: buildSessionAudit(meta),
-      activity: buildActivity(eventSummary, options.recentEventLimit),
+      activity: buildActivity(meta, eventSummary, options.recentEventLimit),
       artifacts: await buildArtifacts(store, meta.run_id),
       duration_seconds: durationSeconds(meta),
     });
@@ -152,16 +152,20 @@ function buildSessionAudit(meta: RunMeta): ObservabilitySessionAudit {
   };
 }
 
-function buildActivity(summary: EventSummary, recentEventLimit: number): ObservabilityActivity {
+function buildActivity(meta: RunMeta, summary: EventSummary, recentEventLimit: number): ObservabilityActivity {
   const recentEvents = recentEventLimit === 0 ? [] : summary.recent_events.slice(-recentEventLimit);
   return {
     last_event_sequence: summary.last_event?.seq ?? summary.event_count,
     last_event_at: summary.last_event?.ts ?? null,
     last_event_type: summary.last_event?.type ?? null,
+    last_activity_at: meta.last_activity_at,
+    last_activity_source: meta.last_activity_source,
+    idle_seconds: idleSeconds(meta),
     last_interaction_preview: lastInteractionPreview(summary.recent_events),
     event_count: summary.event_count,
     recent_errors: recentErrors(summary.recent_events),
     recent_events: recentEvents,
+    latest_error: meta.latest_error,
   };
 }
 
@@ -199,7 +203,7 @@ function buildSessions(runs: ObservabilityRun[], allMetas: RunMeta[]): Observabi
     const chronological = group.slice().sort((a, b) => a.run.created_at.localeCompare(b.run.created_at));
     const root = rootRun(chronological[0]!, byRunId);
     const sessionStats = stats.get(sessionKeyValue);
-    const updatedAt = maxIso(group.map((run) => run.activity.last_event_at ?? run.run.finished_at ?? run.run.started_at ?? run.run.created_at));
+    const updatedAt = maxIso(group.map(latestObservedAt));
     const runningCount = sessionStats?.running_count ?? group.filter((run) => run.run.status === 'running').length;
     const status = sessionStatus(group);
     const latestSessionSummary = lastNonNull(chronological.map((run) => run.run.display.session_summary));
@@ -304,8 +308,18 @@ function sessionPrompt(run: ObservabilityRun): ObservabilitySessionPrompt {
     model: run.model,
     settings: run.settings,
     created_at: run.run.created_at,
-    last_activity_at: run.activity.last_event_at,
+    last_activity_at: latestObservedAt(run),
   };
+}
+
+function latestObservedAt(run: ObservabilityRun): string {
+  return maxIso([
+    run.activity.last_activity_at,
+    run.activity.last_event_at,
+    run.run.finished_at,
+    run.run.started_at,
+    run.run.created_at,
+  ].filter((value): value is string => typeof value === 'string'));
 }
 
 function sessionKey(meta: RunMeta, byRunId: Map<string, RunMeta>): string {
@@ -375,6 +389,13 @@ function durationSeconds(meta: RunMeta): number | null {
   const end = meta.finished_at ? Date.parse(meta.finished_at) : Date.now();
   if (!Number.isFinite(end) || end < start) return null;
   return Math.round((end - start) / 1000);
+}
+
+function idleSeconds(meta: RunMeta): number | null {
+  if (meta.status !== 'running' || !meta.last_activity_at) return null;
+  const lastActivity = Date.parse(meta.last_activity_at);
+  if (!Number.isFinite(lastActivity)) return null;
+  return Math.max(0, Math.round((Date.now() - lastActivity) / 1000));
 }
 
 async function fileInfo(path: string): Promise<{ exists: boolean; bytes: number | null }> {

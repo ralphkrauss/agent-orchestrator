@@ -30,6 +30,9 @@ describe('observability CLI formatting', () => {
     assert.match(plain, /Service Tier: fast/);
     assert.match(plain, /Invocation: \/usr\/local\/bin\/codex exec --model gpt-5\.2 -/);
     assert.match(plain, /Git: repo:main clean/);
+    assert.match(plain, /Activity: last=2026-05-02 00:00:01 source=backend_event idle=\d+s/);
+    assert.match(plain, /Timeouts: idle=1200s hard=none timeout_reason=none terminal_reason=none/);
+    assert.match(plain, /Latest Error: 429 rate limit exceeded \(category=rate_limit source=backend_event fatal=true retryable=true\)/);
     assert.match(plain, /User Prompt/);
     assert.match(plain, /Raw prompt body with details/);
     assert.match(plain, /Final Response \[completed\]/);
@@ -196,6 +199,8 @@ function sampleEnvelope(): SnapshotEnvelope {
         created_at: now,
         started_at: now,
         finished_at: null,
+        last_activity_at: '2026-05-02T00:00:01.000Z',
+        last_activity_source: 'backend_event',
         worker_pid: 123,
         worker_pgid: 123,
         daemon_pid_at_spawn: 42,
@@ -213,6 +218,19 @@ function sampleEnvelope(): SnapshotEnvelope {
           dirty_fingerprints: {},
         },
         model_settings: { reasoning_effort: 'xhigh', service_tier: 'fast', mode: null },
+        idle_timeout_seconds: 1200,
+        execution_timeout_seconds: null,
+        timeout_reason: null,
+        terminal_reason: null,
+        terminal_context: null,
+        latest_error: {
+          message: '429 rate limit exceeded',
+          category: 'rate_limit',
+          source: 'backend_event',
+          backend: 'codex',
+          retryable: true,
+          fatal: true,
+        },
         metadata: {},
       },
       prompt: {
@@ -242,6 +260,9 @@ function sampleEnvelope(): SnapshotEnvelope {
         last_event_sequence: 1,
         last_event_at: '2026-05-02T00:00:01.000Z',
         last_event_type: 'assistant_message',
+        last_activity_at: '2026-05-02T00:00:01.000Z',
+        last_activity_source: 'backend_event',
+        idle_seconds: 1,
         last_interaction_preview: 'Working on it.',
         event_count: 1,
         recent_errors: [],
@@ -251,6 +272,14 @@ function sampleEnvelope(): SnapshotEnvelope {
           type: 'assistant_message',
           payload: { text: 'Working on it.' },
         }],
+        latest_error: {
+          message: '429 rate limit exceeded',
+          category: 'rate_limit',
+          source: 'backend_event',
+          backend: 'codex',
+          retryable: true,
+          fatal: true,
+        },
       },
       artifacts: [{
         name: 'prompt.txt',

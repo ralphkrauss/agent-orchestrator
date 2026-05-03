@@ -98,6 +98,10 @@ describe('OpenCode orchestration harness', () => {
     assert.match(agent.prompt, /Writable profiles manifest path: \/repo\/\.agents\/orchestration\/profiles\.json/);
     assert.match(agent.prompt, /start_run with profile plus profiles_file/);
     assert.match(agent.prompt, /must reference profile aliases, not raw model names/);
+    assert.match(agent.prompt, /first check-in around 30 seconds/);
+    assert.match(agent.prompt, /latest_error is fatal/);
+    assert.match(agent.prompt, /10-15 minute ceiling/);
+    assert.match(agent.prompt, /idle_timeout_seconds/);
     assert.match(agent.prompt, /Direct bash\/shell execution is disabled/);
   });
 

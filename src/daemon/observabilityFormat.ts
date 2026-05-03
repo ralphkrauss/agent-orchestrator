@@ -132,7 +132,10 @@ function renderRunDetail(run: ObservabilityRun | null, width: number): string[] 
     detailLine('Git', formatRunGit(run)),
     detailLine('Session', `requested=${run.session.requested_session_id ?? 'none'} observed=${run.session.observed_session_id ?? 'none'} effective=${run.session.effective_session_id ?? 'none'} audit=${run.session.status}`),
     detailLine('Duration', `${run.duration_seconds === null ? 'unknown' : `${run.duration_seconds}s`} events=${run.activity.event_count}`),
+    detailLine('Activity', `last=${formatTimestamp(run.activity.last_activity_at)} source=${run.activity.last_activity_source ?? 'none'} idle=${run.activity.idle_seconds === null ? 'n/a' : `${run.activity.idle_seconds}s`}`),
+    detailLine('Timeouts', formatTimeoutPolicy(run)),
   ];
+  if (run.activity.latest_error) lines.push(detailLine('Latest Error', formatLatestError(run)));
   for (const warning of run.session.warnings) lines.push(`Warning: ${warning}`);
   if (run.prompt.summary) lines.push(`Summary: ${run.prompt.summary}`);
   lines.push('', sectionTitle('User Prompt'));
@@ -198,7 +201,8 @@ function position(index: number, count: number): string {
 }
 
 function formatRunLine(run: ObservabilityRun): string {
-  return `- ${run.prompt.title} [${run.run.status}] ${run.run.run_id} model=${formatModel(run.model)} effort=${formatSetting(run.settings.reasoning_effort)} tier=${formatTier(run.settings)} invocation=${formatInvocation(run)} session=${run.session.effective_session_id ?? 'none'} events=${run.activity.event_count} size=${formatBytes(run.artifacts.reduce((sum, artifact) => sum + (artifact.bytes ?? 0), 0))}`;
+  const latestError = run.activity.latest_error ? ` latest_error=${run.activity.latest_error.category}:${run.activity.latest_error.message}` : '';
+  return `- ${run.prompt.title} [${run.run.status}] ${run.run.run_id} model=${formatModel(run.model)} effort=${formatSetting(run.settings.reasoning_effort)} tier=${formatTier(run.settings)} invocation=${formatInvocation(run)} session=${run.session.effective_session_id ?? 'none'} idle=${run.activity.idle_seconds === null ? 'n/a' : `${run.activity.idle_seconds}s`} events=${run.activity.event_count} size=${formatBytes(run.artifacts.reduce((sum, artifact) => sum + (artifact.bytes ?? 0), 0))}${latestError}`;
 }
 
 function formatModel(model: { name: string | null; source: string; requested_name?: string | null; observed_name?: string | null }): string {
@@ -319,6 +323,27 @@ function formatInvocation(run: ObservabilityRun): string {
   const invocation = run.run.worker_invocation;
   if (!invocation) return 'not recorded';
   return [invocation.command, ...invocation.args.map(shellQuote)].join(' ');
+}
+
+function formatTimeoutPolicy(run: ObservabilityRun): string {
+  return [
+    `idle=${run.run.idle_timeout_seconds === null ? 'none' : `${run.run.idle_timeout_seconds}s`}`,
+    `hard=${run.run.execution_timeout_seconds === null ? 'none' : `${run.run.execution_timeout_seconds}s`}`,
+    `timeout_reason=${run.run.timeout_reason ?? 'none'}`,
+    `terminal_reason=${run.run.terminal_reason ?? 'none'}`,
+  ].join(' ');
+}
+
+function formatLatestError(run: ObservabilityRun): string {
+  const error = run.activity.latest_error;
+  if (!error) return 'none';
+  const flags = [
+    `category=${error.category}`,
+    `source=${error.source}`,
+    `fatal=${error.fatal}`,
+    `retryable=${error.retryable}`,
+  ].join(' ');
+  return `${error.message} (${flags})`;
 }
 
 function shellQuote(value: string): string {

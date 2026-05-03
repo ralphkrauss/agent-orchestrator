@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { BackendStatusReportSchema, ObservabilitySnapshotSchema, WorkerResultSchema, RunSummarySchema, wrapErr, wrapOk, orchestratorError } from '../contract.js';
+import { BackendStatusReportSchema, ObservabilitySnapshotSchema, RunLatestErrorSchema, RunSummarySchema, RunTerminalReasonSchema, StartRunInputSchema, SendFollowupInputSchema, WorkerResultSchema, wrapErr, wrapOk, orchestratorError } from '../contract.js';
 import { deriveObservedResult } from '../backend/resultDerivation.js';
 
 describe('contract schemas and envelopes', () => {
@@ -97,12 +97,88 @@ describe('contract schemas and envelopes', () => {
     assert.equal(parsed.requested_session_id, null);
     assert.equal(parsed.observed_session_id, null);
     assert.equal(parsed.observed_model, null);
+    assert.equal(parsed.last_activity_at, null);
+    assert.equal(parsed.last_activity_source, null);
+    assert.equal(parsed.idle_timeout_seconds, null);
+    assert.equal(parsed.execution_timeout_seconds, null);
+    assert.equal(parsed.timeout_reason, null);
+    assert.equal(parsed.terminal_reason, null);
+    assert.equal(parsed.terminal_context, null);
+    assert.equal(parsed.latest_error, null);
     assert.deepStrictEqual(parsed.display, {
       session_title: null,
       session_summary: null,
       prompt_title: null,
       prompt_summary: null,
     });
+  });
+
+  it('accepts activity, timeout, and latest error metadata additively', () => {
+    const now = new Date().toISOString();
+    const latestError = RunLatestErrorSchema.parse({
+      message: 'authentication failed',
+      category: 'auth',
+      source: 'stderr',
+      backend: 'codex',
+      retryable: false,
+      fatal: true,
+      context: { code: 'AUTH_FAILED' },
+    });
+    const parsed = RunSummarySchema.parse({
+      run_id: '01HX0000000000000000000000',
+      backend: 'codex',
+      status: 'timed_out',
+      parent_run_id: null,
+      session_id: null,
+      cwd: '/tmp/repo',
+      created_at: now,
+      started_at: now,
+      finished_at: now,
+      last_activity_at: now,
+      last_activity_source: 'stderr',
+      worker_pid: null,
+      worker_pgid: null,
+      daemon_pid_at_spawn: null,
+      git_snapshot_status: 'not_a_repo',
+      git_snapshot: null,
+      idle_timeout_seconds: 1200,
+      execution_timeout_seconds: 7200,
+      timeout_reason: 'idle_timeout',
+      terminal_reason: 'backend_fatal_error',
+      terminal_context: { idle_seconds: 1201 },
+      latest_error: latestError,
+      metadata: {},
+    });
+
+    assert.equal(parsed.last_activity_source, 'stderr');
+    assert.equal(parsed.idle_timeout_seconds, 1200);
+    assert.equal(parsed.timeout_reason, 'idle_timeout');
+    assert.equal(parsed.latest_error?.category, 'auth');
+  });
+
+  it('parses known and future terminal reasons in run summaries', () => {
+    assert.equal(RunTerminalReasonSchema.parse('backend_fatal_error'), 'backend_fatal_error');
+    assert.equal(RunTerminalReasonSchema.parse('future_terminal_reason'), 'future_terminal_reason');
+  });
+
+  it('accepts idle timeout input for starts and follow-ups', () => {
+    assert.equal(
+      StartRunInputSchema.parse({
+        backend: 'codex',
+        prompt: 'do work',
+        cwd: '/tmp/repo',
+        idle_timeout_seconds: 1200,
+      }).idle_timeout_seconds,
+      1200,
+    );
+    assert.equal(
+      SendFollowupInputSchema.parse({
+        run_id: 'run',
+        prompt: 'continue',
+        idle_timeout_seconds: 1800,
+      }).idle_timeout_seconds,
+      1800,
+    );
   });
 
   it('accepts observability snapshots', () => {

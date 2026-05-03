@@ -2,7 +2,7 @@ import { access } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { delimiter, extname, isAbsolute, join } from 'node:path';
 import type { WorkerBackend, WorkerInvocation, BackendStartInput, FinalizeContext, FinalizedWorkerResult, ParsedBackendEvent } from './WorkerBackend.js';
-import { WorkerResultSchema } from '../contract.js';
+import { WorkerResultSchema, type Backend, type RunError, type RunErrorCategory, type RunErrorSource } from '../contract.js';
 import { deriveObservedResult } from './resultDerivation.js';
 
 export async function resolveBinary(
@@ -66,7 +66,7 @@ export function emptyParsedEvent(): ParsedBackendEvent {
 }
 
 export function finalizeFromObserved(context: FinalizeContext): FinalizedWorkerResult {
-  const validationError = context.resultEvent ? null : {
+  const validationError = context.resultEvent || context.runStatusOverride ? null : {
     message: 'worker result event missing',
     context: { exit_code: context.exitCode, signal: context.signal },
   };
@@ -81,7 +81,9 @@ export function finalizeFromObserved(context: FinalizeContext): FinalizedWorkerR
 
   const files = Array.from(new Set([...context.filesChangedFromGit, ...context.filesChangedFromEvents])).sort();
   const commands = Array.from(new Set(context.commandsRun));
-  const summary = context.resultEvent?.summary ?? actionableErrorSummary(errors);
+  const summary = context.runStatusOverride
+    ? actionableErrorSummary(errors)
+    : context.resultEvent?.summary ?? actionableErrorSummary(errors);
   const result = WorkerResultSchema.parse({
     status: derived.workerStatus,
     summary,
@@ -143,7 +145,7 @@ export function extractText(value: unknown): string | undefined {
   return undefined;
 }
 
-export function errorFromEvent(record: Record<string, unknown>): { message: string; context?: Record<string, unknown> } | null {
+export function errorFromEvent(record: Record<string, unknown>, backend: Backend): RunError | null {
   const nestedError = getRecord(record.error);
   const message =
     getString(nestedError?.message)
@@ -158,7 +160,65 @@ export function errorFromEvent(record: Record<string, unknown>): { message: stri
   if (type) context.type = type;
   const code = getString(nestedError?.code) ?? getString(record.code);
   if (code) context.code = code;
-  return Object.keys(context).length > 0 ? { message, context } : { message };
+  return classifyBackendError({
+    backend,
+    source: 'backend_event',
+    message,
+    context: Object.keys(context).length > 0 ? context : undefined,
+  });
+}
+
+export function classifyBackendError(input: {
+  backend: Backend;
+  source: RunErrorSource;
+  message: string;
+  context?: Record<string, unknown>;
+}): RunError {
+  const category = classifyErrorCategory(input.message, input.context);
+  return {
+    message: input.message,
+    category,
+    source: input.source,
+    backend: input.backend,
+    retryable: category === 'rate_limit' || category === 'backend_unavailable',
+    fatal: category !== 'unknown',
+    context: input.context,
+  };
+}
+
+function classifyErrorCategory(message: string, context: Record<string, unknown> | undefined): RunErrorCategory {
+  const normalizedMessage = message.toLowerCase();
+  const code = stringContext(context, 'code').toLowerCase();
+  const type = stringContext(context, 'type').toLowerCase();
+  const status = stringContext(context, 'status').toLowerCase();
+  const structured = [code, type, status].join(' ');
+  const haystack = [normalizedMessage, structured].join(' ');
+
+  if (/\b(auth|authentication|unauthorized|unauthorised|credential|api key|login)\b/.test(haystack)) return 'auth';
+  if (/\b(rate.?limit|too many requests|429)\b/.test(haystack)) return 'rate_limit';
+  if (/\b(quota|insufficient_quota|billing|credit|credits)\b/.test(haystack)) return 'quota';
+  if (/\b(invalid.?model|unknown model|model .*not found|model .*does not exist|model .*not supported|unsupported model)\b/.test(haystack)) return 'invalid_model';
+  if (/\b(permission denied|access denied|not allowed|policy|forbidden)\b/.test(haystack)) return 'permission';
+  if (isProtocolError(normalizedMessage, structured, status)) return 'protocol';
+  if (isBackendUnavailableError(normalizedMessage, structured, status)) return 'backend_unavailable';
+  return 'unknown';
+}
+
+function isProtocolError(message: string, structured: string, status: string): boolean {
+  return status === '400'
+    || /\b(?:invalid[_-]request|bad[_-]request|schema[_-]validation|json[_-]parse)(?:[_-]error)?\b/.test(structured)
+    || /\b(protocol error|schema validation|schema error|malformed|invalid request|bad request|json parse|parse error|failed to parse|invalid json|unexpected token)\b/.test(message);
+}
+
+function isBackendUnavailableError(message: string, structured: string, status: string): boolean {
+  return ['500', '502', '503', '504'].includes(status)
+    || /\b(econnrefused|econnreset|econnaborted|etimedout|(?:service[_-]unavailable|backend[_-]unavailable)(?:[_-]error)?)\b/.test(structured)
+    || /\b(service unavailable|backend unavailable|network error|connection refused|connection reset|connection failed|connection timed out|request timed out|timeout exceeded|econnrefused|econnreset|etimedout)\b/.test(message);
+}
+
+function stringContext(context: Record<string, unknown> | undefined, key: string): string {
+  const value = context?.[key];
+  return typeof value === 'string' || typeof value === 'number' ? String(value) : '';
 }
 
 export function pathFromToolInput(input: unknown): string[] {

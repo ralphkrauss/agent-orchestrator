@@ -35,26 +35,16 @@ export const tools = [
           description: 'Backend-applied speed tier for Codex. Claude does not support this field.',
         },
         metadata: { type: 'object', additionalProperties: true },
-        execution_timeout_seconds: { type: 'number' },
+        idle_timeout_seconds: {
+          type: 'number',
+          description: 'Idle-progress timeout. The daemon cancels the run only after this many seconds without worker output or backend events.',
+        },
+        execution_timeout_seconds: {
+          type: 'number',
+          description: 'Optional hard wall-clock cap. Omit to use idle-progress supervision without a hard elapsed-time limit.',
+        },
       },
       required: ['prompt', 'cwd'],
-      oneOf: [
-        {
-          required: ['backend'],
-          not: { required: ['profile'] },
-        },
-        {
-          required: ['profile'],
-          not: {
-            anyOf: [
-              { required: ['backend'] },
-              { required: ['model'] },
-              { required: ['reasoning_effort'] },
-              { required: ['service_tier'] },
-            ],
-          },
-        },
-      ],
     },
   },
   {
@@ -145,7 +135,14 @@ export const tools = [
           description: 'Backend-applied speed tier for Codex. Omit to inherit the parent run setting.',
         },
         metadata: { type: 'object', additionalProperties: true },
-        execution_timeout_seconds: { type: 'number' },
+        idle_timeout_seconds: {
+          type: 'number',
+          description: 'Idle-progress timeout for the follow-up run. Activity resets the idle deadline.',
+        },
+        execution_timeout_seconds: {
+          type: 'number',
+          description: 'Optional hard wall-clock cap for the follow-up run.',
+        },
       },
       required: ['run_id', 'prompt'],
     },

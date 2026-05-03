@@ -413,11 +413,93 @@ describe('agent orchestrator integration with mock CLIs', () => {
     const timeoutId = timeoutStart.ok ? (timeoutStart as unknown as { run_id: string }).run_id : '';
     await service.waitForRun({ run_id: timeoutId, wait_seconds: 5 });
     const timedOut = await service.getRunStatus({ run_id: timeoutId });
-    assert.equal(timedOut.ok && ((timedOut as unknown as { run_summary: { status: string } }).run_summary).status, 'timed_out');
+    const timeoutSummary = timedOut.ok ? (timedOut as unknown as {
+      run_summary: {
+        status: string;
+        timeout_reason: string;
+        terminal_reason: string;
+        latest_error: { category: string; source: string } | null;
+      };
+    }).run_summary : null;
+    assert.equal(timeoutSummary?.status, 'timed_out');
+    assert.equal(timeoutSummary?.timeout_reason, 'execution_timeout');
+    assert.equal(timeoutSummary?.terminal_reason, 'execution_timeout');
+    assert.equal(timeoutSummary?.latest_error?.category, 'timeout');
+    assert.equal(timeoutSummary?.latest_error?.source, 'watchdog');
     const cancelAfterTimeout = await service.cancelRun({ run_id: timeoutId });
     assert.equal(cancelAfterTimeout.ok, false);
     const stillTimedOut = await service.getRunStatus({ run_id: timeoutId });
     assert.equal(stillTimedOut.ok && ((stillTimedOut as unknown as { run_summary: { status: string } }).run_summary).status, 'timed_out');
+  });
+
+  it('uses idle timeout for silent workers but keeps active long workers alive', async () => {
+    const fixture = await createFixture();
+    const repo = await createGitRepo(fixture.root);
+    const service = await createService(fixture.home);
+
+    const idleStart = await service.startRun({ backend: 'codex', prompt: 'slow', cwd: repo, idle_timeout_seconds: 1 });
+    const idleId = idleStart.ok ? (idleStart as unknown as { run_id: string }).run_id : '';
+    await service.waitForRun({ run_id: idleId, wait_seconds: 5 });
+    const idleStatus = await service.getRunStatus({ run_id: idleId });
+    const idleSummary = idleStatus.ok ? (idleStatus as unknown as {
+      run_summary: {
+        status: string;
+        timeout_reason: string;
+        terminal_reason: string;
+        latest_error: { category: string; source: string } | null;
+      };
+    }).run_summary : null;
+    assert.equal(idleSummary?.status, 'timed_out');
+    assert.equal(idleSummary?.timeout_reason, 'idle_timeout');
+    assert.equal(idleSummary?.terminal_reason, 'idle_timeout');
+    assert.equal(idleSummary?.latest_error?.category, 'timeout');
+
+    const activeStart = await service.startRun({ backend: 'codex', prompt: 'active-slow', cwd: repo, idle_timeout_seconds: 1 });
+    const activeId = activeStart.ok ? (activeStart as unknown as { run_id: string }).run_id : '';
+    await service.waitForRun({ run_id: activeId, wait_seconds: 5 });
+    const activeStatus = await service.getRunStatus({ run_id: activeId });
+    const activeSummary = activeStatus.ok ? (activeStatus as unknown as {
+      run_summary: {
+        status: string;
+        idle_timeout_seconds: number;
+        execution_timeout_seconds: number | null;
+        timeout_reason: string | null;
+      };
+    }).run_summary : null;
+    assert.equal(activeSummary?.status, 'completed');
+    assert.equal(activeSummary?.idle_timeout_seconds, 1);
+    assert.equal(activeSummary?.execution_timeout_seconds, null);
+    assert.equal(activeSummary?.timeout_reason, null);
+  });
+
+  it('migrates generated timeout config and preserves customized hard caps', async () => {
+    const generated = await createFixture();
+    await mkdir(generated.home, { recursive: true });
+    await writeFile(join(generated.home, 'config.json'), JSON.stringify({
+      default_execution_timeout_seconds: 1800,
+      max_execution_timeout_seconds: 14400,
+    }, null, 2));
+    await createService(generated.home);
+    assert.deepStrictEqual(JSON.parse(await readFile(join(generated.home, 'config.json'), 'utf8')), {
+      default_idle_timeout_seconds: 1200,
+      max_idle_timeout_seconds: 7200,
+      default_execution_timeout_seconds: null,
+      max_execution_timeout_seconds: 14400,
+    });
+
+    const customized = await createFixture();
+    await mkdir(customized.home, { recursive: true });
+    await writeFile(join(customized.home, 'config.json'), JSON.stringify({
+      default_execution_timeout_seconds: 42,
+      max_execution_timeout_seconds: 60,
+    }, null, 2));
+    await createService(customized.home);
+    assert.deepStrictEqual(JSON.parse(await readFile(join(customized.home, 'config.json'), 'utf8')), {
+      default_execution_timeout_seconds: 42,
+      max_execution_timeout_seconds: 60,
+      default_idle_timeout_seconds: 1200,
+      max_idle_timeout_seconds: 7200,
+    });
   });
 
   it('records missing binary as a failed run and sweeps running runs as orphaned', async () => {
@@ -543,6 +625,19 @@ process.stdin.on('end', () => {
     const grandchild = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
     fs.writeFileSync(path.join(cwd, 'grandchild.pid'), String(grandchild.pid));
     setInterval(() => {}, 1000);
+    return;
+  }
+  if (prompt.includes('active-slow')) {
+    let ticks = 0;
+    const interval = setInterval(() => {
+      ticks += 1;
+      console.log(JSON.stringify({ type: 'turn.started', tick: ticks }));
+      if (ticks >= 5) {
+        clearInterval(interval);
+        console.log(JSON.stringify({ type: 'result', subtype: 'success', result: 'active slow done', session_id: activeSessionId }));
+        process.exit(0);
+      }
+    }, 300);
     return;
   }
   if (prompt.includes('slow')) {

@@ -9,6 +9,10 @@ import {
   type GitSnapshot,
   type GitSnapshotStatus,
   isTerminalStatus,
+  type RunActivitySource,
+  type RunLatestError,
+  type RunTerminalReason,
+  type RunTimeoutReason,
   type ModelSource,
   type RunDisplayMetadata,
   type RunMeta,
@@ -45,7 +49,11 @@ export interface CreateRunInput {
   observed_model?: string | null;
   display?: RunDisplayMetadata;
   metadata?: Record<string, unknown>;
+  last_activity_at?: string | null;
+  last_activity_source?: RunActivitySource | null;
+  idle_timeout_seconds?: number | null;
   execution_timeout_seconds?: number | null;
+  latest_error?: RunLatestError;
   git_snapshot_status?: GitSnapshotStatus;
   git_snapshot?: GitSnapshot | null;
 }
@@ -127,6 +135,8 @@ export class RunStore {
       created_at: now,
       started_at: null,
       finished_at: null,
+      last_activity_at: input.last_activity_at ?? now,
+      last_activity_source: input.last_activity_source ?? 'created',
       worker_pid: null,
       worker_pgid: null,
       daemon_pid_at_spawn: null,
@@ -134,7 +144,12 @@ export class RunStore {
       git_snapshot_status: input.git_snapshot_status ?? 'not_a_repo',
       git_snapshot: input.git_snapshot ?? null,
       git_snapshot_at_start: input.git_snapshot ?? null,
+      idle_timeout_seconds: input.idle_timeout_seconds ?? null,
       execution_timeout_seconds: input.execution_timeout_seconds ?? null,
+      timeout_reason: null,
+      terminal_reason: null,
+      terminal_context: null,
+      latest_error: input.latest_error ?? null,
       metadata: input.metadata ?? {},
     };
 
@@ -170,6 +185,15 @@ export class RunStore {
       await writeFile(this.eventSeqPath(runId), `${full.seq}\n`, { mode: fileMode });
       return full;
     });
+  }
+
+  async recordActivity(runId: string, source: RunActivitySource, at = new Date()): Promise<RunMeta> {
+    const timestamp = at.toISOString();
+    return this.updateMeta(runId, (meta) => ({
+      ...meta,
+      last_activity_at: timestamp,
+      last_activity_source: source,
+    }));
   }
 
   async writeResult(runId: string, result: WorkerResult): Promise<void> {
@@ -255,6 +279,12 @@ export class RunStore {
     status: TerminalRunStatus,
     errors: { message: string; context?: Record<string, unknown> }[] = [],
     result?: WorkerResult,
+    terminal?: {
+      reason?: RunTerminalReason;
+      context?: Record<string, unknown>;
+      timeout_reason?: RunTimeoutReason | null;
+      latest_error?: RunLatestError;
+    },
   ): Promise<RunMeta> {
     return this.withRunLock(runId, async () => {
       const current = await this.loadMeta(runId);
@@ -265,6 +295,12 @@ export class RunStore {
         ...current,
         status,
         finished_at: finished,
+        last_activity_at: finished,
+        last_activity_source: 'terminal',
+        timeout_reason: terminal?.timeout_reason ?? current.timeout_reason,
+        terminal_reason: terminal?.reason ?? terminalReasonFromStatus(status),
+        terminal_context: terminal?.context ?? current.terminal_context,
+        latest_error: terminal?.latest_error ?? current.latest_error,
       });
       const finalResult = result ?? WorkerResultSchema.parse({
         status: status === 'completed' ? 'completed' : 'failed',
@@ -544,6 +580,14 @@ async function writeAtomicJson(path: string, value: unknown): Promise<void> {
 
 function isNotFound(error: unknown): boolean {
   return (error as NodeJS.ErrnoException).code === 'ENOENT';
+}
+
+function terminalReasonFromStatus(status: TerminalRunStatus): RunTerminalReason {
+  if (status === 'completed') return 'completed';
+  if (status === 'cancelled') return 'cancelled';
+  if (status === 'timed_out') return 'execution_timeout';
+  if (status === 'orphaned') return 'orphaned';
+  return 'worker_failed';
 }
 
 async function readLockOwnerPid(lockPath: string): Promise<number | null> {

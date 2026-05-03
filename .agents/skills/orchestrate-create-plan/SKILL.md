@@ -32,6 +32,17 @@ critiques drafts until the plan is complete.
    settings for each route and the target workspace cwd from supervisor context.
    Wait for each worker response, inspect the output, and send follow-up prompts
    through the same worker sessions as the loop continues.
+   Use bounded waits and adaptive check-ins: first wait about 30 seconds to catch
+   startup, auth, model, quota, or protocol failures, then inspect
+   `get_run_status` and recent events. Compare `last_activity_at`,
+   `last_activity_source`, `latest_error`, `timeout_reason`, and
+   `terminal_reason` with the previous check-in. If activity is advancing and no
+   fatal latest error is present, back off toward roughly 2 minutes, 5 minutes,
+   and then a 10-15 minute ceiling appropriate for the task. Do not cancel a
+   worker only because elapsed wall-clock time is high; cancel or escalate only
+   on explicit user request, clear no-activity evidence past the idle window, a
+   fatal latest error, or a deliberate stop/restart recovery path. For known
+   quiet work, choose a larger `idle_timeout_seconds` when starting the run.
 3. **Start the plan creator.** Ask the plan creator to create an implementation
    plan for the issue using the repository create-plan skill or workflow if
    available. Instruct it to:

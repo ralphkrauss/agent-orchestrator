@@ -58,7 +58,7 @@ export class ClaudeBackend extends BaseBackend {
 
     if (lowerType === 'error') {
       parsed.events.push({ type: 'error', payload: rec });
-      const error = errorFromEvent(rec);
+      const error = errorFromEvent(rec, this.name);
       if (error) parsed.errors.push(error);
     }
 
