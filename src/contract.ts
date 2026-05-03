@@ -32,6 +32,62 @@ export type WorkerResultStatus = z.infer<typeof WorkerResultStatusSchema>;
 export const BackendSchema = z.enum(['codex', 'claude']);
 export type Backend = z.infer<typeof BackendSchema>;
 
+export const RunActivitySourceSchema = z.enum([
+  'created',
+  'started',
+  'stdout',
+  'stderr',
+  'backend_event',
+  'error',
+  'terminal',
+]);
+export type RunActivitySource = z.infer<typeof RunActivitySourceSchema>;
+
+export const RunTimeoutReasonSchema = z.enum([
+  'idle_timeout',
+  'execution_timeout',
+]);
+export type RunTimeoutReason = z.infer<typeof RunTimeoutReasonSchema>;
+
+export const KnownRunTerminalReasonSchema = z.enum([
+  'completed',
+  'worker_failed',
+  'cancelled',
+  'idle_timeout',
+  'execution_timeout',
+  'orphaned',
+  'pre_spawn_failed',
+  'backend_fatal_error',
+  'finalization_failed',
+]);
+export type RunTerminalReason = z.infer<typeof KnownRunTerminalReasonSchema>;
+export const RunTerminalReasonSchema = KnownRunTerminalReasonSchema.or(z.string().trim().min(1));
+
+export const RunErrorCategorySchema = z.enum([
+  'auth',
+  'rate_limit',
+  'quota',
+  'invalid_model',
+  'permission',
+  'protocol',
+  'backend_unavailable',
+  'worker_binary_missing',
+  'process_exit',
+  'timeout',
+  'unknown',
+]);
+export type RunErrorCategory = z.infer<typeof RunErrorCategorySchema>;
+
+export const RunErrorSourceSchema = z.enum([
+  'backend_event',
+  'stderr',
+  'process_exit',
+  'pre_spawn',
+  'watchdog',
+  'finalization',
+]);
+export type RunErrorSource = z.infer<typeof RunErrorSourceSchema>;
+
 export const ModelSourceSchema = z.enum([
   'explicit',
   'inherited',
@@ -202,6 +258,18 @@ export const RunWorkerInvocationSchema = z.object({
 }).nullable().default(null);
 export type RunWorkerInvocation = z.infer<typeof RunWorkerInvocationSchema>;
 
+export const RunLatestErrorSchema = z.object({
+  message: z.string(),
+  category: RunErrorCategorySchema.optional().default('unknown'),
+  source: RunErrorSourceSchema.optional().default('backend_event'),
+  backend: BackendSchema.optional(),
+  retryable: z.boolean().optional().default(false),
+  fatal: z.boolean().optional().default(false),
+  context: z.record(z.unknown()).optional(),
+}).nullable().default(null);
+export type RunLatestError = z.infer<typeof RunLatestErrorSchema>;
+export type RunError = NonNullable<RunLatestError>;
+
 export const RunSummarySchema = z.object({
   run_id: z.string(),
   backend: BackendSchema,
@@ -219,19 +287,26 @@ export const RunSummarySchema = z.object({
   created_at: z.string(),
   started_at: z.string().nullable(),
   finished_at: z.string().nullable(),
+  last_activity_at: z.string().nullable().optional().default(null),
+  last_activity_source: RunActivitySourceSchema.nullable().optional().default(null),
   worker_pid: z.number().int().nullable(),
   worker_pgid: z.number().int().nullable(),
   daemon_pid_at_spawn: z.number().int().nullable(),
   worker_invocation: RunWorkerInvocationSchema.optional().default(null),
   git_snapshot_status: GitSnapshotStatusSchema,
   git_snapshot: GitSnapshotSchema.nullable(),
+  idle_timeout_seconds: z.number().int().positive().nullable().optional().default(null),
+  execution_timeout_seconds: z.number().int().positive().nullable().optional().default(null),
+  timeout_reason: RunTimeoutReasonSchema.nullable().optional().default(null),
+  terminal_reason: RunTerminalReasonSchema.nullable().optional().default(null),
+  terminal_context: z.record(z.unknown()).nullable().optional().default(null),
+  latest_error: RunLatestErrorSchema.optional().default(null),
   metadata: z.record(z.unknown()),
 });
 export type RunSummary = z.infer<typeof RunSummarySchema>;
 
 export const RunMetaSchema = RunSummarySchema.extend({
   git_snapshot_at_start: GitSnapshotSchema.nullable().optional(),
-  execution_timeout_seconds: z.number().int().positive().nullable().optional(),
 });
 export type RunMeta = z.infer<typeof RunMetaSchema>;
 
@@ -267,6 +342,7 @@ export const StartRunInputSchema = z.object({
   reasoning_effort: ReasoningEffortSchema.optional(),
   service_tier: ServiceTierSchema.optional(),
   metadata: z.record(z.unknown()).optional().default({}),
+  idle_timeout_seconds: z.number().int().positive().optional(),
   execution_timeout_seconds: z.number().int().positive().optional(),
 }).superRefine((input, context) => {
   if (!input.backend && !input.profile) {
@@ -302,6 +378,7 @@ export const SendFollowupInputSchema = z.object({
   reasoning_effort: ReasoningEffortSchema.optional(),
   service_tier: ServiceTierSchema.optional(),
   metadata: z.record(z.unknown()).optional().default({}),
+  idle_timeout_seconds: z.number().int().positive().optional(),
   execution_timeout_seconds: z.number().int().positive().optional(),
 });
 export type SendFollowupInput = z.input<typeof SendFollowupInputSchema>;
@@ -376,10 +453,14 @@ export const ObservabilityActivitySchema = z.object({
   last_event_sequence: z.number().int().nonnegative(),
   last_event_at: z.string().nullable(),
   last_event_type: WorkerEventTypeSchema.nullable(),
+  last_activity_at: z.string().nullable().optional().default(null),
+  last_activity_source: RunActivitySourceSchema.nullable().optional().default(null),
+  idle_seconds: z.number().int().nonnegative().nullable().optional().default(null),
   last_interaction_preview: z.string().nullable(),
   event_count: z.number().int().nonnegative(),
   recent_errors: z.array(z.string()),
   recent_events: z.array(WorkerEventSchema),
+  latest_error: RunLatestErrorSchema.optional().default(null),
 });
 export type ObservabilityActivity = z.infer<typeof ObservabilityActivitySchema>;
 

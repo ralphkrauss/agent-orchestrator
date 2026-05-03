@@ -26,6 +26,8 @@ describe('MCP tool registration', () => {
     assert.equal(Object.hasOwn(start.properties, 'profiles_file'), true);
     assert.equal(Object.hasOwn(start.properties, 'reasoning_effort'), true);
     assert.equal(Object.hasOwn(start.properties, 'service_tier'), true);
+    assert.equal(Object.hasOwn(start.properties, 'idle_timeout_seconds'), true);
+    assert.equal(Object.hasOwn(start.properties, 'execution_timeout_seconds'), true);
     assert.deepStrictEqual(start.required, ['prompt', 'cwd']);
 
     const profiles = schemaFor('list_worker_profiles');
@@ -35,6 +37,8 @@ describe('MCP tool registration', () => {
     assert.equal(Object.hasOwn(followup.properties, 'metadata'), true);
     assert.equal(Object.hasOwn(followup.properties, 'reasoning_effort'), true);
     assert.equal(Object.hasOwn(followup.properties, 'service_tier'), true);
+    assert.equal(Object.hasOwn(followup.properties, 'idle_timeout_seconds'), true);
+    assert.equal(Object.hasOwn(followup.properties, 'execution_timeout_seconds'), true);
     assert.deepStrictEqual(followup.required, ['run_id', 'prompt']);
 
     const observability = schemaFor('get_observability_snapshot');

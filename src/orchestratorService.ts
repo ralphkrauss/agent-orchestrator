@@ -26,6 +26,7 @@ import {
   type StartRun,
   type RunStatus,
   type RunModelSettings,
+  type RunError,
   type ServiceTier,
   type ToolResponse,
   type WorkerResult,
@@ -43,11 +44,22 @@ import { RunStore } from './runStore.js';
 import { loadValidatedWorkerProfilesFromFile, resolveWorkerProfilesFile } from './workerRouting.js';
 
 interface OrchestratorConfig {
-  default_execution_timeout_seconds: number;
+  default_idle_timeout_seconds: number;
+  max_idle_timeout_seconds: number;
+  default_execution_timeout_seconds: number | null;
   max_execution_timeout_seconds: number;
 }
 
 const defaultConfig: OrchestratorConfig = {
+  default_idle_timeout_seconds: 20 * 60,
+  max_idle_timeout_seconds: 2 * 60 * 60,
+  default_execution_timeout_seconds: null,
+  max_execution_timeout_seconds: 4 * 60 * 60,
+};
+
+const legacyGeneratedConfig: OrchestratorConfig = {
+  default_idle_timeout_seconds: defaultConfig.default_idle_timeout_seconds,
+  max_idle_timeout_seconds: defaultConfig.max_idle_timeout_seconds,
   default_execution_timeout_seconds: 30 * 60,
   max_execution_timeout_seconds: 4 * 60 * 60,
 };
@@ -137,8 +149,10 @@ export class OrchestratorService {
     const resolved = await this.resolveStartRunTarget(input);
     if (!resolved.ok) return wrapErr(resolved.error);
     const { backendName, backend, model, reasoningEffort, serviceTier, metadata } = resolved.value;
-    const timeout = this.resolveExecutionTimeout(input.execution_timeout_seconds);
-    if (!timeout.ok) return wrapErr(timeout.error);
+    const idleTimeout = this.resolveIdleTimeout(input.idle_timeout_seconds);
+    if (!idleTimeout.ok) return wrapErr(idleTimeout.error);
+    const executionTimeout = this.resolveExecutionTimeout(input.execution_timeout_seconds);
+    if (!executionTimeout.ok) return wrapErr(executionTimeout.error);
     const settings = modelSettingsForBackend(backendName, model, reasoningEffort, serviceTier);
     if (!settings.ok) return wrapErr(settings.error);
 
@@ -151,11 +165,12 @@ export class OrchestratorService {
       model_settings: settings.value,
       display: displayMetadata(input.metadata, input.prompt),
       metadata,
-      execution_timeout_seconds: timeout.value,
+      idle_timeout_seconds: idleTimeout.value,
+      execution_timeout_seconds: executionTimeout.value,
     });
     await this.captureAndPersistGitSnapshot(meta.run_id, input.cwd);
 
-    await this.startManagedRun(meta.run_id, backend, input.prompt, input.cwd, timeout.value, settings.value, undefined, model ?? undefined);
+    await this.startManagedRun(meta.run_id, backend, input.prompt, input.cwd, idleTimeout.value, executionTimeout.value, settings.value, undefined, model ?? undefined);
     return wrapOk({ run_id: meta.run_id });
   }
 
@@ -300,8 +315,10 @@ export class OrchestratorService {
     const backendName = BackendSchema.parse(parent.meta.backend);
     const backend = this.backends.get(backendName);
     if (!backend) return wrapErr(orchestratorError('BACKEND_NOT_FOUND', `Backend not found: ${backendName}`));
-    const timeout = this.resolveExecutionTimeout(parsed.data.execution_timeout_seconds);
-    if (!timeout.ok) return wrapErr(timeout.error);
+    const idleTimeout = this.resolveIdleTimeout(parsed.data.idle_timeout_seconds);
+    if (!idleTimeout.ok) return wrapErr(idleTimeout.error);
+    const executionTimeout = this.resolveExecutionTimeout(parsed.data.execution_timeout_seconds);
+    if (!executionTimeout.ok) return wrapErr(executionTimeout.error);
     const model = parsed.data.model ?? parent.meta.model;
     const metadata = metadataForFollowup(parent.meta.metadata, parsed.data.metadata);
     const modelSource: ModelSource = parsed.data.model ? 'explicit' : parent.meta.model ? 'inherited' : 'backend_default';
@@ -324,11 +341,12 @@ export class OrchestratorService {
       model_settings: settings.value,
       display: displayMetadata(parsed.data.metadata, parsed.data.prompt, parent.meta.display),
       metadata,
-      execution_timeout_seconds: timeout.value,
+      idle_timeout_seconds: idleTimeout.value,
+      execution_timeout_seconds: executionTimeout.value,
     });
     await this.captureAndPersistGitSnapshot(meta.run_id, parent.meta.cwd);
 
-    await this.startManagedRun(meta.run_id, backend, parsed.data.prompt, parent.meta.cwd, timeout.value, settings.value, resumeSessionId, model);
+    await this.startManagedRun(meta.run_id, backend, parsed.data.prompt, parent.meta.cwd, idleTimeout.value, executionTimeout.value, settings.value, resumeSessionId, model);
     return wrapOk({ run_id: meta.run_id });
   }
 
@@ -438,7 +456,8 @@ export class OrchestratorService {
     backend: WorkerBackend,
     prompt: string,
     cwd: string,
-    timeoutSeconds: number,
+    idleTimeoutSeconds: number,
+    executionTimeoutSeconds: number | null,
     modelSettings: RunModelSettings,
     sessionId?: string,
     model?: string | null,
@@ -446,13 +465,13 @@ export class OrchestratorService {
     try {
       await access(cwd, constants.R_OK | constants.W_OK);
     } catch (error) {
-      await this.failPreSpawn(runId, 'cwd is not readable and writable', { error: error instanceof Error ? error.message : String(error) });
+      await this.failPreSpawn(runId, backendNameFor(backend), 'cwd is not readable and writable', { error: error instanceof Error ? error.message : String(error) });
       return;
     }
 
     const binary = await resolveBinary(backend.binary);
     if (!binary) {
-      await this.failPreSpawn(runId, `Worker binary not found: ${backend.binary}`, { code: 'WORKER_BINARY_MISSING', binary: backend.binary });
+      await this.failPreSpawn(runId, backendNameFor(backend), `Worker binary not found: ${backend.binary}`, { code: 'WORKER_BINARY_MISSING', binary: backend.binary });
       return;
     }
 
@@ -463,7 +482,7 @@ export class OrchestratorService {
       invocation.command = binary;
       const managed = await this.processManager.start(runId, backend, invocation);
       this.activeRuns.set(runId, managed);
-      this.armRunTimer(runId, timeoutSeconds, managed);
+      this.armRunTimer(runId, idleTimeoutSeconds, executionTimeoutSeconds, managed);
       managed.completion.finally(() => {
         this.clearRunTimer(runId);
         this.activeRuns.delete(runId);
@@ -472,20 +491,25 @@ export class OrchestratorService {
         }
       }).catch(() => undefined);
     } catch (error) {
-      await this.failPreSpawn(runId, 'Failed to spawn worker process', { error: error instanceof Error ? error.message : String(error) });
+      await this.failPreSpawn(runId, backendNameFor(backend), 'Failed to spawn worker process', { error: error instanceof Error ? error.message : String(error) });
     }
   }
 
-  private async failPreSpawn(runId: string, message: string, context: Record<string, unknown>): Promise<void> {
+  private async failPreSpawn(runId: string, backend: Backend, message: string, context: Record<string, unknown>): Promise<void> {
+    const latestError = preSpawnError(backend, message, context);
     const result: WorkerResult = {
       status: 'failed',
-      summary: '',
+      summary: message,
       files_changed: [],
       commands_run: [],
       artifacts: this.store.defaultArtifacts(runId),
-      errors: [{ message, context }],
+      errors: [latestError],
     };
-    await this.store.markTerminal(runId, 'failed', result.errors, result);
+    await this.store.markTerminal(runId, 'failed', result.errors, result, {
+      reason: 'pre_spawn_failed',
+      latest_error: latestError,
+      context,
+    });
   }
 
   private async captureAndPersistGitSnapshot(runId: string, cwd: string): Promise<void> {
@@ -502,11 +526,46 @@ export class OrchestratorService {
     }
   }
 
-  private armRunTimer(runId: string, timeoutSeconds: number, managed: ManagedRun): void {
-    const timer = setTimeout(() => {
-      managed.cancel('timed_out');
-    }, timeoutSeconds * 1000);
-    this.timers.set(runId, timer);
+  private armRunTimer(runId: string, idleTimeoutSeconds: number, executionTimeoutSeconds: number | null, managed: ManagedRun): void {
+    const idleTimeoutMs = idleTimeoutSeconds * 1000;
+    const startedMs = Date.now();
+    const hardDeadlineMs = executionTimeoutSeconds === null ? null : startedMs + (executionTimeoutSeconds * 1000);
+    const schedule = () => {
+      const now = Date.now();
+      const idleDeadlineMs = managed.lastActivityMs() + idleTimeoutMs;
+      if (hardDeadlineMs !== null && now >= hardDeadlineMs) {
+        this.timers.delete(runId);
+        managed.cancel('timed_out', {
+          reason: 'execution_timeout',
+          timeout_reason: 'execution_timeout',
+          context: {
+            execution_timeout_seconds: executionTimeoutSeconds,
+            elapsed_seconds: Math.max(0, Math.round((now - startedMs) / 1000)),
+          },
+        });
+        return;
+      }
+
+      if (now >= idleDeadlineMs) {
+        this.timers.delete(runId);
+        managed.cancel('timed_out', {
+          reason: 'idle_timeout',
+          timeout_reason: 'idle_timeout',
+          context: {
+            idle_timeout_seconds: idleTimeoutSeconds,
+            idle_seconds: Math.max(0, Math.round((now - managed.lastActivityMs()) / 1000)),
+          },
+        });
+        return;
+      }
+
+      const nextDeadlineMs = Math.min(idleDeadlineMs, hardDeadlineMs ?? Number.POSITIVE_INFINITY);
+      const delayMs = Math.max(50, Math.min(nextDeadlineMs - now, 60_000));
+      const timer = setTimeout(schedule, delayMs);
+      this.timers.set(runId, timer);
+    };
+
+    schedule();
   }
 
   private clearRunTimer(runId: string): void {
@@ -515,8 +574,20 @@ export class OrchestratorService {
     this.timers.delete(runId);
   }
 
-  private resolveExecutionTimeout(value: number | undefined): { ok: true; value: number } | { ok: false; error: OrchestratorError } {
+  private resolveIdleTimeout(value: number | undefined): { ok: true; value: number } | { ok: false; error: OrchestratorError } {
+    const timeout = value ?? this.config.default_idle_timeout_seconds;
+    if (timeout <= 0 || timeout > this.config.max_idle_timeout_seconds) {
+      return {
+        ok: false,
+        error: orchestratorError('INVALID_INPUT', `idle_timeout_seconds must be between 1 and ${this.config.max_idle_timeout_seconds}`),
+      };
+    }
+    return { ok: true, value: timeout };
+  }
+
+  private resolveExecutionTimeout(value: number | undefined): { ok: true; value: number | null } | { ok: false; error: OrchestratorError } {
     const timeout = value ?? this.config.default_execution_timeout_seconds;
+    if (timeout === null) return { ok: true, value: null };
     if (timeout <= 0 || timeout > this.config.max_execution_timeout_seconds) {
       return {
         ok: false,
@@ -529,11 +600,12 @@ export class OrchestratorService {
   private async loadConfig(): Promise<void> {
     const configPath = `${this.store.root}/config.json`;
     try {
-      const parsed = JSON.parse(await readFile(configPath, 'utf8')) as Partial<OrchestratorConfig>;
-      this.config = {
-        default_execution_timeout_seconds: positiveInt(parsed.default_execution_timeout_seconds) ?? defaultConfig.default_execution_timeout_seconds,
-        max_execution_timeout_seconds: positiveInt(parsed.max_execution_timeout_seconds) ?? defaultConfig.max_execution_timeout_seconds,
-      };
+      const parsed = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
+      const normalized = normalizeConfig(parsed);
+      this.config = normalized.config;
+      if (normalized.shouldWrite) {
+        await writeFile(configPath, `${JSON.stringify(normalized.fileValue, null, 2)}\n`, { mode: 0o600 });
+      }
     } catch {
       this.config = defaultConfig;
       await writeFile(configPath, `${JSON.stringify(defaultConfig, null, 2)}\n`, { mode: 0o600 });
@@ -569,6 +641,27 @@ function invalidInput(message: string): ToolResult {
 
 function unknownRun(runId: string): ToolResult {
   return wrapErr(orchestratorError('UNKNOWN_RUN', `Unknown run: ${runId}`));
+}
+
+function backendNameFor(backend: WorkerBackend): Backend {
+  return BackendSchema.parse(backend.name);
+}
+
+function preSpawnError(backend: Backend, message: string, context: Record<string, unknown>): RunError {
+  const code = typeof context.code === 'string' ? context.code : null;
+  return {
+    message,
+    category: code === 'WORKER_BINARY_MISSING'
+      ? 'worker_binary_missing'
+      : message.toLowerCase().includes('cwd')
+        ? 'permission'
+        : 'backend_unavailable',
+    source: 'pre_spawn',
+    backend,
+    retryable: code !== 'WORKER_BINARY_MISSING',
+    fatal: true,
+    context,
+  };
 }
 
 function hasModelSettingsInput(input: { reasoning_effort?: ReasoningEffort; service_tier?: ServiceTier }): boolean {
@@ -673,6 +766,63 @@ function parseReasoningEffort(value: string | null | undefined): ReasoningEffort
 
 function positiveInt(value: unknown): number | null {
   return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : null;
+}
+
+function nullablePositiveInt(value: unknown): number | null | undefined {
+  if (value === null) return null;
+  if (value === undefined) return undefined;
+  return positiveInt(value) ?? undefined;
+}
+
+function normalizeConfig(parsed: Record<string, unknown>): { config: OrchestratorConfig; fileValue: Record<string, unknown>; shouldWrite: boolean } {
+  if (isLegacyGeneratedConfig(parsed)) {
+    return {
+      config: defaultConfig,
+      fileValue: { ...defaultConfig },
+      shouldWrite: true,
+    };
+  }
+
+  const maxIdle = positiveInt(parsed.max_idle_timeout_seconds) ?? defaultConfig.max_idle_timeout_seconds;
+  const defaultIdleCandidate = positiveInt(parsed.default_idle_timeout_seconds) ?? defaultConfig.default_idle_timeout_seconds;
+  const defaultIdle = defaultIdleCandidate <= maxIdle ? defaultIdleCandidate : Math.min(defaultConfig.default_idle_timeout_seconds, maxIdle);
+  const maxExecution = positiveInt(parsed.max_execution_timeout_seconds) ?? defaultConfig.max_execution_timeout_seconds;
+  const defaultExecutionCandidate = nullablePositiveInt(parsed.default_execution_timeout_seconds);
+  const defaultExecution = defaultExecutionCandidate === undefined ? defaultConfig.default_execution_timeout_seconds : defaultExecutionCandidate;
+  const boundedDefaultExecution = defaultExecution !== null && defaultExecution > maxExecution ? defaultConfig.default_execution_timeout_seconds : defaultExecution;
+  const config: OrchestratorConfig = {
+    default_idle_timeout_seconds: defaultIdle,
+    max_idle_timeout_seconds: maxIdle,
+    default_execution_timeout_seconds: boundedDefaultExecution,
+    max_execution_timeout_seconds: maxExecution,
+  };
+  const fileValue = { ...parsed, ...config };
+  return {
+    config,
+    fileValue,
+    shouldWrite: missingConfigFields(parsed) || !sameConfigFields(parsed, config),
+  };
+}
+
+function isLegacyGeneratedConfig(parsed: Record<string, unknown>): boolean {
+  return parsed.default_execution_timeout_seconds === legacyGeneratedConfig.default_execution_timeout_seconds
+    && parsed.max_execution_timeout_seconds === legacyGeneratedConfig.max_execution_timeout_seconds
+    && parsed.default_idle_timeout_seconds === undefined
+    && parsed.max_idle_timeout_seconds === undefined;
+}
+
+function missingConfigFields(parsed: Record<string, unknown>): boolean {
+  return parsed.default_idle_timeout_seconds === undefined
+    || parsed.max_idle_timeout_seconds === undefined
+    || parsed.default_execution_timeout_seconds === undefined
+    || parsed.max_execution_timeout_seconds === undefined;
+}
+
+function sameConfigFields(parsed: Record<string, unknown>, config: OrchestratorConfig): boolean {
+  return parsed.default_idle_timeout_seconds === config.default_idle_timeout_seconds
+    && parsed.max_idle_timeout_seconds === config.max_idle_timeout_seconds
+    && parsed.default_execution_timeout_seconds === config.default_execution_timeout_seconds
+    && parsed.max_execution_timeout_seconds === config.max_execution_timeout_seconds;
 }
 
 function displayMetadata(

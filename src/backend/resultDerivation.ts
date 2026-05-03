@@ -5,7 +5,7 @@ export interface ObservedResultInput {
   resultEventPresent: boolean;
   resultEventValid: boolean;
   stopReason: string | null;
-  runStatusOverride?: Extract<RunStatus, 'cancelled' | 'timed_out' | 'orphaned'>;
+  runStatusOverride?: Extract<RunStatus, 'failed' | 'cancelled' | 'timed_out' | 'orphaned'>;
 }
 
 export interface ObservedResult {

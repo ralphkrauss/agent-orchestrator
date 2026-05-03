@@ -62,6 +62,11 @@ describe('CodexBackend', () => {
     assert.equal(parsed.events.length, 1);
     assert.deepStrictEqual(parsed.errors, [{
       message: "The 'openai/gpt-5.5' model is not supported when using Codex with a ChatGPT account.",
+      category: 'invalid_model',
+      source: 'backend_event',
+      backend: 'codex',
+      retryable: false,
+      fatal: true,
       context: { status: 400, type: 'invalid_request_error' },
     }]);
   });

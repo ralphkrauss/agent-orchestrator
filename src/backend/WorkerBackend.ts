@@ -1,5 +1,6 @@
 import type {
   Backend,
+  RunError,
   RunModelSettings,
   RunStatus,
   WorkerEvent,
@@ -27,7 +28,7 @@ export interface ParsedBackendEvent {
   resultEvent?: BackendResultEvent;
   filesChanged: string[];
   commandsRun: string[];
-  errors: { message: string; context?: Record<string, unknown> }[];
+  errors: RunError[];
 }
 
 export interface BackendResultEvent {
@@ -37,7 +38,7 @@ export interface BackendResultEvent {
 }
 
 export interface FinalizeContext {
-  runStatusOverride?: Extract<RunStatus, 'cancelled' | 'timed_out' | 'orphaned'>;
+  runStatusOverride?: Extract<RunStatus, 'failed' | 'cancelled' | 'timed_out' | 'orphaned'>;
   exitCode: number | null;
   signal: NodeJS.Signals | null;
   resultEvent: BackendResultEvent | null;
@@ -45,7 +46,7 @@ export interface FinalizeContext {
   filesChangedFromGit: string[];
   commandsRun: string[];
   artifacts: { name: string; path: string }[];
-  errors: { message: string; context?: Record<string, unknown> }[];
+  errors: RunError[];
 }
 
 export interface FinalizedWorkerResult {
