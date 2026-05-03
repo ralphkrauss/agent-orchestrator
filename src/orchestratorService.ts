@@ -1,11 +1,13 @@
 import { access, readFile, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import {
+  AckRunNotificationInputSchema,
   BackendSchema,
   CancelRunInputSchema,
   GetObservabilitySnapshotInputSchema,
   GetRunEventsInputSchema,
   isTerminalStatus,
+  ListRunNotificationsInputSchema,
   ListWorkerProfilesInputSchema,
   orchestratorError,
   PruneRunsInputSchema,
@@ -15,11 +17,14 @@ import {
   ShutdownInputSchema,
   StartRunInputSchema,
   ServiceTierSchema,
+  WaitForAnyRunInputSchema,
   WaitForRunInputSchema,
   wrapErr,
   wrapOk,
   type Backend,
   type RunDisplayMetadata,
+  type RunNotification,
+  type RunNotificationKind,
   type ReasoningEffort,
   type ModelSource,
   type OrchestratorError,
@@ -121,6 +126,12 @@ export class OrchestratorService {
         return this.getRunEvents(params);
       case 'wait_for_run':
         return this.waitForRun(params);
+      case 'wait_for_any_run':
+        return this.waitForAnyRun(params);
+      case 'list_run_notifications':
+        return this.listRunNotifications(params);
+      case 'ack_run_notification':
+        return this.ackRunNotification(params);
       case 'get_run_result':
         return this.getRunResult(params);
       case 'send_followup':
@@ -400,6 +411,53 @@ export class OrchestratorService {
     const run = await this.store.loadRun(parsed.data.run_id);
     if (!run) return unknownRun(parsed.data.run_id);
     return wrapOk({ status: 'still_running', wait_exceeded: true, run_summary: run.meta });
+  }
+
+  async waitForAnyRun(params: unknown): Promise<ToolResult> {
+    const parsed = WaitForAnyRunInputSchema.safeParse(params);
+    if (!parsed.success) return invalidInput(parsed.error.message);
+    const { run_ids, wait_seconds, after_notification_id, kinds } = parsed.data;
+    const kindFilter = kinds ?? (['terminal', 'fatal_error'] as RunNotificationKind[]);
+    const deadline = Date.now() + wait_seconds * 1000;
+    while (true) {
+      const notifications = await this.store.listNotifications({
+        runIds: run_ids,
+        sinceNotificationId: after_notification_id,
+        kinds: kindFilter,
+        includeAcked: true,
+        limit: 50,
+      });
+      if (notifications.length > 0) {
+        return wrapOk({
+          notifications,
+          wait_exceeded: false,
+        });
+      }
+      if (Date.now() >= deadline) break;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    return wrapOk({ notifications: [] as RunNotification[], wait_exceeded: true });
+  }
+
+  async listRunNotifications(params: unknown): Promise<ToolResult> {
+    const parsed = ListRunNotificationsInputSchema.safeParse(params);
+    if (!parsed.success) return invalidInput(parsed.error.message);
+    const { run_ids, since_notification_id, kinds, include_acked, limit } = parsed.data;
+    const notifications = await this.store.listNotifications({
+      runIds: run_ids,
+      sinceNotificationId: since_notification_id,
+      kinds,
+      includeAcked: include_acked,
+      limit,
+    });
+    return wrapOk({ notifications });
+  }
+
+  async ackRunNotification(params: unknown): Promise<ToolResult> {
+    const parsed = AckRunNotificationInputSchema.safeParse(params);
+    if (!parsed.success) return invalidInput(parsed.error.message);
+    const result = await this.store.markNotificationAcked(parsed.data.notification_id);
+    return wrapOk({ acked: result.acked, notification_id: parsed.data.notification_id });
   }
 
   async getRunResult(params: unknown): Promise<ToolResult> {

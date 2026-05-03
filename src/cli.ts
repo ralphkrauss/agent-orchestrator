@@ -16,6 +16,12 @@ if (command === 'doctor') {
 } else if (command === 'opencode') {
   const { runOpenCodeLauncher } = await import('./opencode/launcher.js');
   process.exitCode = await runOpenCodeLauncher(process.argv.slice(3));
+} else if (command === 'claude') {
+  const { runClaudeLauncher } = await import('./claude/launcher.js');
+  process.exitCode = await runClaudeLauncher(process.argv.slice(3));
+} else if (command === 'monitor') {
+  const { runMonitorCli } = await import('./monitorCli.js');
+  process.exitCode = await runMonitorCli(process.argv.slice(3));
 } else if (isDaemonCliCommand(command)) {
   try {
     await runDaemonCli(process.argv.slice(2));
@@ -32,6 +38,8 @@ Usage:
   agent-orchestrator doctor       Check local worker CLI availability
   agent-orchestrator doctor --json
   agent-orchestrator opencode     Start OpenCode in orchestration mode
+  agent-orchestrator claude       Start Claude Code in orchestration mode (recommended rich-feature harness)
+  agent-orchestrator monitor <run_id> [--json-line] [--since <id>]
   agent-orchestrator status       Show daemon status
   agent-orchestrator status --json
   agent-orchestrator runs [--json] [--prompts]

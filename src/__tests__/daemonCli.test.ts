@@ -49,6 +49,7 @@ describe('daemon CLI', () => {
       'agent-orchestrator': 'dist/cli.js',
       'agent-orchestrator-daemon': 'dist/daemonCli.js',
       'agent-orchestrator-opencode': 'dist/opencodeCli.js',
+      'agent-orchestrator-claude': 'dist/claudeCli.js',
     });
   });
 

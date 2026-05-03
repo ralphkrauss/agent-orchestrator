@@ -560,6 +560,54 @@ export const ObservabilitySnapshotSchema = z.object({
 });
 export type ObservabilitySnapshot = z.infer<typeof ObservabilitySnapshotSchema>;
 
+export const RunNotificationKindSchema = z.enum(['terminal', 'fatal_error']);
+export type RunNotificationKind = z.infer<typeof RunNotificationKindSchema>;
+
+export const RunNotificationSchema = z.object({
+  notification_id: z.string().min(1),
+  seq: z.number().int().nonnegative(),
+  run_id: z.string().min(1),
+  kind: RunNotificationKindSchema,
+  status: RunStatusSchema,
+  terminal_reason: RunTerminalReasonSchema.nullable().optional().default(null),
+  latest_error: RunLatestErrorSchema.optional().default(null),
+  created_at: z.string(),
+  acked_at: z.string().nullable().optional().default(null),
+});
+export type RunNotification = z.infer<typeof RunNotificationSchema>;
+
+export const WaitForAnyRunInputSchema = z.object({
+  run_ids: z.array(z.string().min(1)).min(1).max(64),
+  wait_seconds: z.number().int().min(1).max(300),
+  after_notification_id: z.string().min(1).optional(),
+  kinds: z.array(RunNotificationKindSchema).min(1).optional(),
+});
+export type WaitForAnyRunInput = z.input<typeof WaitForAnyRunInputSchema>;
+export type WaitForAnyRun = z.output<typeof WaitForAnyRunInputSchema>;
+
+export const ListRunNotificationsInputSchema = z.object({
+  run_ids: z.array(z.string().min(1)).optional(),
+  since_notification_id: z.string().min(1).optional(),
+  kinds: z.array(RunNotificationKindSchema).min(1).optional(),
+  include_acked: z.boolean().optional().default(false),
+  limit: z.number().int().positive().max(500).optional().default(100),
+});
+export type ListRunNotificationsInput = z.input<typeof ListRunNotificationsInputSchema>;
+export type ListRunNotifications = z.output<typeof ListRunNotificationsInputSchema>;
+
+export const AckRunNotificationInputSchema = z.object({
+  notification_id: z.string().min(1),
+});
+export type AckRunNotificationInput = z.infer<typeof AckRunNotificationInputSchema>;
+
+export const RunNotificationPushPayloadSchema = z.object({
+  run_id: z.string().min(1),
+  notification_id: z.string().min(1),
+  kind: RunNotificationKindSchema,
+  status: RunStatusSchema,
+});
+export type RunNotificationPushPayload = z.infer<typeof RunNotificationPushPayloadSchema>;
+
 export const RpcMethodSchema = z.enum([
   'ping',
   'shutdown',
@@ -570,6 +618,9 @@ export const RpcMethodSchema = z.enum([
   'get_run_status',
   'get_run_events',
   'wait_for_run',
+  'wait_for_any_run',
+  'list_run_notifications',
+  'ack_run_notification',
   'get_run_result',
   'send_followup',
   'cancel_run',

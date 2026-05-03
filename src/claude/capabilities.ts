@@ -1,6 +1,4 @@
 export {
-  WorkerProfileSchema,
-  WorkerProfileManifestSchema,
   createWorkerCapabilityCatalog,
   parseWorkerProfileManifest,
   validateWorkerProfiles,

@@ -94,6 +94,73 @@ subcommands and any option token after `run`, including `--agent`, `--attach`,
 `--dir`, `--share`, `--session`, `--file`, and
 `--dangerously-skip-permissions`.
 
+### Claude Code orchestration launcher
+
+A second supervisor harness ships in this repo and is positioned as the
+**recommended rich-feature** harness when its primitives are needed (Claude
+Code's native push notifications and strong isolation flags such as
+`--strict-mcp-config`, `--setting-sources ""`, `--tools`, and ephemeral
+skill / settings / MCP injection). The OpenCode harness above remains a fully
+supported peer; both are documented side-by-side and there is no deprecation:
+
+```bash
+agent-orchestrator claude
+agent-orchestrator-claude
+```
+
+The Claude launcher builds a per-launch ephemeral envelope under the system
+temp directory and spawns `claude` with `cwd = <envelope>`. The envelope
+contains a curated `.claude/skills/` (orchestrate-* only), a deny-by-default
+`settings.json`, and an `mcp.json` exposing only `agent-orchestrator`. The
+spawn passes `--strict-mcp-config`, `--setting-sources ""`, `--tools
+"Read,Glob,Grep"` (so the only available built-in tools are the read-only
+inspection tools), `--append-system-prompt-file`, and redirects `HOME`,
+`XDG_CONFIG_HOME`, and `CLAUDE_CONFIG_DIR` to ephemeral subdirectories. The
+launcher never passes `--dangerously-skip-permissions`, does not use
+`--disable-slash-commands` (that flag would also disable orchestrate-* skill
+discovery), does not use `--add-dir` (Claude scans add-dir paths for project
+`.claude/*` and `CLAUDE.md` which would re-introduce target leakage), and does
+not use `--allowed-tools` (it only pre-approves; the correct availability
+restriction surface is `--tools`).
+
+Because the supervisor cannot directly read files from the target workspace,
+worker runs are dispatched with `cwd = <target workspace>` via
+`mcp__agent-orchestrator__start_run`; workers have full access in their own
+session. The supervisor reconciles via `get_run_status`, `get_run_events`,
+and `get_run_result`.
+
+Inspect the discovery report and the generated envelope without spawning
+Claude:
+
+```bash
+agent-orchestrator claude --print-discovery
+agent-orchestrator claude --print-config --cwd /path/to/workspace
+```
+
+### Notification-aware run supervision
+
+Both harnesses share daemon-owned, backend-agnostic notification primitives:
+
+- `wait_for_any_run({ run_ids[], wait_seconds, after_notification_id?, kinds? })`
+  blocks against the local daemon until any of the supplied runs has a
+  `terminal` or `fatal_error` notification newer than the cursor. Default
+  wake semantics are the union of `terminal` + `fatal_error`.
+- `list_run_notifications({ run_ids?, since_notification_id?, kinds?,
+  include_acked?, limit? })` returns durable notifications since a
+  lexicographic global cursor for reconciliation after disconnect.
+- `ack_run_notification({ notification_id })` is idempotent.
+- `agent-orchestrator monitor <run_id>` is a one-shot CLI for use from a
+  user shell (e.g. as a background `&`-suffixed process). The Claude harness
+  itself does not invoke it — Bash is not part of the supervisor's tool
+  surface, and run supervision inside the envelope uses bounded
+  `wait_for_any_run` polls. The CLI exits with `0` completed, `1`
+  failed/orphaned, `2` cancelled, `3` timed_out, `10` fatal_error, `4`
+  unknown run, `5` daemon unavailable, `6` argument error, and prints
+  exactly one JSON line for the wake notification.
+- The MCP server also relays an advisory `notifications/run/changed` push
+  hint with payload `{ run_id, notification_id, kind, status }`. The hint is
+  optional; the durable journal under the run-store root is authoritative.
+
 Run it from the workspace where worker agents should operate, or pass
 `--cwd <path>`. Worker profile configuration is read from
 `~/.config/agent-orchestrator/profiles.json` by default so personal model

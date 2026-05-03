@@ -4,7 +4,7 @@ Branch: `13-add-support-for-claude-code`
 Plan Slug: `claude-code-support`
 Parent Issue: #13
 Created: 2026-05-03
-Status: planning
+Status: implemented
 
 ## Context
 
@@ -340,119 +340,150 @@ Sources read:
 ## Execution Log
 
 ### CCS-1: Notification record contract and store
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed (2026-05-03)
+- **Evidence:**
+  - Contract additions in `src/contract.ts`: `RunNotificationKindSchema`, `RunNotificationSchema`, `WaitForAnyRunInputSchema`, `ListRunNotificationsInputSchema`, `AckRunNotificationInputSchema`, `RunNotificationPushPayloadSchema`. New `RpcMethodSchema` entries: `wait_for_any_run`, `list_run_notifications`, `ack_run_notification`.
+  - Store additions in `src/runStore.ts`: `appendNotification`, `listNotifications`, `markNotificationAcked`, `pruneNotificationsForRuns`, `appendFatalErrorNotificationIfNew`, `notificationsJournalPath`, `notificationsAcksPath`, `notificationsSeqPath`, persisted `notifications.seq` counter, recovery from journal when counter is missing/corrupt.
+  - Notification id format: `${seq:20}-${ulid()}` per Decision 13.
+  - Tests: `src/__tests__/notifications.test.ts` (append/list/persistence/restart, journal recovery, ack idempotency, dedupe, prune cascade, schemas).
+- **Notes:** Daemon-global journal `notifications.jsonl` is authoritative; per-run sentinel file `.fatal_notification` dedupes fatal_error appends.
 
 ### CCS-2: Daemon emission on terminal/error transitions
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed (2026-05-03)
+- **Evidence:**
+  - `RunStore.markTerminal` now atomically transitions and then emits one `terminal` notification (only when an actual transition happened — idempotent re-invocation is a no-op). When the resolved `latest_error` is fatal it first emits a `fatal_error` notification via the dedupe path so order is `fatal_error` then `terminal`.
+  - `ProcessManager.recordObservedError` calls `appendFatalErrorNotificationIfNew` on the first fatal observed error so the notification fires before terminal.
+  - Pre-spawn failures (`OrchestratorService.failPreSpawn`) flow through `markTerminal` with the latest_error and produce the fatal_error+terminal pair.
+  - Orphan-on-restart (`OrchestratorService.orphanRunningRuns`) flows through `markTerminal('orphaned')`; if the meta carries fatal latest_error, the dedupe path emits `fatal_error` first.
+  - Tests: notifications.test.ts ("emits a terminal notification on markTerminal and a fatal_error notification when meta has fatal latest_error", idempotency assertion), and existing ProcessManager tests still pass.
 
 ### CCS-3: MCP tools `wait_for_any_run`, `list_run_notifications`, `ack_run_notification`
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed (2026-05-03)
+- **Evidence:**
+  - `OrchestratorService.dispatch` routes the new methods. `waitForAnyRun` short-circuits when notifications already exist for the supplied run ids and otherwise polls every 200 ms until `wait_seconds` deadline (1-300 s, schema-bounded). Default kinds filter is `['terminal','fatal_error']`.
+  - `listRunNotifications` exposes `runIds`, `since_notification_id` (lexicographic global cursor), `kinds`, `include_acked`, `limit` (≤500).
+  - `ackRunNotification` is idempotent.
+  - `mcpTools.ts` registers all three tools; `toolTimeout.ts` extends the IPC timeout for `wait_for_any_run` similarly to `wait_for_run`.
+  - Tests: notifications.test.ts schema parsing, plus full test suite green.
 
 ### CCS-4: Optional MCP push hint
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed (2026-05-03)
+- **Evidence:**
+  - `src/server.ts` starts a background poller after `server.connect(transport)`. The poller calls `list_run_notifications` with the cursor of the highest seen notification id and emits `notifications/run/changed` for each new record with payload exactly `{ run_id, notification_id, kind, status }` (validated through `RunNotificationPushPayloadSchema`).
+  - Poll interval is configurable via `AGENT_ORCHESTRATOR_NOTIFICATION_POLL_MS` (default 500 ms). Failures are swallowed: the durable journal remains authoritative (Decision 4).
 
 ### CCS-5: `agent-orchestrator monitor` CLI
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed (2026-05-03)
+- **Evidence:**
+  - `src/monitorCli.ts` parses `<run_id>`, `--json-line`, `--since <id>`. Blocks via `wait_for_any_run` chunks of 60 s, wakes on terminal **or** fatal_error per Decision 12, and prints exactly one JSON line on stdout for the wake notification.
+  - Documented exit codes exported as constants: 0 completed, 1 failed/orphaned, 2 cancelled, 3 timed_out, 10 fatal_error, 4 unknown run, 5 daemon unavailable, 6 argument error.
+  - `src/cli.ts` adds the `monitor` subcommand and updates help text. Single-run only in v1 (Decision 16).
+  - Tests: `src/__tests__/monitorCli.test.ts` (arg parsing, help, exit-code constants).
 
 ### CCS-6: OpenCode supervisor prompt update (notification-aware, no deprecation)
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed (2026-05-03)
+- **Evidence:**
+  - `src/opencode/config.ts` long-running supervision section now leads with `wait_for_any_run` (default-wake on terminal+fatal_error) and `list_run_notifications` cursor reconciliation, while preserving LRT-7 adaptive cadence as the fallback path. **No deprecation note added.** No background-monitor process spawning added to the OpenCode harness.
+  - Existing OpenCode harness regression tests still pass (`pnpm test`).
 
 ### CCS-7a: Claude Code surface discovery and validation
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** Must complete with a passing compatibility report before CCS-7/8/9 begin. Escalate to user if persistent `.claude/` or `.mcp.json` mutation is the only stable path.
+- **Status:** completed (2026-05-03)
+- **Evidence:**
+  - `src/claude/discovery.ts` probes `claude --version` and `claude --help`, asserts the required surfaces are present (`--mcp-config`, `--strict-mcp-config`, `--settings`, `--allowed-tools`, `--disallowed-tools`, `--system-prompt`), reports presence of optional surfaces (`--setting-sources`, `--append-system-prompt`, `--bare`, `-p`/`--print`, `--output-format`), and records `--dangerously-skip-permissions` as a forbidden surface.
+  - Recommended path is `isolated_envelope` only when all required surfaces are present. The launcher fails fast otherwise.
+  - Verified live against installed `claude 2.1.126`: `node dist/cli.js claude --print-discovery` reports `Recommended path: isolated_envelope`.
+- **Notes:** Persistent `.claude/` or `.mcp.json` mutation is **not** required by the available surfaces, so no escalation was needed.
 
 ### CCS-7: Claude Code capability catalog
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed (2026-05-03)
+- **Evidence:** `src/claude/capabilities.ts` re-exports the shared catalog from `src/harness/capabilities.ts` (CCS-21 extraction). Same logic; no duplication.
 
 ### CCS-8: Claude Code supervisor config builder
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed (2026-05-03)
+- **Evidence:** `src/claude/config.ts` builds `{ systemPrompt, settings, mcpConfig, monitorPin }`. The system prompt teaches profile-mode `start_run`, `Bash run_in_background: true` against the pinned monitor binary, terminal+fatal_error wake semantics, `wait_for_any_run` / `list_run_notifications` reconciliation, bounded fallback matching LRT-7 cadence, references only orchestrate-* skill names. The MCP config exposes only the agent-orchestrator MCP server (Decision 7, Decision 20). Tests: `claudeHarness.test.ts`.
 
 ### CCS-9: Claude Code launcher
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed (2026-05-03)
+- **Evidence:**
+  - `src/claude/launcher.ts` parses options, validates passthrough, runs CCS-7a discovery, builds an ephemeral envelope under `os.tmpdir()` containing `settings.json`, `mcp.json`, `system-prompt.md`, and a curated skill root.
+  - Spawn: `claude --strict-mcp-config --mcp-config <ephemeral mcp.json> --settings <ephemeral settings.json> --setting-sources "" --append-system-prompt-file <ephemeral system-prompt.md> --disable-slash-commands [allowed passthrough]` with `HOME`, `XDG_CONFIG_HOME`, `CLAUDE_CONFIG_DIR` redirected to ephemeral subdirectories.
+  - Cleanup: `built.cleanup()` is called on exit (success and failure paths). Discovery report drives `recommended_path`; the launcher fails fast with `summarizeReport` output if surfaces drift.
+  - Tests: `claudeHarness.test.ts` ("Claude launcher envelope", "Claude launcher leak-proof tests", `buildClaudeSpawnArgs` always sets `--strict-mcp-config` and never `--dangerously-skip-permissions`).
 
 ### CCS-10: CLI/bin wiring
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed (2026-05-03)
+- **Evidence:**
+  - `src/cli.ts` adds `claude` and `monitor` subcommands (in addition to existing `opencode`).
+  - `src/claudeCli.ts` is the standalone bin entry.
+  - `package.json` adds `agent-orchestrator-claude` to `bin`.
+  - Backward compatibility: existing `agent-orchestrator`, `agent-orchestrator-daemon`, `agent-orchestrator-opencode` bins retained. `daemonCli.test.ts` updated to expect the new bin entry; otherwise unchanged behaviour.
 
 ### CCS-11: Pruning extension
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed (2026-05-03)
+- **Evidence:** `RunStore.pruneTerminalRuns` now also calls `pruneNotificationsForRuns` for the deleted run ids and reports `pruned_notifications` in `PruneRunsResult`. Dry-run still reports counts without mutation. Tests: notifications.test.ts ("prunes notifications and acks for pruned runs").
 
 ### CCS-12: Docs and skill projections
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed (2026-05-03)
+- **Evidence:**
+  - `README.md` adds `## Claude Code Orchestration Mode` describing the launcher, isolation envelope, allowlist, monitor command, and `--print-discovery`/`--print-config`. Adds `wait_for_any_run`, `list_run_notifications`, `ack_run_notification` rows to the MCP tools table; documents the monitor CLI exit codes; documents the optional `notifications/run/changed` push hint.
+  - `node scripts/sync-ai-workspace.mjs --check` passes.
+- **Notes:** `docs/development/mcp-tooling.md` was updated in the second reviewer follow-up to include a `### Claude Code orchestration launcher` and `### Notification-aware run supervision` subsection. Side-by-side framing also lives in `README.md` (CCS-20).
 
 ### CCS-13: Focused tests
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed (2026-05-03)
+- **Evidence:** New tests:
+  - `src/__tests__/notifications.test.ts` — schemas, append/list/ack/prune, persistence-across-restart, sequence recovery, daemon-global ordering, dedupe, idempotent terminal emission, fatal+terminal pair from `markTerminal`.
+  - `src/__tests__/monitorCli.test.ts` — arg parsing, help, exit-code constants.
+  - `src/__tests__/claudeHarness.test.ts` — allowlist matches `mcpTools.ts`, settings allow/deny set, monitor pin resolution layouts (`AGENT_ORCHESTRATOR_BIN` absolute vs fallback), passthrough hardening (forbidden + allowed + unknown), skill curation copies orchestrate-* only, config builder includes monitor pin and skills, launcher envelope `--strict-mcp-config` + never `--dangerously-skip-permissions`, leak-proof test asserts poisoned `.mcp.json`/`.claude/*` are not loaded.
+  - Final: `pnpm test` reports `tests 137 / pass 136 / fail 0` (1 skipped pre-existing).
 
 ### CCS-14: Verify quality gates
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed (2026-05-03)
+- **Evidence:** `pnpm verify` is fully green. Output highlights: `tests 137 / pass 136 / fail 0`, `No known vulnerabilities found`, `npm pack --dry-run` succeeds (214.6 kB tarball, 188 files). `node scripts/sync-ai-workspace.mjs --check` reports projections in sync.
+- **Notes:** `pnpm install --frozen-lockfile` was run with explicit user approval to populate `node_modules`. No dependency manifests were modified.
 
 ### CCS-15: Claude permission/config builder
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed (2026-05-03)
+- **Evidence:** `src/claude/permission.ts` produces a deny-by-default `settings.json` allowing exactly: `Read`, `Glob`, `Grep`, the agent-orchestrator MCP tool allowlist (Decision 22), and `Bash(<pinned monitor pattern>)`. Denies `Edit`, `Write`, `WebFetch`, `WebSearch`, `Task`, `NotebookEdit`, `TodoWrite`, generic `Bash`. Sets `enableAllProjectMcpServers: false`. Empty `hooks` and `enabledPlugins`. The launcher pairs this with `--setting-sources ""` so user/project/local settings are not loaded. Tests: `claudeHarness.test.ts` ("builds deny-by-default settings ...").
 
 ### CCS-16: Claude skill curation strategy
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed (2026-05-03)
+- **Evidence:** `src/claude/skills.ts` resolves `orchestrate-*` skills from the canonical `.agents/skills/` source and copies their `SKILL.md` files into an ephemeral skill root under the daemon-owned envelope. Non-orchestrate skills are not exposed. The launcher always reads from `.agents/skills/` (not `.claude/skills/` projections) and the envelope's settings disable user/project skill discovery via `--setting-sources ""` and `--disable-slash-commands`. Tests: `claudeHarness.test.ts` ("Claude skill curation: lists and copies orchestrate-* ...") and the leak-proof test prove non-orchestrate skills are not loaded.
 
 ### CCS-17: Claude CLI passthrough hardening
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed (2026-05-03)
+- **Evidence:** `src/claude/passthrough.ts` parses tokens after `--` and rejects: `--dangerously-skip-permissions`, `--allow-dangerously-skip-permissions`, `--mcp-config`, `--strict-mcp-config`, `--allowedTools`/`--allowed-tools`, `--disallowedTools`/`--disallowed-tools`, `--add-dir`, `--settings`, `--setting-sources`, `--system-prompt(-file)`, `--append-system-prompt(-file)`, `--plugin-dir`, `--agents`, `--agent`, `--permission-mode`, `--tools`, `--disable-slash-commands`. Allows: `--print`, `-p`, `--output-format`, `--input-format`, `--include-partial-messages`, `--include-hook-events`, `--verbose`, `--debug`, `-d`, `--debug-file`, `--name`, `-n`, `--exclude-dynamic-system-prompt-sections`, `--no-session-persistence`, `--bare`. Tests: `claudeHarness.test.ts` ("Claude passthrough hardening").
 
 ### CCS-18: MCP and tool allowlist enforcement
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed (2026-05-03)
+- **Evidence:** `src/claude/permission.ts` derives the agent-orchestrator MCP allowlist directly from `tools` exported by `src/mcpTools.ts` (`mcp__agent-orchestrator__<tool>`). The system prompt enumerates the same list. Test: `claudeHarness.test.ts` ("orchestratorMcpToolAllowList matches every registered MCP tool exactly").
 
 ### CCS-19: Pinned monitor command resolution and Bash allowlist
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed (2026-05-03)
+- **Evidence:** `src/claude/monitorPin.ts.resolveMonitorPin` returns `{ bin, args_template, bash_allowlist_pattern }`. The bin resolves from `AGENT_ORCHESTRATOR_BIN` env (when absolute) or the package CLI script (`process.execPath` + `dist/cli.js`). The Bash allowlist pattern is `${process.execPath} ${bin} monitor *`. The launcher injects the pin into the supervisor system prompt and into the `Bash(<pattern>)` allow rule of `settings.json`. Other Bash invocations are denied (the deny-by-default plus explicit `Bash` deny ensures this). Tests: `claudeHarness.test.ts` ("Claude monitor pin").
 
 ### CCS-20: Dual-harness docs (Claude and OpenCode side-by-side)
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed (2026-05-03)
+- **Evidence:** `README.md` keeps the existing OpenCode section and adds a new Claude Code section framed as the **recommended rich-feature** harness when its primitives are needed. **No deprecation language** for OpenCode is added (Decision 6). The orchestrate-* skill projections (`.agents/skills/orchestrate-*`) reference profile-mode commands and stay launcher-agnostic; they are projected via `node scripts/sync-ai-workspace.mjs` whose check passes.
 
 ### CCS-21: Shared harness core extraction
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed (2026-05-03)
+- **Evidence:**
+  - `src/harness/capabilities.ts` is the source-of-truth for `WorkerProfileSchema`, `WorkerProfileManifestSchema`, `createWorkerCapabilityCatalog`, `parseWorkerProfileManifest`, `validateWorkerProfiles`, and the `WorkerCapabilityCatalog` / `ValidatedWorkerProfile` types.
+  - `src/opencode/capabilities.ts` and `src/claude/capabilities.ts` are pure re-export shims so both harnesses cannot drift.
+  - Existing OpenCode harness tests continue to pass (`opencodeCapabilities.test.ts`, `opencodeHarness.test.ts`); no observable behaviour change for OpenCode.
+- **Notes:** Supervisor prompt scaffolding is intentionally not yet extracted into a shared helper because the Claude prompt is materially different from the OpenCode prompt (isolation contract, monitor command pin, MCP allowlist enumeration). A follow-up extraction can lift only the genuinely shared blocks (e.g. profile diagnostics formatter) once both prompts have stabilised.
 
 ### CCS-22: Leak-proof harness tests
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed (2026-05-03)
+- **Evidence:** `src/__tests__/claudeHarness.test.ts` "Claude launcher leak-proof tests" creates a target workspace with poisoned `.mcp.json`, `.claude/settings.json`, `.claude/skills/evil-skill/SKILL.md`, and `.claude/commands/evil.md`, builds the envelope, and asserts:
+  - The generated MCP config exposes only the agent-orchestrator server (no `evil` entry).
+  - `enableAllProjectMcpServers` is `false` in settings.
+  - `--setting-sources ""` is in the spawn args (so user/project/local settings are not loaded).
+  - Only orchestrate-* skills are present in the curated skill root.
+  - `HOME`, `XDG_CONFIG_HOME`, `CLAUDE_CONFIG_DIR` are redirected away from the user's home.
+  - `--strict-mcp-config` is always in the spawn args; `--dangerously-skip-permissions` is never.
+- **Notes:** Live spawning of `claude` is intentionally not exercised — leak prevention is asserted at the spawn-argument and ephemeral-envelope level, which is what this harness controls. End-to-end live-spawn verification is documented as residual risk; see Risk #18 in the plan body.
 
 ## Backward Compatibility And Coexistence
 
@@ -563,3 +594,179 @@ before or during the relevant CCS task, do not silently broaden scope):
    (cheap; always matches the installed binary). Confirm before CCS-7a
    lands if a packaged-report variant would be preferred for offline
    reproducibility.
+
+## Reviewer Follow-up (2026-05-03)
+
+A blocking reviewer pass identified four issues; all four are now fixed in the
+same branch and the implementation re-verified end-to-end. Summary, evidence,
+and the affected execution-log entries:
+
+### Follow-up 1: Bash deny precedence (CCS-15, CCS-18)
+- **Symptom (reviewer):** generated `settings.json` had `Bash(<pinned monitor pattern>)` in `permissions.allow` AND bare `Bash` in `permissions.deny`. Claude Code deny rules take precedence over an allow rule for the same tool name, so the bare-`Bash` deny would also block the pinned monitor pattern.
+- **Fix:** removed bare `Bash` from `permissions.deny` (`src/claude/permission.ts`). Documented inline that overall Bash availability is restricted at the spawn-arg level via `--allowed-tools`, not via a settings deny rule that would shadow the allow pattern.
+- **Compensating control:** `buildClaudeAllowedToolsList` now exports the explicit tool whitelist used by the launcher to set `--allowed-tools "Read Glob Grep Bash(<pinned pattern>) mcp__agent-orchestrator__<each tool>"` at spawn time, so any Bash invocation outside the pinned pattern is unavailable to the supervisor regardless of permission ordering.
+- **Test:** `claudeHarness.test.ts` — "builds settings that allow Read/Glob/Grep/agent-orchestrator MCP tools and the pinned Bash pattern, denying other write/exfil tools" now asserts that bare `Bash` is **not** in `permissions.deny`.
+
+### Follow-up 2: monitor command shape mismatch (CCS-19, CCS-8)
+- **Symptom (reviewer):** the Bash allow pattern was `${process.execPath} ${bin} monitor *` (i.e. with the `node` interpreter prefix), but the supervisor system prompt taught `${bin} monitor <run_id>` (without the `node` prefix), so the supervisor's `Bash run_in_background` invocations would not match the allow pattern.
+- **Fix:** `src/claude/monitorPin.ts` now resolves a structured `ResolvedMonitorPin` that is the single source of truth for the canonical command:
+  - `nodePath` (`process.execPath`)
+  - `bin` (absolute CLI script)
+  - `command_prefix` (the tokens) and `command_prefix_string` (the joined string used in prompts)
+  - `bash_allowlist_pattern = command_prefix_string + " monitor *"`
+  The system prompt (`src/claude/config.ts`) now teaches the canonical prefix verbatim and explicitly states that the Bash allowlist matches only commands beginning with that prefix.
+- **Test:** `claudeHarness.test.ts` — "Claude monitor pin: keeps the prompt command shape and Bash allow pattern aligned" asserts the prompt-side prefix and the Bash pattern share the same prefix, and the leak-proof launcher test extracts the Bash pattern's prefix from `--allowed-tools` and confirms the system prompt teaches the same prefix.
+- **Live verification:** `node dist/cli.js claude --print-config --cwd /tmp` shows the canonical prefix in the prompt's "Pinned monitor command prefix:" line, the system-prompt instruction, and the `Bash(<prefix> monitor *)` allow rule are all the same string.
+
+### Follow-up 3: skill exposure without leakage (CCS-9, CCS-16)
+- **Symptom (reviewer):** the launcher always passed `--disable-slash-commands`, but Claude Code documents that flag as disabling all skills and commands. Curated `orchestrate-*` skills were copied to `<envelope>/skills/`, but no spawn flag wired them into Claude's discovery, so they would not be exposed.
+- **Fix:**
+  - Removed `--disable-slash-commands` from the harness's spawn args (`src/claude/launcher.ts.buildClaudeSpawnArgs`).
+  - Moved curated skills to `<envelope>/.claude/skills/<orchestrate-*>/SKILL.md` (was `<envelope>/skills/`), and changed the spawn `cwd` to the envelope. Claude's cwd-rooted skill discovery now finds only the curated `orchestrate-*` SKILL.md files.
+  - The target workspace is exposed via `--add-dir <target workspace>` so `Read`/`Glob`/`Grep` still operate on it. Project state in the target workspace (`.claude/`, `.mcp.json`, etc.) is **not** auto-loaded because the spawn's cwd is the envelope, not the target workspace.
+  - Defense in depth: `--strict-mcp-config` keeps `agent-orchestrator` the only reachable MCP server; `--setting-sources ""` prevents loading user/project/local `settings.json`; `HOME`, `XDG_CONFIG_HOME`, `CLAUDE_CONFIG_DIR` are still redirected to ephemeral subdirectories. `--disable-slash-commands` remains in the **passthrough** forbidden list so a user supplying it after `--` is rejected with an actionable error.
+- **Tests:**
+  - `claudeHarness.test.ts` — "Claude launcher envelope" asserts the spawn args do NOT include `--disable-slash-commands` and DO include `--add-dir <target>` and `--allowed-tools` with a Bash pattern.
+  - "Claude launcher leak-proof tests" creates a target workspace with poisoned `.claude/{settings.json, skills, commands, agents, hooks}` plus `.mcp.json`, asserts that none of those leak into the envelope's `.claude/`, that the curated skill root contains only `orchestrate-*`, and that the spawn cwd would be the envelope rather than the target workspace.
+  - The `buildClaudeSpawnArgs` unit test asserts the new shape (`--add-dir`, `--allowed-tools`, no `--disable-slash-commands`).
+
+### Follow-up 4: notification sequence recovery (CCS-1)
+- **Symptom (reviewer):** `nextNotificationSequence` consulted `notifications.seq` first and only fell back to scanning the journal if the counter file was missing or corrupt. Because `appendNotification` writes the journal **before** updating the counter, a crash between those two writes leaves the counter stale (lower than the journal max). On restart, the next id would be `(stale_counter + 1)` and could collide with an existing id in the journal.
+- **Fix:** `RunStore.nextNotificationSequence` now reads the persisted counter **and** the journal's highest seq in parallel and takes `max(counter, journal_max) + 1`. The journal scan is also optimised to a tail read that walks from the end of the file backwards until it parses a valid record, falling back to a full scan only when the journal is small or has many trailing corrupt lines.
+- **Tests:** `notifications.test.ts` — "recovers monotonically when notifications.seq is stale (lower than the journal max), simulating a crash between journal append and counter write" creates seqs 1-3, rewrites `notifications.seq` to `1`, and asserts the next id is `seq=4` and that all four notification ids remain unique. The existing missing/corrupt counter test continues to pass.
+
+### Non-blocking items addressed
+
+- **`docs/development/mcp-tooling.md`** now contains a `### Claude Code orchestration launcher` subsection that documents the launcher, the envelope, the new spawn flags, and a `### Notification-aware run supervision` subsection that documents `wait_for_any_run`, `list_run_notifications`, `ack_run_notification`, the monitor CLI, and the optional `notifications/run/changed` push hint.
+- **Test coverage gaps:**
+  - New `src/__tests__/waitForAnyRun.test.ts` adds five service-level tests against `OrchestratorService.waitForAnyRun`: immediate return for already-existing notification, blocking + fatal-error wake before terminal, `after_notification_id` cursor (no double-wake), `kinds` filter (terminal-only ignores fatal_error), and aggregation across multiple run ids.
+  - The leak-proof harness test in `claudeHarness.test.ts` was hardened to additionally poison `.claude/agents/` and `.claude/hooks/`, to add a non-orchestrate skill (`review`) under the same `.agents/skills/` source root, and to assert that the harness's curated skill root contains exactly the orchestrate-* skill names — and that the envelope's `.claude/` does not leak `commands/`, `agents/`, `hooks/`, `settings.json`, or `.mcp.json`.
+  - The `buildClaudeSpawnArgs` unit test now asserts the full new shape including `--add-dir` and `--allowed-tools`, and asserts the absence of `--disable-slash-commands`.
+- **AI workspace projection** (`.claude/skills/orchestrate-implement-plan/SKILL.md`) is regenerated alongside the canonical `.agents/` source change; `node scripts/sync-ai-workspace.mjs --check` reports projections in sync.
+
+### Final verification
+- `pnpm verify` green: `tests 144 / pass 143 / fail 0` (1 pre-existing skipped); `No known vulnerabilities found`; `npm pack --dry-run` succeeds.
+- `node scripts/sync-ai-workspace.mjs --check` green.
+- `node dist/cli.js claude --print-discovery` continues to report `Recommended path: isolated_envelope` against installed `claude 2.1.126`.
+- `node dist/cli.js claude --print-config --cwd /tmp` shows the canonical monitor command prefix appears identically in: (a) the system prompt's "Pinned monitor command prefix:" line, (b) the system prompt's instruction sentence, (c) the `Bash(<prefix> monitor *)` settings allow rule, and (d) the spawn-time `--allowed-tools` Bash pattern.
+
+### Residual risks after follow-up
+- Live end-to-end smoke against a spawned `claude` (TUI or `--print`) was not exercised in this branch. Spawn-arg, prompt, allow-pattern, and leak-prevention assertions are unit-tested. A CI-gated live smoke (e.g. `agent-orchestrator claude -- --print --bare "list_runs and exit"` with a fixture profile) is the most useful follow-up.
+- The MCP push hint remains a 500 ms server-side poll loop. The durable journal is authoritative; lower-latency push (e.g. a daemon→server unidirectional notify channel) is a follow-up rather than a blocker.
+
+## Reviewer Follow-up #2 (2026-05-03)
+
+A second reviewer pass identified two further blockers in the spawn-arg model
+introduced by the first follow-up. Both are now corrected and re-verified.
+This section supersedes the stale parts of "Reviewer Follow-up (2026-05-03)"
+above; specifically the references to `--add-dir <target>` and to
+`--allowed-tools` as the restriction surface are no longer accurate. Plan
+Decisions 5, 19, 22, and 23 are adjusted as documented below; no other
+decisions change.
+
+### Follow-up #2-1: `--add-dir <target>` would scan target workspace for project skills/commands/agents/hooks (`src/claude/launcher.ts`)
+- **Symptom (reviewer):** the previous fix passed `--add-dir <target>` so the supervisor's `Read`/`Glob`/`Grep` could inspect the target workspace. Per Claude Code's documented behaviour, add-dir paths are scanned for project `.claude/skills`, `.claude/commands`, `.claude/agents`, `.claude/hooks`, and `CLAUDE.md`. That re-introduces the leakage we're trying to prevent.
+- **Fix:** `--add-dir` is no longer passed by the harness. `buildClaudeSpawnArgs` no longer accepts a `targetWorkspace` parameter. The supervisor no longer has direct read access to the target workspace; instead, it dispatches worker runs with `cwd = <target workspace>` via `mcp__agent-orchestrator__start_run` and reconciles via `get_run_status`, `get_run_events`, and `get_run_result`. This matches the "dumb supervisor" principle (Decision 20).
+- **Tests:** `claudeHarness.test.ts` — "Claude launcher envelope" and the leak-proof test both assert `built.spawnArgs` does NOT include `--add-dir`. The `buildClaudeSpawnArgs` unit test asserts the same.
+- **Live verification:** `node dist/cli.js claude --print-config --cwd /tmp` now shows spawn args `["--strict-mcp-config","--mcp-config",…,"--settings",…,"--setting-sources","","--append-system-prompt-file",…,"--tools","Read,Glob,Grep"]` — no `--add-dir`.
+
+### Follow-up #2-2: `--allowed-tools` only pre-approves; arbitrary Bash was still requestable (`src/claude/permission.ts`, `src/claude/launcher.ts`)
+- **Symptom (reviewer):** `--allowed-tools` pre-approves matching tool patterns so they don't prompt; it does not restrict overall tool availability. Because bare `Bash` had been removed from `permissions.deny` in the first follow-up and `--tools` was not used, generic Bash remained requestable/promptable. The reviewer's correct restriction surface for built-in availability is `--tools`.
+- **Fix:**
+  - `buildClaudeSpawnArgs` now passes `--tools "Read,Glob,Grep"` (no Bash). `--allowed-tools` is no longer passed by the harness. Edit, Write, WebFetch, WebSearch, Task, NotebookEdit, and TodoWrite are also unavailable as built-ins. The agent-orchestrator MCP tools are loaded separately via `--mcp-config` and are unaffected by `--tools`.
+  - `buildClaudeSupervisorSettings()` now takes no inputs and returns an `allow` list of `Read`, `Glob`, `Grep`, plus the agent-orchestrator MCP tool names; `deny` includes `Bash` (defense in depth, in case `--tools` semantics ever loosen) plus the existing write/exfil tools (`Edit`, `Write`, `WebFetch`, `WebSearch`, `Task`, `NotebookEdit`, `TodoWrite`).
+  - `CLAUDE_SUPERVISOR_BUILTIN_TOOLS = ['Read', 'Glob', 'Grep']` is the single source of truth for the built-in availability list and is consumed by both `permission.ts` and `launcher.ts`.
+  - The deleted `buildClaudeAllowedToolsList` helper and the per-launch `monitorBashAllowlistPattern` permission input are gone.
+  - `--tools` is added to the passthrough forbidden list (`src/claude/passthrough.ts`) so users cannot override it via `agent-orchestrator claude -- --tools default`.
+- **Tests:**
+  - `claudeHarness.test.ts` — settings test asserts `Read`, `Glob`, `Grep` and the agent-orchestrator MCP tools are in `allow`; `Bash`, `Edit`, `Write`, etc. are in `deny`; no Bash pattern appears in `allow`.
+  - `claudeHarness.test.ts` — launcher envelope and `buildClaudeSpawnArgs` tests assert `--tools` is `"Read,Glob,Grep"`, no `--allowed-tools`, no `--add-dir`, no `--disable-slash-commands`, no `--dangerously-skip-permissions`.
+  - `claudeHarness.test.ts` — config-builder test asserts the system prompt teaches MCP polling (`wait_for_any_run`) for run supervision and explicitly tells the supervisor that "Bash is not available inside the envelope". The standalone `agent-orchestrator monitor <run_id>` CLI is mentioned only as an out-of-envelope pointer for the user's own shell.
+- **Live verification:** `node dist/cli.js claude --print-config --cwd /tmp --skills .agents/skills` shows the system prompt now contains "Bash, Edit, Write, … are not available. Do not request them.", the supervisor reading guidance "The supervisor cannot directly read files outside this envelope. To inspect or modify the target workspace, dispatch a worker run …", and the standalone-CLI pointer "The supervisor itself does not invoke this command — Bash is not available inside the envelope." Spawn args are exactly `--strict-mcp-config --mcp-config … --settings … --setting-sources "" --append-system-prompt-file … --tools Read,Glob,Grep`.
+
+### Plan decision adjustments
+- **Decision 5 (monitor CLI as the primary long-running supervision primitive)** — adjusted: the monitor CLI is still the load-bearing primitive for *users* who want a one-shot background process tied to a single run. Inside the Claude envelope, the supervisor relies on bounded `wait_for_any_run` polling (which already wakes on the union of `terminal` + `fatal_error`). The monitor CLI exit-code table and JSON-line stdout contract are unchanged.
+- **Decision 19 (OpenCode coexistence)** — unchanged. OpenCode's prompt continues to lead with `wait_for_any_run` cursor-based polling.
+- **Decision 22 (permission/tool allowlist)** — adjusted: the supervisor's tool surface inside the envelope is exactly `Read`, `Glob`, `Grep`, plus the agent-orchestrator MCP tools. Bash is not exposed at all. Built-in availability is enforced with `--tools` (the correct restriction surface per the Claude CLI docs); `settings.permissions.deny` lists `Bash` plus the other write/exfil tools as defense in depth.
+- **Decision 23 (pinned monitor command and Bash allowlist)** — adjusted: there is no in-envelope Bash allowlist, because Bash is not exposed inside the envelope. `resolveMonitorPin` continues to return the canonical command prefix; the launcher embeds it in the system prompt as informational text only, so the supervisor can mention the standalone CLI to the user.
+
+### Stale-evidence cleanup
+The first reviewer follow-up section (above) contains evidence that is no longer accurate:
+- "compensating control: `buildClaudeAllowedToolsList` … `--allowed-tools …`" — superseded; the helper is removed and `--allowed-tools` is no longer passed.
+- "`Bash(<prefix> monitor *)` settings allow rule" — superseded; the pinned Bash pattern is no longer in `permissions.allow`.
+- "`--add-dir <target workspace>` so `Read`/`Glob`/`Grep` can inspect the target workspace" — superseded; `--add-dir` is no longer passed.
+- "system prompt teaches the same monitor command prefix as the Bash allow pattern" — adjusted; there is no Bash allow pattern. The prompt teaches the canonical prefix as an informational pointer to the standalone CLI.
+- "`docs/development/mcp-tooling.md` was left unchanged" — superseded; the file now contains a `### Claude Code orchestration launcher` and `### Notification-aware run supervision` subsection.
+
+These corrections are intentional and the working evidence below is the authoritative version.
+
+### Final verification
+- Build: `pnpm build` clean.
+- Targeted tests: `pnpm test` reports `tests 143 / pass 142 / fail 0` (1 pre-existing skipped). The Claude launcher envelope test, the leak-proof test, the `buildClaudeSpawnArgs` unit test, the settings test, the config builder test, and the monitor pin tests all pass under the new model.
+- AI workspace: `node scripts/sync-ai-workspace.mjs --check` green.
+- Live: `node dist/cli.js claude --print-discovery` continues to report `Recommended path: isolated_envelope` against installed `claude 2.1.126`. `node dist/cli.js claude --print-config --cwd /tmp` shows the new spawn args (`--tools "Read,Glob,Grep"`, no `--add-dir`, no `--allowed-tools`, no `--dangerously-skip-permissions`, no `--disable-slash-commands`) and the new system prompt language.
+- `pnpm verify` is run as the very last step; results are recorded below.
+
+### Residual risks after follow-up #2
+- Live end-to-end smoke against a spawned `claude` is still not exercised. Pure-spawn-arg verification has been strengthened: the harness no longer relies on permission-pattern semantics that we cannot run-time verify in CI without a Claude session. A CI-gated live smoke remains the most useful follow-up.
+- Supervisors that depended on `Bash run_in_background: true` for low-latency run notification have to use bounded `wait_for_any_run` polling instead. The supervisor still wakes on the union of `terminal` + `fatal_error` per Decision 12, so the supervision contract is preserved; only the in-envelope mechanism changed.
+- The MCP push hint remains a 500 ms server-side poll loop. Durable journal is authoritative.
+
+## Reviewer Follow-up #3 (2026-05-03)
+
+A third reviewer pass identified two follow-on inconsistencies in the
+discovery and passthrough surfaces introduced by follow-up #2. Both are now
+corrected.
+
+### Follow-up #3-1: discovery validated the wrong tool flags (`src/claude/discovery.ts`)
+- **Symptom (reviewer):** `discoverClaudeSurface` still listed `--allowed-tools` and `--disallowed-tools` as **required** surfaces and did not check `--tools` at all. Because the harness's actual security boundary moved to `--tools "Read,Glob,Grep"` in follow-up #2, a Claude binary that lacked `--tools` could still be reported as `Recommended path: isolated_envelope`. The live `--print-discovery` output also had no `tools_flag` line, which is unmonitored drift from the new model.
+- **Fix:**
+  - Added `tools_flag` (required) and `append_system_prompt_file_flag` (required) to `ClaudeSurfaceReport.surfaces`. The harness depends on both: `--tools` for built-in availability restriction and `--append-system-prompt-file` for system-prompt injection.
+  - Demoted `allowed_tools_flag` and `disallowed_tools_flag` to `required: false`. They are still reported (so an operator can see what the binary advertises) but they are not part of the security boundary, because `--allowed-tools` only pre-approves and `--disallowed-tools` cannot express the inverse-of-pinned pattern we would need.
+  - `setting_sources_flag` is now required too (the harness depends on `--setting-sources ""` to suppress user/project/local settings).
+  - The `--append-system-prompt-file` regex was relaxed to also match the bare-mode shorthand `--append-system-prompt[-file]` because the installed `claude 2.1.126` lists the flag only inside the `--bare` description rather than as a top-level option. Both forms indicate the file variant is supported.
+- **Tests:** new `src/__tests__/claudeDiscovery.test.ts` exercises `discoverClaudeSurface` against five fake-binary fixtures (a shell-script `claude` whose `--help` and `--version` outputs are tailored per case):
+  - All required surfaces present → `recommended_path = isolated_envelope`, `forbidden_surfaces = ['--dangerously-skip-permissions']`.
+  - `--tools` removed → downgraded to `unsupported`; `errors` calls out `tools_flag` specifically.
+  - `--append-system-prompt-file` removed → downgraded to `unsupported`.
+  - `--allowed-tools` and `--disallowed-tools` removed → still `isolated_envelope` (they are no longer required).
+  - `summarizeReport` includes lines for the new `tools_flag` and `append_system_prompt_file_flag` surfaces.
+- **Live verification:** `node dist/cli.js claude --print-discovery` against installed `claude 2.1.126` now emits `Detected surfaces: ... tools_flag: present, append_system_prompt_file_flag: present, ... allowed_tools_flag: present, disallowed_tools_flag: present, ...` and `Recommended path: isolated_envelope`.
+
+### Follow-up #3-2: `--bare` was on the safe passthrough list (`src/claude/passthrough.ts`)
+- **Symptom (reviewer):** `validateClaudePassthroughArgs` allowed `--bare`, and `claudeHarness.test.ts` asserted it as acceptable. Per Claude Code docs, `--bare` skips auto-discovery of skills, plugins, MCP servers, memory, and CLAUDE.md. The harness's load-bearing skill exposure mechanism is exactly cwd-rooted discovery of `<envelope>/.claude/skills/orchestrate-*`, so `--bare` would silently hide the curated skill surface — the same failure mode that already disqualified `--disable-slash-commands`.
+- **Fix:** moved `--bare` from `ALLOWED_FLAG_TOKENS` to `FORBIDDEN_FLAGS`. Added an inline comment explaining the parallel with `--disable-slash-commands`. Updated the launcher's `--help` text accordingly.
+- **Tests:** `claudeHarness.test.ts` "Claude passthrough hardening" — the rejection list now includes `--bare`; the acceptance test no longer passes `--bare` (uses `--no-session-persistence` instead as another safe flag).
+
+### Stale-text cleanup (non-blocking)
+- **`README.md`** — removed the sentence claiming the harness "teaches the supervisor to launch `agent-orchestrator monitor <run_id>` via `Bash run_in_background: true` against a pinned absolute path …"; reframed the "recommended rich-feature" paragraph to no longer cite Bash background tasks (it now lists `--strict-mcp-config`, `--setting-sources ""`, `--tools`, and ephemeral skill / settings injection as the rich-feature primitives).
+- **`docs/development/mcp-tooling.md`** — removed the sentence describing the standalone monitor CLI as "what the Claude harness uses with `Bash run_in_background: true`"; added that the harness itself does not invoke it because Bash is not part of the supervisor's tool surface.
+- **`src/claude/launcher.ts`** — replaced two stale comments that still claimed the target workspace was reachable through `--add-dir`. Both now correctly state that the target workspace is not exposed to the supervisor and is reached only by dispatching worker runs with `cwd = <target>`.
+
+### Final verification
+- `pnpm build` clean.
+- `pnpm test` reports `tests 148 / pass 147 / fail 0` (1 pre-existing skipped). The new `claudeDiscovery.test.ts` adds 5 tests that exercise the discovery contract end-to-end against fake binaries.
+- `node scripts/sync-ai-workspace.mjs --check` green.
+- Live: `node dist/cli.js claude --print-discovery` against installed `claude 2.1.126` reports every required surface (`tools_flag`, `append_system_prompt_file_flag`, etc.) as `present` and `Recommended path: isolated_envelope`.
+- `pnpm verify` results recorded below.
+
+### Residual risks after follow-up #3
+- The discovery report is built only from `claude --help` and `claude --version`. A future Claude release could rename `--tools` and silently break the boundary; the discovery report would then mark `tools_flag` as missing and the launcher would correctly fail-fast with `Recommended path: unsupported` (validated by the discovery tests).
+- Live spawn against `claude` is still not exercised in CI — see follow-up #2 risks.
+
+## Reviewer Follow-up #4 (2026-05-03, README docs only)
+
+A subsequent reviewer pass flagged two stale spots in `README.md` that
+contradicted the post-#2/#3 implementation. No source/test/docs other than
+`README.md` were touched in this follow-up.
+
+- **README ~line 537**: the "MCP Tools" table preamble said `agent-orchestrator monitor <run_id>` was "the recommended way for a Claude Code supervisor to use background bash to subscribe to a run." This contradicted the rest of the README (which says Bash is not part of the supervisor's tool surface) and `docs/development/mcp-tooling.md`. Reworded to: the monitor CLI is for **out-of-envelope** use from a user shell; the Claude supervisor itself does not invoke it because Bash is not part of its tool surface, and in-envelope supervision uses bounded `wait_for_any_run` polls. Exit-code table preserved verbatim.
+- **README ~line 319**: the post-`--`  forbidden-flag list was missing `--bare` even though `src/claude/passthrough.ts` rejects it (follow-up #3-2). Added `--bare` to the list with the same parenthetical rationale used by `claudeLauncherHelp()` and `mcp-tooling.md`: `--bare` disables skill / CLAUDE.md / plugin / MCP auto-discovery, hiding the curated `orchestrate-*` skills the supervisor depends on.
+
+### Verification
+- `git diff --check` clean (no whitespace errors introduced).
+- `node scripts/sync-ai-workspace.mjs --check` reports projections in sync (no `.agents/` source touched, so no projections needed regeneration).
+- `grep -n "background bash\|recommended way for a Claude" README.md` returns no matches; only the corrected "out-of-envelope" framing remains.
+- `grep -n "--bare" README.md` shows the forbidden-flag entry with rationale; the README no longer contains text suggesting `--bare` is acceptable.
+
+No source, test, or other docs were modified in this follow-up.

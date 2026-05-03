@@ -126,6 +126,7 @@ export class ProcessManager {
         latest_error: error,
       })));
       if (error.fatal) {
+        trackPersistence(this.store.appendFatalErrorNotificationIfNew(runId, 'running', error));
         cancel('failed', {
           reason: 'backend_fatal_error',
           latest_error: error,
