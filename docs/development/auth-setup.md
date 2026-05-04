@@ -96,6 +96,22 @@ listings. Use `--from-env` or `--from-stdin` from scripts.
 running `agent-orchestrator auth claude` or `auth codex` exits with a clear
 message pointing at the respective CLI's own auth flow.
 
+## Local checkout
+
+When dogfooding a branch build, use the local CLI wrapper instead of an
+installed `agent-orchestrator` binary:
+
+```bash
+just local auth cursor
+just local restart --force
+just local doctor
+```
+
+`just local ...` builds `dist/cli.js` and runs it with the branch's isolated
+daemon store. To use npm-style command names from the local checkout, run
+`eval "$(just local-env)"` in your shell, then use `agent-orchestrator auth ...`
+normally.
+
 ## Security notes
 
 - **Do not** put real API keys in shell profiles, MCP server config, the
