@@ -5,7 +5,7 @@ Plan Slug: `cursor-sdk-backend` (file retained as `16-cursor-agent-backend.md` f
 Parent Issue: #16
 Created: 2026-05-02
 Updated: 2026-05-03 (RQ1 superseded — human policy: always pull the latest `@cursor/sdk` version; spec relaxed to `^1.0.12` so the optional dependency tracks new releases through the lockfile)
-Status: implementation complete (pending review of `pnpm audit --prod` policy for `@cursor/sdk` transitive dependencies)
+Status: implementation complete (Round-2 PR review fixes applied 2026-05-04; `pnpm verify` clean via `pnpm.overrides`).
 
 ## Context
 
@@ -434,14 +434,18 @@ and do not block design approval:
   - `node scripts/sync-ai-workspace.mjs --check` reports drift only on `.claude/skills/orchestrate-create-plan/SKILL.md` and `.claude/skills/orchestrate-implement-plan/SKILL.md`. These are the **pre-existing user-owned uncommitted changes** in `.agents/skills/orchestrate-*/SKILL.md` that the implementer was instructed not to touch. No drift was introduced by this branch's changes.
 
 ### T8: build, test, verify
-- **Status:** completed (with one caveat — see "Residual Risks")
-- **Evidence:**
+- **Status:** completed (release gate clears; see "Audit status" + Round-2 update 2026-05-04)
+- **Evidence (Round-2 refresh, 2026-05-04 — overrides path applied):**
   - `pnpm build` ✅ (exits 0).
-  - `pnpm test` ✅ — 141 pass, 1 skipped (Windows-only IPC pipe), 0 fail; total 27 suites, 142 tests. (Pre-cursor baseline was 115 tests; 27 new tests added across two reviewer-fix passes.)
+  - `pnpm test` ✅ — 155 pass, 1 skipped (Windows-only IPC pipe), 0 fail; total 30 suites, 156 tests.
   - `node scripts/check-publish-ready.mjs` ✅ → "package metadata is ready for publish".
   - `node scripts/resolve-publish-tag.mjs` ✅ → "@ralphkrauss/agent-orchestrator@0.1.2 will publish with npm dist-tag latest".
-  - `pnpm audit --prod` ❌ — fails because the currently-resolved `@cursor/sdk` 1.0.12 pulls in `@connectrpc/connect-node` → `undici@<6.24.0` and `sqlite3` → `@tootallnate/once` with known advisories. **All 12 advisory paths originate from `@cursor/sdk`'s transitive dependencies; none are in agent-orchestrator's own dependency tree.** Under the 2026-05-03 policy (`^1.0.12`, always latest), audit cleanliness is contingent on an upstream SDK release that bumps the affected transitives — that release lands automatically on the next lockfile refresh. This still blocks `pnpm verify` today even though build/tests/publish-ready/dist-tag all pass. See "Audit status" below.
-  - `npm pack --dry-run` not reached because the audit step short-circuits `pnpm verify`. Build artifacts are correct (the existing pack-shape verification under `dist/__tests__/daemonCli.test.js` exercises the packed bin and passes).
+  - `pnpm audit --prod` ✅ → "No known vulnerabilities found" after adding `pnpm.overrides` for `tar` (`^7.5.11`), `undici` (`^6.24.0`), and `@tootallnate/once` (`^3.0.1`) per Open Human Decision 1 (Round-2 Comment 12).
+  - `npm pack --dry-run` ✅ — produces `ralphkrauss-agent-orchestrator-0.1.2.tgz` (204.6 kB packed, 1.1 MB unpacked, 164 files).
+- **Original Round-1 evidence (2026-05-03, pre-overrides) — preserved for context:**
+  - `pnpm build` ✅. `pnpm test` ✅ (141 pass, 1 skipped). `check-publish-ready` ✅. `resolve-publish-tag` ✅.
+  - `pnpm audit --prod` ❌ at the time — the currently-resolved `@cursor/sdk` 1.0.12 pulled in `@connectrpc/connect-node` → `undici@<6.24.0`, `sqlite3` → `tar`, and `@tootallnate/once` with 12 known advisories transitively. None of the advisories were in agent-orchestrator's own dependency tree.
+  - `npm pack --dry-run` was not reached at the time because audit short-circuited `pnpm verify`.
 
 ### Reviewer fix pass (2026-05-03)
 - **RV1 — model required for cursor:** `src/orchestratorService.ts` `modelSettingsForBackend('cursor', model, …)` returns `INVALID_INPUT` when `model` is missing or empty; `validateInheritedModelSettingsForBackend` enforces the same on cursor follow-ups (and the dispatcher in `sendFollowup` now always routes cursor through the inherited validator). Tests: `cursorRuntime.test.ts → "rejects direct cursor start_run when model is missing"`, `→ "lets cursor follow-ups inherit the parent model and accepts a valid override"` (also asserts `SendOptions.model.id === 'composer-3'` on resume override). Existing `CursorSdkRuntime missing-SDK` test updated to pass `model: 'composer-2'` so it reaches the runtime layer rather than tripping the new validator.
@@ -450,11 +454,7 @@ and do not block design approval:
 - **RV4 — synthesized timeout/cancel error:** `cursorTerminalOverrideError(status, details)` mirrors `processManager.terminalOverrideError`. The override error is fed into both the finalize context's `errors` array (so `WorkerResult.errors` and `summary` reflect the timeout/cancel) and `markTerminal`'s `latest_error` (so `RunSummary.latest_error` is non-null). Tests: `→ "synthesizes a timeout RunError when the orchestrator cancels with timed_out + idle_timeout reason"` (asserts `latest_error.category === 'timeout'`, `latest_error.message === 'idle timeout exceeded'`, `timeout_reason === 'idle_timeout'`); `→ "synthesizes a cancel RunError for user-initiated cancel even when no terminal context is supplied"` (asserts `latest_error.message === 'cancelled by user'`, status `'cancelled'`).
 - **RV5 — `createRequire` SDK path resolution:** `src/backend/cursor/sdk.ts` replaces `Function('return require')()` with `createRequire(import.meta.url)`, so `BackendDiagnostic.path` is populated when the SDK is importable in this ESM build. Confirmed by the existing `diagnostics.test.ts` passing under `pnpm test` after the change.
 
-### Audit status (after RQ1 resolution 2026-05-03)
-Human policy: always use the latest available `@cursor/sdk` version. `package.json` now uses `"@cursor/sdk": "^1.0.12"` so future SDK releases are picked up automatically by `pnpm install` / lockfile refresh. **Today's latest published version is still `1.0.12`** (verified via `npm view @cursor/sdk versions` → `[1.0.7..1.0.12]`), so on-disk dependencies are unchanged and `pnpm audit --prod` still reports the same 12 advisories: all transitive through `@cursor/sdk@1.0.12` → `@connectrpc/connect-node` → `undici@<6.24.0` and `@cursor/sdk@1.0.12` → `sqlite3` → `tar` / `@tootallnate/once`. None of the advisories are in agent-orchestrator's own dependency tree.
+### Audit status (after RQ1 resolution 2026-05-03; superseded 2026-05-04 by overrides)
+Round 1 (2026-05-03) recorded a wait-for-upstream policy: `package.json` was set to `"@cursor/sdk": "^1.0.12"` and `pnpm audit --prod` was expected to clear automatically once Cursor shipped a fixed transitive tree. That left `pnpm verify` red against the 12 advisories transitively pulled in via `@cursor/sdk@1.0.12 > sqlite3 > tar` and `@cursor/sdk@1.0.12 > @connectrpc/connect-node > undici` (plus `@tootallnate/once`).
 
-Resolution path under the new policy:
-  - **Audit cleanliness now depends on an upstream `@cursor/sdk` release that bumps `@connectrpc/connect-node`/`sqlite3` to non-vulnerable transitives.** Because the spec is `^1.0.12`, that fix lands automatically the next time the lockfile is refreshed.
-  - The other previously-listed options (scoped `audit.ignoreCves`, `pnpm.overrides` on `undici`/`tar`/`@tootallnate/once`) remain available if a manual workaround is needed before Cursor publishes a fix; they are not applied here.
-
-No code or override change made; the policy decision is recorded and reflected in the package spec.
+Round 2 (2026-05-04) — Open Human Decision 1 was answered with the overrides path. `package.json` now carries a `pnpm.overrides` block pinning `tar` to `^7.5.11`, `undici` to `^6.24.0`, and `@tootallnate/once` to `^3.0.1`. The lockfile was refreshed, `pnpm install --frozen-lockfile` is clean, and `pnpm audit --prod` exits 0. `@cursor/sdk` remains in `optionalDependencies` so the bundled-install ergonomics for cursor users are preserved. The override block should be revisited each time `@cursor/sdk` ships a new minor — the goal is for upstream to ship a clean tree so the override can be removed. See `PUBLISHING.md` "`pnpm.overrides` policy for `@cursor/sdk` transitives" for the per-advisory rationale.

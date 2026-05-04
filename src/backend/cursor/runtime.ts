@@ -75,16 +75,26 @@ export class CursorSdkRuntime implements WorkerRuntime {
   private async spawn(input: RuntimeStartInput, sessionId: string | undefined): Promise<RuntimeStartResult> {
     const availability = await this.adapter.available();
     if (!availability.ok) {
+      const resolvedPath = availability.modulePath ?? null;
+      const installed = resolvedPath !== null;
+      const message = installed
+        ? `${CURSOR_SDK_PACKAGE} is installed at ${resolvedPath} but failed to load: ${availability.reason}`
+        : `${CURSOR_SDK_PACKAGE} module is not installed: ${availability.reason}`;
+      const installHint = installed
+        ? `${CURSOR_SDK_PACKAGE} resolves at ${resolvedPath} but failed to import — usually a native dependency or Node version mismatch. Try \`pnpm rebuild ${CURSOR_SDK_PACKAGE}\` or reinstalling with native rebuilds (e.g. \`npm install --build-from-source ${CURSOR_SDK_PACKAGE}\`).`
+        : `npm install ${CURSOR_SDK_PACKAGE}`;
+      const details: Record<string, unknown> = {
+        binary: CURSOR_SDK_PACKAGE,
+        install_hint: installHint,
+        reason: availability.reason,
+      };
+      if (resolvedPath) details.resolved_path = resolvedPath;
       return {
         ok: false,
         failure: {
           code: 'WORKER_BINARY_MISSING',
-          message: `${CURSOR_SDK_PACKAGE} module is not installed: ${availability.reason}`,
-          details: {
-            binary: CURSOR_SDK_PACKAGE,
-            install_hint: `npm install ${CURSOR_SDK_PACKAGE}`,
-            reason: availability.reason,
-          },
+          message,
+          details,
         },
       };
     }
@@ -112,15 +122,25 @@ export class CursorSdkRuntime implements WorkerRuntime {
     try {
       agentApi = await this.adapter.loadAgentApi();
     } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      const cached = await this.adapter.available().catch(() => null);
+      const resolvedPath = cached && !cached.ok ? cached.modulePath ?? null : null;
+      const installed = resolvedPath !== null;
+      const installHint = installed
+        ? `${CURSOR_SDK_PACKAGE} resolves at ${resolvedPath} but failed to import — usually a native dependency or Node version mismatch. Try \`pnpm rebuild ${CURSOR_SDK_PACKAGE}\` or reinstalling with native rebuilds (e.g. \`npm install --build-from-source ${CURSOR_SDK_PACKAGE}\`).`
+        : `npm install ${CURSOR_SDK_PACKAGE}`;
+      const details: Record<string, unknown> = {
+        binary: CURSOR_SDK_PACKAGE,
+        install_hint: installHint,
+        reason,
+      };
+      if (resolvedPath) details.resolved_path = resolvedPath;
       return {
         ok: false,
         failure: {
           code: 'WORKER_BINARY_MISSING',
-          message: `Failed to load ${CURSOR_SDK_PACKAGE}: ${error instanceof Error ? error.message : String(error)}`,
-          details: {
-            binary: CURSOR_SDK_PACKAGE,
-            install_hint: `npm install ${CURSOR_SDK_PACKAGE}`,
-          },
+          message: `Failed to load ${CURSOR_SDK_PACKAGE}: ${reason}`,
+          details,
         },
       };
     }
@@ -383,18 +403,36 @@ function buildFinalizeContext(
   status: RunStatus,
   overrideError: RunError | null,
 ): FinalizeContext {
-  const stopReasonForResult: BackendResultEvent | null = runResult
-    ? {
-        summary: runResult.result ?? state.resultEvent?.summary ?? '',
-        stopReason: stopReasonFor(runResult.status),
-        raw: runResult,
-      }
-    : state.resultEvent;
-
   const isOverride = status === 'cancelled' || status === 'timed_out';
   const baseErrors = isOverride && overrideError
     ? [overrideError]
     : state.observedErrors.slice();
+
+  // When the SDK reports a terminal error status (e.g. status === 'error') without
+  // emitting any parseable error events, baseErrors would otherwise be empty and
+  // the present `resultEvent` would suppress the generic "worker result event
+  // missing" fallback in finalizeFromObserved — leaving the run marked failed but
+  // with no diagnostic for operators. Synthesize a cursor-specific RunError so
+  // WorkerResult.summary, WorkerResult.errors, and RunSummary.latest_error all
+  // surface the failure.
+  const synthesizedMissingError = (
+    !isOverride
+    && status === 'failed'
+    && runResult
+    && baseErrors.length === 0
+    && overrideError === null
+  )
+    ? cursorMissingErrorRunError(runResult, runId)
+    : null;
+  if (synthesizedMissingError) baseErrors.push(synthesizedMissingError);
+
+  const stopReasonForResult: BackendResultEvent | null = runResult
+    ? {
+        summary: runResult.result ?? state.resultEvent?.summary ?? synthesizedMissingError?.message ?? '',
+        stopReason: stopReasonFor(runResult.status),
+        raw: runResult,
+      }
+    : state.resultEvent;
 
   const baseContext = {
     filesChangedFromEvents: Array.from(state.filesFromEvents).sort(),
@@ -457,6 +495,23 @@ function cursorError(error: { message: string; context?: Record<string, unknown>
     message: error.message,
     context: error.context,
   });
+}
+
+function cursorMissingErrorRunError(runResult: CursorRunResult, runId: string): RunError {
+  return {
+    message: `cursor run finished with status "${runResult.status}" but the SDK reported no error details`,
+    category: 'protocol',
+    source: 'backend_event',
+    backend: CURSOR_BACKEND,
+    retryable: false,
+    fatal: true,
+    context: {
+      sdk_run_id: runResult.id,
+      sdk_run_status: runResult.status,
+      sdk_run_result: runResult.result,
+      cursor_run_id: runId,
+    },
+  };
 }
 
 function cursorRunError(error: unknown): RunError {

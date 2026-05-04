@@ -128,6 +128,71 @@ describe('defaultCursorSdkAdapter contract', () => {
     const cached = await adapter.available();
     assert.equal(cached.ok, false);
   });
+
+  it('reports modulePath in failure when the SDK is resolvable but import throws (installed-but-broken)', async () => {
+    const adapter = defaultCursorSdkAdapter({
+      importer: async () => { throw new Error('Cannot find module sqlite3 native binding'); },
+      resolveModulePath: () => '/fake/node_modules/@cursor/sdk/dist/index.js',
+    });
+    const result = await adapter.available();
+    assert.equal(result.ok, false);
+    const failure = result as { ok: false; reason: string; modulePath: string | null };
+    assert.equal(failure.modulePath, '/fake/node_modules/@cursor/sdk/dist/index.js');
+    assert.match(failure.reason, /sqlite3/i);
+  });
+
+  it('reports modulePath null when the SDK cannot be resolved at all (missing package)', async () => {
+    const adapter = defaultCursorSdkAdapter({
+      importer: async () => { throw new Error('Cannot find module @cursor/sdk'); },
+      resolveModulePath: () => null,
+    });
+    const result = await adapter.available();
+    assert.equal(result.ok, false);
+    const failure = result as { ok: false; reason: string; modulePath: string | null };
+    assert.equal(failure.modulePath, null);
+  });
+});
+
+describe('CursorSdkRuntime install hint differentiates missing vs installed-but-broken', () => {
+  function brokenSdkAdapter(modulePath: string | null, reason: string): CursorSdkAdapter {
+    return {
+      async available() {
+        return { ok: false, reason, modulePath };
+      },
+      async loadAgentApi() {
+        throw new Error(reason);
+      },
+    };
+  }
+
+  it('uses the missing-package install hint when modulePath is null', async () => {
+    const { service } = await createServiceWith(brokenSdkAdapter(null, 'Cannot find module @cursor/sdk'));
+    const cwd = await mkdtemp(join(tmpdir(), 'cursor-missing-'));
+    const start = await service.startRun({ backend: 'cursor', prompt: 'p', cwd, model: 'composer-2' });
+    const runId = (start as { ok: true; run_id: string }).run_id;
+    await service.waitForRun({ run_id: runId, wait_seconds: 5 });
+    const result = await service.getRunResult({ run_id: runId });
+    const payload = result as { ok: true; result: { errors: { context?: { install_hint?: string; resolved_path?: string } }[] } };
+    const hint = payload.result.errors[0]?.context?.install_hint ?? '';
+    assert.equal(hint, 'npm install @cursor/sdk');
+    assert.equal(payload.result.errors[0]?.context?.resolved_path, undefined);
+  });
+
+  it('uses the rebuild install hint when modulePath is set (installed-but-broken)', async () => {
+    const path = '/fake/node_modules/@cursor/sdk/dist/index.js';
+    const { service } = await createServiceWith(brokenSdkAdapter(path, 'sqlite3 native binding missing'));
+    const cwd = await mkdtemp(join(tmpdir(), 'cursor-broken-'));
+    const start = await service.startRun({ backend: 'cursor', prompt: 'p', cwd, model: 'composer-2' });
+    const runId = (start as { ok: true; run_id: string }).run_id;
+    await service.waitForRun({ run_id: runId, wait_seconds: 5 });
+    const result = await service.getRunResult({ run_id: runId });
+    const payload = result as { ok: true; result: { errors: { message: string; context?: { install_hint?: string; resolved_path?: string; reason?: string } }[] } };
+    const error = payload.result.errors[0];
+    assert.equal(error?.context?.resolved_path, path);
+    assert.match(error?.context?.install_hint ?? '', /pnpm rebuild @cursor\/sdk/);
+    assert.match(error?.context?.install_hint ?? '', new RegExp(path.replace(/\//g, '\\/')));
+    assert.match(error?.context?.reason ?? '', /sqlite3/i);
+  });
 });
 
 describe('CursorSdkRuntime missing-SDK behavior', () => {
@@ -216,6 +281,48 @@ describe('CursorSdkRuntime success and cancellation paths', () => {
     assert.equal(payload.run_summary.status, 'failed');
     assert.equal(payload.result.status, 'failed');
     assert.ok(payload.result.errors.some((error) => error.message.includes('authentication failed')));
+  });
+
+  it('synthesizes a cursor RunError when wait() returns terminal status with no result and no events', async () => {
+    // Worst-case shape for Comment 10: stream() yields nothing, wait() returns
+    // { status: 'error' } with no result and no error events. Without the
+    // synthesized RunError the run would be marked failed but with empty
+    // summary/errors and a null latest_error.
+    const run: CursorRun = {
+      id: 'sdk-run-empty',
+      agentId: 'bc-empty-error',
+      get status() { return 'error' as CursorRunStatus; },
+      result: undefined,
+      // eslint-disable-next-line require-yield
+      async *stream() {
+        // intentionally yields nothing
+      },
+      async wait() {
+        return { id: 'sdk-run-empty', status: 'error' as CursorRunStatus };
+      },
+      async cancel() { /* no-op */ },
+    } as CursorRun;
+    const agent = fakeAgent('bc-empty-error', run);
+    const api: CursorAgentApi = {
+      async create() { return agent; },
+      async resume() { return agent; },
+    };
+    const { service } = await createServiceWith(fakeAdapter(api));
+    const cwd = await mkdtemp(join(tmpdir(), 'cursor-empty-error-'));
+    const start = await service.startRun({ backend: 'cursor', prompt: 'go', cwd, model: 'composer-2' });
+    const runId = (start as { ok: true; run_id: string }).run_id;
+    await service.waitForRun({ run_id: runId, wait_seconds: 5 });
+    const result = await service.getRunResult({ run_id: runId });
+    const payload = result as { ok: true; result: { status: string; summary: string; errors: { message: string; context?: Record<string, unknown> }[] }; run_summary: { status: string; latest_error: { message: string } | null } };
+    assert.equal(payload.run_summary.status, 'failed');
+    assert.equal(payload.result.status, 'failed');
+    assert.equal(payload.result.errors.length, 1);
+    const synthesized = payload.result.errors[0]!;
+    assert.match(synthesized.message, /no error details/i);
+    assert.equal(synthesized.context?.sdk_run_status, 'error');
+    assert.equal(synthesized.context?.sdk_run_id, 'sdk-run-empty');
+    assert.equal(payload.result.summary, synthesized.message);
+    assert.equal(payload.run_summary.latest_error?.message, synthesized.message);
   });
 
   it('treats cooperatively cancelled runs as cancelled, not completed', async () => {

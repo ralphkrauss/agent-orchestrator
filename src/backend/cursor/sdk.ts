@@ -144,7 +144,10 @@ export interface CursorAgentApi {
 
 export interface CursorSdkAdapter {
   /** Probe whether the SDK is importable. Cheap and idempotent. */
-  available(): Promise<{ ok: true; modulePath: string | null } | { ok: false; reason: string }>;
+  available(): Promise<
+    | { ok: true; modulePath: string | null }
+    | { ok: false; reason: string; modulePath?: string | null }
+  >;
   /** Resolve the live SDK Agent API. Throws if `available()` returns `ok: false`. */
   loadAgentApi(): Promise<CursorAgentApi>;
 }
@@ -168,13 +171,20 @@ export function defaultCursorSdkAdapter(options: CursorSdkAdapterOptions = {}): 
     ?? (async () => (await import(/* @vite-ignore */ CURSOR_SDK_PACKAGE)) as Record<string, unknown>);
   const pathResolver = options.resolveModulePath ?? resolveModulePath;
 
-  const importSdk = async (): Promise<{ ok: true; module: Record<string, unknown>; path: string | null } | { ok: false; reason: string }> => {
+  const importSdk = async (): Promise<
+    | { ok: true; module: Record<string, unknown>; path: string | null }
+    | { ok: false; reason: string; resolvedPath: string | null }
+  > => {
+    // Probe resolution before import so a resolvable-but-broken SDK (e.g. native
+    // `sqlite3` binding missing for the current Node) is distinguishable from a
+    // missing package. The runtime uses `resolvedPath` to pick the right hint.
+    const path = pathResolver();
     try {
       const mod = await loadModule();
-      const path = pathResolver();
       return { ok: true, module: mod, path };
     } catch (error) {
-      return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+      const reason = error instanceof Error ? error.message : String(error);
+      return { ok: false, reason, resolvedPath: path };
     }
   };
 
@@ -183,14 +193,14 @@ export function defaultCursorSdkAdapter(options: CursorSdkAdapterOptions = {}): 
       if (state.available) return state.available;
       const result = await importSdk();
       if (!result.ok) {
-        state.available = { ok: false, reason: result.reason };
+        state.available = { ok: false, reason: result.reason, modulePath: result.resolvedPath };
         return state.available;
       }
       try {
         state.agentApi = extractAgentApi(result.module);
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
-        state.available = { ok: false, reason };
+        state.available = { ok: false, reason, modulePath: result.path };
         return state.available;
       }
       state.available = { ok: true, modulePath: result.path };
@@ -200,6 +210,7 @@ export function defaultCursorSdkAdapter(options: CursorSdkAdapterOptions = {}): 
       if (state.agentApi) return state.agentApi;
       const result = await importSdk();
       if (!result.ok) {
+        state.available = { ok: false, reason: result.reason, modulePath: result.resolvedPath };
         throw new Error(`@cursor/sdk is not installed: ${result.reason}`);
       }
       let api: CursorAgentApi;
@@ -207,7 +218,7 @@ export function defaultCursorSdkAdapter(options: CursorSdkAdapterOptions = {}): 
         api = extractAgentApi(result.module);
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
-        state.available = { ok: false, reason };
+        state.available = { ok: false, reason, modulePath: result.path };
         throw error;
       }
       state.available = { ok: true, modulePath: result.path };

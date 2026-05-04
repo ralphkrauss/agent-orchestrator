@@ -50,6 +50,33 @@ describe('backend diagnostics', () => {
     restoreEnv('COMSPEC', originalComspec);
   });
 
+  it('reports cursor as installed-but-broken with a rebuild hint when the SDK resolves but import fails', async () => {
+    // Mirrors the Node 24 + sqlite3 native-binding case: the package is on disk
+    // (resolvable), but `import('@cursor/sdk')` throws because sqlite3 has no
+    // prebuilt binding for the current Node ABI.
+    const installedBrokenAdapter = {
+      available: async () => ({
+        ok: false as const,
+        reason: 'Could not locate the bindings file for sqlite3 (Node ABI 137)',
+        modulePath: '/fake/node_modules/@cursor/sdk/dist/index.js',
+      }),
+      loadAgentApi: async () => { throw new Error('Could not locate the bindings file for sqlite3 (Node ABI 137)'); },
+    };
+    const root = await mkdtemp(join(tmpdir(), 'agent-diag-broken-'));
+    process.env.PATH = join(root, 'missing-bin');
+
+    const report = await getBackendStatus({ cursorSdkAdapter: installedBrokenAdapter });
+    const cursor = report.backends.find((backend) => backend.name === 'cursor');
+    assert.ok(cursor, 'expected cursor backend in report');
+    assert.equal(cursor.status, 'missing');
+    assert.equal(cursor.path, '/fake/node_modules/@cursor/sdk/dist/index.js');
+    assert.ok(cursor.checks.some((check) => check.name === '@cursor/sdk module resolvable' && !check.ok));
+    assert.equal(cursor.hints.length, 1);
+    assert.match(cursor.hints[0]!, /pnpm rebuild @cursor\/sdk/);
+    assert.match(cursor.hints[0]!, /\/fake\/node_modules\/@cursor\/sdk\/dist\/index\.js/);
+    assert.match(cursor.hints[0]!, /sqlite3/i);
+  });
+
   it('reports missing backend binaries without failing the whole report', async () => {
     const root = await mkdtemp(join(tmpdir(), 'agent-diag-missing-'));
     process.env.PATH = join(root, 'missing-bin');

@@ -42,6 +42,22 @@ pnpm verify
 
 `pnpm verify` builds, tests, checks publish readiness, resolves the npm dist-tag, audits production dependencies, and runs `npm pack --dry-run`.
 
+### `pnpm.overrides` policy for `@cursor/sdk` transitives
+
+`package.json` carries a `pnpm.overrides` block that pins the following
+transitives so `pnpm audit --prod` clears the release gate:
+
+| Override | Reason |
+|---|---|
+| `tar` `^7.5.11` | Six high-severity advisories pulled in via `@cursor/sdk > sqlite3 > tar` (GHSA-34x7-hfp2-rc4v, GHSA-8qq5-rm4j-mr97, GHSA-83g3-92jg-28cx, GHSA-qffp-2rhf-9h96, GHSA-9ppj-qmqm-q256, GHSA-r6q2-hw4h-h46w) |
+| `undici` `^6.24.0` | Two high + three moderate advisories pulled in via `@cursor/sdk > @connectrpc/connect-node > undici` (GHSA-g9mf-h72j-4rw9, GHSA-2mjp-6q6p-2qxm, GHSA-4992-7rv2-5pvq, GHSA-vrm6-8vpv-qv8q, GHSA-v9p9-hfj2-hcw8) |
+| `@tootallnate/once` `^3.0.1` | Low-severity GHSA-vpq2-c234-7xj6 pulled in transitively via `@cursor/sdk` |
+
+Revisit these overrides whenever `@cursor/sdk` ships a new minor: the goal is
+for upstream to ship a clean tree so the override block can be removed.
+`@cursor/sdk` is intentionally kept in `optionalDependencies` so the bundled
+install ergonomics for cursor users are preserved.
+
 ## Beta/Test Release
 
 Use this when you want to try the package in real projects without changing what default users get.

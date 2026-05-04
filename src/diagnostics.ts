@@ -243,15 +243,20 @@ async function diagnoseCursorBackend(adapter: CursorSdkAdapter): Promise<Backend
     : { status: 'unknown' as const, hint: authHint };
 
   if (!availability.ok) {
+    const resolvedPath = availability.modulePath ?? null;
+    const installed = resolvedPath !== null;
+    const failureHint = installed
+      ? `${moduleId} resolves at ${resolvedPath} but failed to import — usually a native dependency or Node version mismatch (for example a missing \`sqlite3\` prebuilt binding for the current Node ABI). Try \`pnpm rebuild ${moduleId}\` or reinstalling with native rebuilds (e.g. \`npm install --build-from-source ${moduleId}\`).`
+      : installHint;
     return {
       name: 'cursor',
       binary: moduleId,
       status: 'missing',
-      path: null,
+      path: resolvedPath,
       version: null,
       auth,
       checks: [{ name: `${moduleId} module resolvable`, ok: false, message: availability.reason }],
-      hints: [installHint],
+      hints: [failureHint],
     };
   }
 
