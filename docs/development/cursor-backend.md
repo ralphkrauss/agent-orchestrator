@@ -25,15 +25,29 @@ build failures), the daemon stays online for `codex` and `claude` users; the
 
 ## Authenticate
 
-The SDK reads `CURSOR_API_KEY` from the daemon environment. Generate an API key
-in the Cursor Dashboard → Integrations and export it before launching the
-daemon:
+The SDK reads `CURSOR_API_KEY` from the daemon process environment. Two
+supported sources, in precedence order:
+
+1. `process.env.CURSOR_API_KEY` (export it in the shell that starts the
+   daemon, or in the systemd / launchd unit).
+2. `~/.config/agent-orchestrator/secrets.env`, populated via
+   `agent-orchestrator auth cursor`. The daemon loads this file at startup
+   into its `process.env` without overriding existing values.
 
 ```bash
+# Either:
 export CURSOR_API_KEY=cur_...
+# Or:
+agent-orchestrator auth cursor      # interactive (TTY)
+agent-orchestrator auth cursor --from-env
 ```
 
-`get_backend_status` flags missing auth as `auth_unknown` with a hint.
+See [`auth-setup.md`](auth-setup.md) for the full auth setup flow, file
+format, permission rules, and the per-provider `auth status` reporting.
+
+`get_backend_status` flags missing auth as `auth_unknown` with a hint and
+identifies the source as `(CURSOR_API_KEY, env)` or
+`(CURSOR_API_KEY, file: <path>)` when set.
 
 ## Scope
 

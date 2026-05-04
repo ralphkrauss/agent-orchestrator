@@ -8,6 +8,7 @@ import { defaultCursorSdkAdapter, type CursorSdkAdapter } from './backend/cursor
 import { daemonPaths } from './daemon/paths.js';
 import { prepareWorkerSpawn } from './processManager.js';
 import { getPackageVersion } from './packageMetadata.js';
+import { loadUserSecrets, type LoadedSecrets } from './auth/userSecrets.js';
 
 const execFileAsync = promisify(execFile);
 const commandTimeoutMs = 2_000;
@@ -74,9 +75,14 @@ export async function getBackendStatus(options: BackendStatusOptions = {}): Prom
   const runStore = await checkRunStore(paths.home);
   const platform = options.platform ?? process.platform;
   const posixSupported = platform !== 'win32';
+  // Only probe the secrets file when env precedence cannot already answer for
+  // every wired provider. Env always wins, so when CURSOR_API_KEY is set the
+  // file is irrelevant to the diagnostic and a misconfigured path must not
+  // crash `doctor`.
+  const secrets = process.env.CURSOR_API_KEY ? null : loadUserSecrets({ platform });
   const cliBackends = await Promise.all(definitions.map((definition) => diagnoseBackend(definition, platform)));
   const cursorAdapter = options.cursorSdkAdapter ?? defaultCursorSdkAdapter();
-  const cursorBackend = await diagnoseCursorBackend(cursorAdapter);
+  const cursorBackend = await diagnoseCursorBackend(cursorAdapter, secrets);
   const backends = [...cliBackends, cursorBackend];
   const frontendVersion = options.frontendVersion ?? getPackageVersion();
   const daemonVersion = options.daemonVersion ?? null;
@@ -117,7 +123,7 @@ export function formatBackendStatus(report: BackendStatusReport): string {
     lines.push(`- ${backend.name}: ${backend.status}`);
     if (backend.path) lines.push(`  path: ${backend.path}`);
     if (backend.version) lines.push(`  version: ${backend.version}`);
-    lines.push(`  auth: ${backend.auth.status}${backend.auth.source ? ` (${backend.auth.source})` : ''}`);
+    lines.push(`  auth: ${backend.auth.status}${formatAuthSource(backend.auth)}`);
     if (backend.auth.hint) lines.push(`  auth hint: ${backend.auth.hint}`);
     for (const check of backend.checks) {
       lines.push(`  ${check.ok ? 'ok' : 'fail'}: ${check.name}${check.message ? ` - ${check.message}` : ''}`);
@@ -233,14 +239,34 @@ async function runCommand(binaryPath: string, args: string[], platform: NodeJS.P
   }
 }
 
-async function diagnoseCursorBackend(adapter: CursorSdkAdapter): Promise<BackendDiagnostic> {
+function formatAuthSource(auth: BackendDiagnostic['auth']): string {
+  if (!auth.source) return '';
+  if (auth.source_kind === 'env') return ` (${auth.source}, env)`;
+  if (auth.source_kind === 'file') {
+    return auth.source_path ? ` (${auth.source}, file: ${auth.source_path})` : ` (${auth.source}, file)`;
+  }
+  return ` (${auth.source})`;
+}
+
+async function diagnoseCursorBackend(adapter: CursorSdkAdapter, secrets: LoadedSecrets | null): Promise<BackendDiagnostic> {
   const moduleId = '@cursor/sdk';
   const installHint = `Install ${moduleId} (it ships as an optional dependency); run \`pnpm add ${moduleId}\` or \`npm install ${moduleId}\`.`;
-  const authHint = 'Set CURSOR_API_KEY in the daemon environment (Cursor Dashboard → Integrations).';
+  const authHint = 'Set CURSOR_API_KEY in the daemon environment, or run `agent-orchestrator auth cursor` to save it to ~/.config/agent-orchestrator/secrets.env.';
   const availability = await adapter.available();
-  const auth = process.env.CURSOR_API_KEY
-    ? { status: 'ready' as const, source: 'CURSOR_API_KEY' }
-    : { status: 'unknown' as const, hint: authHint };
+  const envValue = process.env.CURSOR_API_KEY;
+  const fileValue = secrets?.values.CURSOR_API_KEY;
+  const auth: BackendDiagnostic['auth'] = envValue
+    ? { status: 'ready', source: 'CURSOR_API_KEY', source_kind: 'env' }
+    : fileValue && secrets
+      ? { status: 'ready', source: 'CURSOR_API_KEY', source_kind: 'file', source_path: secrets.path }
+      : { status: 'unknown', hint: authHint };
+
+  // Auth-related hints are surfaced regardless of SDK availability so a
+  // misconfigured `secrets.env` is not hidden behind an SDK install hint.
+  // Permission/read failures only matter when env is unset (env wins).
+  const authHints: string[] = [];
+  if (auth.status !== 'ready') authHints.push(authHint);
+  if (!envValue && secrets?.refusal) authHints.push(secrets.refusal.hint);
 
   if (!availability.ok) {
     const resolvedPath = availability.modulePath ?? null;
@@ -256,14 +282,12 @@ async function diagnoseCursorBackend(adapter: CursorSdkAdapter): Promise<Backend
       version: null,
       auth,
       checks: [{ name: `${moduleId} module resolvable`, ok: false, message: availability.reason }],
-      hints: [failureHint],
+      hints: [failureHint, ...authHints],
     };
   }
 
   const checks = [{ name: `${moduleId} module resolvable`, ok: true, message: availability.modulePath ?? undefined }];
   const status = auth.status === 'ready' ? 'available' : 'auth_unknown';
-  const hints: string[] = [];
-  if (auth.status !== 'ready') hints.push(authHint);
   return {
     name: 'cursor',
     binary: moduleId,
@@ -272,7 +296,7 @@ async function diagnoseCursorBackend(adapter: CursorSdkAdapter): Promise<Backend
     version: null,
     auth,
     checks,
-    hints,
+    hints: authHints,
   };
 }
 

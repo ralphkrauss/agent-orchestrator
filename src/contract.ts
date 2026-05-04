@@ -114,6 +114,8 @@ export const BackendDiagnosticSchema = z.object({
   auth: z.object({
     status: z.enum(['ready', 'unknown', 'failed']),
     source: z.string().optional(),
+    source_kind: z.enum(['env', 'file']).optional(),
+    source_path: z.string().optional(),
     hint: z.string().optional(),
   }),
   checks: z.array(z.object({

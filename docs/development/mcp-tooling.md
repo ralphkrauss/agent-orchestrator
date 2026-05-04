@@ -47,6 +47,11 @@ The local `gh auth token` fallback means a machine that already has `gh auth
 login` configured can usually use these MCP servers without copying the token
 into the secrets file.
 
+> **Note:** `mcp-secrets.env` is for repo-development MCP tooling only. The
+> daemon does **not** read it. End-user worker auth (e.g. `CURSOR_API_KEY`)
+> belongs in `~/.config/agent-orchestrator/secrets.env`; see
+> [`auth-setup.md`](auth-setup.md).
+
 ## Client Setup
 
 Claude Code reads:

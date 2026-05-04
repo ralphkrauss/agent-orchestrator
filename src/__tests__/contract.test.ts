@@ -66,6 +66,37 @@ describe('contract schemas and envelopes', () => {
     });
   });
 
+  it('parses BackendDiagnostic with the additive auth.source_kind / source_path fields', () => {
+    const parsed = BackendStatusReportSchema.parse({
+      frontend_version: '0.1.6',
+      daemon_version: '0.1.6',
+      version_match: true,
+      daemon_pid: 123,
+      platform: 'linux',
+      node_version: 'v22.0.0',
+      posix_supported: true,
+      run_store: { path: '/home/test/.agent-orchestrator', accessible: true },
+      backends: [{
+        name: 'cursor',
+        binary: '@cursor/sdk',
+        status: 'available',
+        path: '/cursor-sdk',
+        version: null,
+        auth: {
+          status: 'ready',
+          source: 'CURSOR_API_KEY',
+          source_kind: 'file',
+          source_path: '/home/test/.config/agent-orchestrator/secrets.env',
+        },
+        checks: [],
+        hints: [],
+      }],
+    });
+    const cursor = parsed.backends[0]!;
+    assert.equal(cursor.auth.source_kind, 'file');
+    assert.equal(cursor.auth.source_path, '/home/test/.config/agent-orchestrator/secrets.env');
+  });
+
   it('rejects malformed worker result status', () => {
     assert.throws(() => WorkerResultSchema.parse({
       status: 'cancelled',
