@@ -145,9 +145,17 @@ runs and does not directly edit source, commit, or push.
 
 Escalate only when implementation is blocked by something the plan and
 repository context cannot resolve, such as a required product/scope decision,
-permission or dependency approval, external-service write, persistent failing
-quality gate that changes acceptance, or an irreconcilable material disagreement
-between implementer and reviewer.
+permission or dependency-change approval, external-service write, persistent
+failing quality gate that changes acceptance, or an irreconcilable material
+disagreement between implementer and reviewer.
+
+Do **not** escalate merely to run existing repository setup, build, test, or
+verification commands such as `pnpm install --frozen-lockfile`, `pnpm build`,
+`pnpm test`, or `pnpm verify`. Those commands are normal implementation
+management when they use the repository's existing lockfile/scripts and do not
+add, remove, or change dependencies. Escalate only if a worker needs to modify
+dependency manifests/lockfiles, install a new dependency, publish, run an
+external-service write, or change the planned acceptance criteria.
 
 When a release-quality gate fails because of a dependency, audit, packaging, or
 policy issue, treat it as an open human decision unless the approved plan already

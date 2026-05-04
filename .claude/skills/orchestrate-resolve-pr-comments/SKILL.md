@@ -43,14 +43,16 @@ GitHub replies. The resolution map drives implementation and final replies.
      hidden correlation markers;
    - independently verify AI reviewer comments against the code;
    - create or update `plans/{branch-name}/resolution-map.md`;
+   - override any interactive "one comment at a time" behavior in the base
+     workflow: triage every actionable comment in one pass, do not stop after
+     each comment, and do not ask the human questions during initial triage;
    - make routine decisions itself when safe: fix as suggested, obvious
      alternative fix, decline incorrect comments with rationale, defer clearly
      out-of-scope polish, or mark follow-up issue candidates without creating
      issues yet;
-   - **short-circuit with human questions** only for true decisions: product or
-     scope changes, requested behavior changes, plan/acceptance ambiguity,
-     security or release policy, dependency/external-service approval, creating
-     follow-up issues, or comments that invalidate the approved plan;
+   - collect unresolved uncertainties as **Reviewer Questions** in the
+     resolution map instead of asking the human directly; reserve **Open Human
+     Decisions** only for questions that remain after reviewer review;
    - treat verified bugs, regressions, test gaps, and plan-compliance gaps that
      are within the PR's approved scope as fix items by default, even when the
      fix is non-trivial;
@@ -65,18 +67,28 @@ GitHub replies. The resolution map drives implementation and final replies.
    - human-escalation items are correctly identified;
    - implementation approaches and files-to-change are complete enough;
    - reply drafts are accurate and safe;
-   - the map has a final **Open Human Decisions** section.
+   - answer or resolve the map's **Reviewer Questions** when repository context,
+     approved plans, existing behavior, or reviewer judgment is sufficient;
+   - promote only true unresolved decisions to the final **Open Human
+     Decisions** section: product or scope changes, requested behavior changes,
+     plan/acceptance ambiguity, security or release policy,
+     dependency/external-service approval, creating follow-up issues, comments
+     that invalidate the approved plan, or material reviewer/triage
+     disagreement;
+   - the map has final **Reviewer Questions** and **Open Human Decisions**
+     sections, using `none` when empty.
 4. **Iterate triage/reviewer.** Send reviewer feedback to the existing triage
    session with `send_followup`; then ask the existing map reviewer to re-review.
    Continue until the reviewer says the map is ready for the human-decision
    checkpoint, or ready for implementation when no open human decisions remain.
-5. **Ask human decisions in one batch.** If the map contains open human
-   decisions, present them as a numbered list with options and consequences.
-   Bundle decisions instead of interrupting after each comment. Include proposed
-   follow-up issue creation/escalation because creating issues is an external
-   write that requires human approval. Do not continue to implementation until
-   the human answers or explicitly defers each decision. If none remain, record
-   `Open Human Decisions: none`.
+5. **Ask remaining human decisions in one batch.** After the reviewer has
+   answered or resolved all reviewer-answerable questions, present only the
+   remaining **Open Human Decisions** as a numbered list with options and
+   consequences. Bundle decisions instead of interrupting after each comment.
+   Include proposed follow-up issue creation/escalation because creating issues
+   is an external write that requires human approval. Do not continue to
+   implementation until the human answers or explicitly defers each decision. If
+   none remain, record `Open Human Decisions: none`.
 6. **Start implementation as a fresh run.** Start `implementation` with the
    approved resolution map, PR identifier, branch, and repo instructions. Ask it
    to implement only approved fix actions from the map, skip deferred/declined
@@ -117,23 +129,29 @@ GitHub replies. The resolution map drives implementation and final replies.
 
 ## Follow-Up Prompts
 
-- Triage: "Use the repository `resolve-pr-comments` skill. Fetch unresolved PR
-  comments, independently assess them, and create/update the resolution map.
-  Make routine decisions yourself when safe. Stop and return a numbered human
-  decision list only for product/scope, requested behavior changes,
-  security/release, dependency/external-service, follow-up issue creation, or
-  plan-invalidating decisions. Do not escalate verified in-scope bugs,
-  regressions, test gaps, or plan-compliance gaps just because the fix is
-  non-trivial; mark them as fix items. Do not edit code, commit, push, or post
-  replies."
+- Triage: "Use the repository `resolve-pr-comments` skill, but override its
+  interactive one-comment-at-a-time loop. Fetch unresolved PR comments,
+  independently assess every actionable comment in one pass, and create/update
+  the resolution map. Do not ask the human questions during triage. Make routine
+  decisions yourself when safe. Put unresolved uncertainties in a Reviewer
+  Questions section for the resolution-map reviewer to answer first, not in a
+  human prompt. Do not escalate verified in-scope bugs, regressions, test gaps,
+  or plan-compliance gaps just because the fix is non-trivial; mark them as fix
+  items. Include final Reviewer Questions and Open Human Decisions sections,
+  using `none` when empty. Do not edit code, commit, push, or post replies."
 - Resolution-map review: "Review the resolution map against the PR comments and
   code. Check completeness, decisions, human escalations, implementation
   instructions, and reply drafts. Verify that in-scope bugs and plan-compliance
-  gaps are not incorrectly escalated to the human merely because they require a
-  larger fix. Report blocking findings first and say whether the map is ready."
+  gaps are not incorrectly escalated merely because they require a larger fix.
+  Answer every Reviewer Question you can from repository context, approved
+  plans, existing behavior, and reviewer judgment. Promote only true unresolved
+  product/scope, behavior, policy, dependency/external-write, issue-creation,
+  plan-invalidating, or material disagreement questions to Open Human Decisions.
+  Report blocking findings first and say whether the map is ready."
 - Map feedback to triage: "Address the resolution-map reviewer feedback in this
-  existing triage session. Update the map and report what changed plus any Open
-  Human Decisions."
+  existing triage session. Update the map, incorporate reviewer answers to
+  Reviewer Questions, and report what changed plus any remaining Reviewer
+  Questions and Open Human Decisions."
 - Implementation: "Implement only approved fix actions from the final resolution
   map. Skip deferred/declined items. Update evidence, run verification, and
   report changed files, results, risks, and blockers. Do not commit, push, or
@@ -172,9 +190,10 @@ Routine code fixes, obvious alternatives, verified in-scope bugs, and incorrect
 comments should be handled by the workers and recorded in the resolution map.
 
 Do not interrupt the flow for each individual decision unless continuing would
-cause wasted work or unsafe changes. Prefer collecting all open human decisions
-into the resolution map and asking the human in one bundled checkpoint before
-implementation.
+cause wasted work or unsafe changes. Prefer collecting all uncertainties into
+the resolution map as Reviewer Questions, having the resolution-map reviewer
+answer them first, then asking the human only the remaining Open Human Decisions
+in one bundled checkpoint before implementation.
 
 ## Critical Rules
 
@@ -182,5 +201,9 @@ implementation.
 - Do not post replies or resolve threads before fixes are committed and pushed.
 - The responder may post/resolve automatically after push only according to the
   approved final resolution map.
+- Initial triage must not use one-comment-at-a-time human interaction; it should
+  triage all comments and batch uncertainties for reviewer review.
+- The resolution-map reviewer should answer reviewer-answerable questions before
+  any human decision checkpoint.
 - Always include a final **Open Human Decisions** section. If none remain, say
   `Open Human Decisions: none.`
