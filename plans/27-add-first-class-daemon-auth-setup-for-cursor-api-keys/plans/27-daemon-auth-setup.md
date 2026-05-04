@@ -4,7 +4,7 @@ Branch: `27-add-first-class-daemon-auth-setup-for-cursor-api-keys`
 Plan Slug: `27-daemon-auth-setup`
 Parent Issue: #27
 Created: 2026-05-04
-Status: planning
+Status: complete
 
 ## Context
 
@@ -157,16 +157,16 @@ reserved entries prints the "use CLI auth flow" notice and exits 2.
 
 | Task ID | Title | Depends On | Status | Acceptance Criteria |
 |---|---|---|---|---|
-| T1 | Add user-secrets loader/saver module | — | pending | `src/auth/userSecrets.ts` exports `loadUserSecrets(opts?)`, `loadUserSecretsIntoEnv(env, opts?)`, `saveUserSecret(provider, key, value, opts?)`, `unsetUserSecret(provider, key, opts?)`, `resolveSecretsPath(env?)`. POSIX perm check refuses to load when `mode & 0o077 != 0`. Atomic write via tmp+rename at `0o600`. Comments and ordering preserved. Honors `AGENT_ORCHESTRATOR_SECRETS_FILE` override. Unit tests in `src/__tests__/userSecrets.test.ts` cover parse, save, unset, perm refusal, env override. |
-| T2 | Add provider auth registry | — | pending | `src/auth/providers.ts` exports `AUTH_PROVIDERS` (typed table) and `getProvider(id)`. Cursor entry wired with `validate()` per D4. Claude/Codex entries marked `status: 'reserved'`. Unit tests in `src/__tests__/authProviders.test.ts` cover `validate()` boundaries. |
-| T3 | Add interactive masked prompt helper | — | pending | `src/auth/prompt.ts` exports `promptSecret(question)` that returns a Promise<string>. Refuses to run when `process.stdin.isTTY` or `process.stdout.isTTY` is false (throws a typed error). Echo is suppressed. No new dependency. |
-| T4 | Add `auth` CLI dispatcher | T1, T2, T3 | pending | `src/auth/authCli.ts` exports `runAuthCli(argv)` handling `status [--json]`, `<provider>`, `<provider> --from-env` (reads provider's `primaryEnvVar`), `<provider> --from-env VAR` (reads exactly `VAR`; missing/empty is a hard failure with exit 1), `<provider> --from-stdin`, `unset <provider>`. Returns numeric exit code. Reserved providers exit 2 with the documented message. After successful save/unset prints the two-line daemon-restart hint per D10. |
-| T5 | Wire `auth` into `cli.ts` and `daemonCli.ts` | T4 | pending | `agent-orchestrator auth …` and `agent-orchestrator-daemon auth …` both dispatch to `runAuthCli`. Help text updated in both. `isDaemonCliCommand` recognizes `auth`. Tests in `src/__tests__/authCli.test.ts` cover all subcommand happy/sad paths and JSON shape of `auth status`. |
-| T6 | Daemon-side secrets load on startup | T1 | pending | (a) Extract `daemonMain.ts`'s `main()` into `src/daemon/bootDaemon.ts` exporting `bootDaemon(options)` per D15; the entry script becomes a thin wrapper. (b) Add an optional second parameter to `createBackendRegistry(store, options?)` to accept `{ cursorSdkAdapter? }`; production callers pass nothing. (c) `bootDaemon` calls `options.loadSecrets ?? loadUserSecretsIntoEnv` against `process.env` before constructing the registry. Existing `process.env` keys are not overwritten. Load failures (parse, perms, missing file) are caught and routed through `log()`; daemon does not crash. (d) New `daemonAuthLoad.test.ts` invokes `bootDaemon` **in-process** with a fake `CursorSdkAdapter` that records the `apiKey` passed to `Agent.create`, then issues a `start_run` over the (in-process) IPC server and asserts: file-only case → captured `apiKey` equals the file's value; env-set + file case → captured `apiKey` equals the env sentinel (file value is *not* used). The test does not require `@cursor/sdk` to be installed — that's the whole point of the fake adapter. The shipping daemon entry script is unchanged externally. |
-| T7 | Effective-auth in `getBackendStatus()` + doctor source identification | T1 | pending | (a) `BackendDiagnosticSchema.auth` gains optional `source_kind: 'env' \| 'file'` and `source_path: string` (D5); `contract.test.ts` updated to assert existing payloads still parse and the new fields parse when present. (b) `getBackendStatus()` builds a read-only "effective env" by overlaying `loadUserSecrets()` onto `process.env` with `process.env` winning (D14); it does **not** mutate `process.env`. (c) `diagnoseCursorBackend` populates `auth.source_kind`/`auth.source_path` based on whether `CURSOR_API_KEY` came from env vs file (env wins → `'env'`, file-only → `'file'`). (d) Permission failures respect env precedence (D14): when env is set, the file is irrelevant — `auth.status: ready`, `source_kind: 'env'`, no chmod hint. When env is absent and the file is permission-blocked, `auth.status: unknown` and a single non-secret chmod hint is added to `hints[]`. The doctor exits successfully in all cases. (e) `formatBackendStatus` renders `auth: ready (CURSOR_API_KEY, env)` or `auth: ready (CURSOR_API_KEY, file: <path>)`. Tests in `diagnostics.test.ts` cover all five matrix cases listed in D11(iv). |
-| T8 | Precedence + missing-key tests | T1, T2, T6 | pending | Tests assert: (a) env-var present + file present → env wins; the doctor reports `source_kind: 'env'` and the file value is *not* used by the runtime. (b) env-var absent + file present → file wins; daemon `loadUserSecretsIntoEnv` populates `CURSOR_API_KEY` and the run starts; doctor reports `source_kind: 'file'`. (c) both absent → backend stays `auth_unknown`; the runtime emits the **existing** failure shape unchanged: `code: 'SPAWN_FAILED'`, `details: { binary: '@cursor/sdk', auth_env: 'CURSOR_API_KEY', category: 'auth', retryable: false, install_hint: ... }` (per `src/backend/cursor/runtime.ts:104`). This plan does **not** change that failure shape; T8 only asserts it is preserved. (Plan-review finding #3, 2026-05-04: the earlier draft mis-cited `WORKER_BINARY_MISSING`, which is what the SDK-not-installed path returns, not the missing-auth path.) |
-| T9 | Docs | T4, T5, T6 | pending | New `docs/development/auth-setup.md` with the flows, format, permissions, warnings, and precedence. README links to it from the prerequisites section. `docs/development/cursor-backend.md` updates the `CURSOR_API_KEY` section to point at the auth-setup doc. `docs/development/mcp-tooling.md` adds a one-line note that `mcp-secrets.env` is repo-dev-only and not loaded by the daemon. |
-| T10 | Release-quality verification | all | pending | `pnpm build`, `pnpm test`, `pnpm verify` all run; record their outputs. Note any pre-existing audit/upstream issue (e.g. `@cursor/sdk` advisories noted in plan #16) without bypassing it. |
+| T1 | Add user-secrets loader/saver module | — | done | `src/auth/userSecrets.ts` exports `loadUserSecrets(opts?)`, `loadUserSecretsIntoEnv(env, opts?)`, `saveUserSecret(provider, key, value, opts?)`, `unsetUserSecret(provider, key, opts?)`, `resolveSecretsPath(env?)`. POSIX perm check refuses to load when `mode & 0o077 != 0`. Atomic write via tmp+rename at `0o600`. Comments and ordering preserved. Honors `AGENT_ORCHESTRATOR_SECRETS_FILE` override. Unit tests in `src/__tests__/userSecrets.test.ts` cover parse, save, unset, perm refusal, env override. |
+| T2 | Add provider auth registry | — | done | `src/auth/providers.ts` exports `AUTH_PROVIDERS` (typed table) and `getProvider(id)`. Cursor entry wired with `validate()` per D4. Claude/Codex entries marked `status: 'reserved'`. Unit tests in `src/__tests__/authProviders.test.ts` cover `validate()` boundaries. |
+| T3 | Add interactive masked prompt helper | — | done | `src/auth/prompt.ts` exports `promptSecret(question)` that returns a Promise<string>. Refuses to run when `process.stdin.isTTY` or `process.stdout.isTTY` is false (throws a typed error). Echo is suppressed. No new dependency. |
+| T4 | Add `auth` CLI dispatcher | T1, T2, T3 | done | `src/auth/authCli.ts` exports `runAuthCli(argv)` handling `status [--json]`, `<provider>`, `<provider> --from-env` (reads provider's `primaryEnvVar`), `<provider> --from-env VAR` (reads exactly `VAR`; missing/empty is a hard failure with exit 1), `<provider> --from-stdin`, `unset <provider>`. Returns numeric exit code. Reserved providers exit 2 with the documented message. After successful save/unset prints the two-line daemon-restart hint per D10. |
+| T5 | Wire `auth` into `cli.ts` and `daemonCli.ts` | T4 | done | `agent-orchestrator auth …` and `agent-orchestrator-daemon auth …` both dispatch to `runAuthCli`. Help text updated in both. `isDaemonCliCommand` recognizes `auth`. Tests in `src/__tests__/authCli.test.ts` cover all subcommand happy/sad paths and JSON shape of `auth status`. |
+| T6 | Daemon-side secrets load on startup | T1 | done | (a) Extract `daemonMain.ts`'s `main()` into `src/daemon/bootDaemon.ts` exporting `bootDaemon(options)` per D15; the entry script becomes a thin wrapper. (b) Add an optional second parameter to `createBackendRegistry(store, options?)` to accept `{ cursorSdkAdapter? }`; production callers pass nothing. (c) `bootDaemon` calls `options.loadSecrets ?? loadUserSecretsIntoEnv` against `process.env` before constructing the registry. Existing `process.env` keys are not overwritten. Load failures (parse, perms, missing file) are caught and routed through `log()`; daemon does not crash. (d) New `daemonAuthLoad.test.ts` invokes `bootDaemon` **in-process** with a fake `CursorSdkAdapter` that records the `apiKey` passed to `Agent.create`, then issues a `start_run` over the (in-process) IPC server and asserts: file-only case → captured `apiKey` equals the file's value; env-set + file case → captured `apiKey` equals the env sentinel (file value is *not* used). The test does not require `@cursor/sdk` to be installed — that's the whole point of the fake adapter. The shipping daemon entry script is unchanged externally. |
+| T7 | Effective-auth in `getBackendStatus()` + doctor source identification | T1 | done | (a) `BackendDiagnosticSchema.auth` gains optional `source_kind: 'env' \| 'file'` and `source_path: string` (D5); `contract.test.ts` updated to assert existing payloads still parse and the new fields parse when present. (b) `getBackendStatus()` builds a read-only "effective env" by overlaying `loadUserSecrets()` onto `process.env` with `process.env` winning (D14); it does **not** mutate `process.env`. (c) `diagnoseCursorBackend` populates `auth.source_kind`/`auth.source_path` based on whether `CURSOR_API_KEY` came from env vs file (env wins → `'env'`, file-only → `'file'`). (d) Permission failures respect env precedence (D14): when env is set, the file is irrelevant — `auth.status: ready`, `source_kind: 'env'`, no chmod hint. When env is absent and the file is permission-blocked, `auth.status: unknown` and a single non-secret chmod hint is added to `hints[]`. The doctor exits successfully in all cases. (e) `formatBackendStatus` renders `auth: ready (CURSOR_API_KEY, env)` or `auth: ready (CURSOR_API_KEY, file: <path>)`. Tests in `diagnostics.test.ts` cover all five matrix cases listed in D11(iv). |
+| T8 | Precedence + missing-key tests | T1, T2, T6 | done | Tests assert: (a) env-var present + file present → env wins; the doctor reports `source_kind: 'env'` and the file value is *not* used by the runtime. (b) env-var absent + file present → file wins; daemon `loadUserSecretsIntoEnv` populates `CURSOR_API_KEY` and the run starts; doctor reports `source_kind: 'file'`. (c) both absent → backend stays `auth_unknown`; the runtime emits the **existing** failure shape unchanged: `code: 'SPAWN_FAILED'`, `details: { binary: '@cursor/sdk', auth_env: 'CURSOR_API_KEY', category: 'auth', retryable: false, install_hint: ... }` (per `src/backend/cursor/runtime.ts:104`). This plan does **not** change that failure shape; T8 only asserts it is preserved. (Plan-review finding #3, 2026-05-04: the earlier draft mis-cited `WORKER_BINARY_MISSING`, which is what the SDK-not-installed path returns, not the missing-auth path.) |
+| T9 | Docs | T4, T5, T6 | done | New `docs/development/auth-setup.md` with the flows, format, permissions, warnings, and precedence. README links to it from the prerequisites section. `docs/development/cursor-backend.md` updates the `CURSOR_API_KEY` section to point at the auth-setup doc. `docs/development/mcp-tooling.md` adds a one-line note that `mcp-secrets.env` is repo-dev-only and not loaded by the daemon. |
+| T10 | Release-quality verification | all | done | `pnpm build`, `pnpm test`, `pnpm verify` all run; record their outputs. Note any pre-existing audit/upstream issue (e.g. `@cursor/sdk` advisories noted in plan #16) without bypassing it. |
 
 ## Rule Candidates
 
@@ -207,51 +207,62 @@ reserved entries prints the "use CLI auth flow" notice and exits 2.
 ## Execution Log
 
 ### T1: Add user-secrets loader/saver module
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done
+- **Evidence:** `src/auth/userSecrets.ts`; tests `src/__tests__/userSecrets.test.ts` (parse, atomic save, perm refusal, comment/order preservation, unset, env override).
+- **Notes:** Atomic `tmp + rename` at `0o600`; parent dir `0o700`; POSIX perm-check refuses `mode & 0o077 != 0`; Windows skips perm check; honors `AGENT_ORCHESTRATOR_SECRETS_FILE`.
 
 ### T2: Add provider auth registry
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done
+- **Evidence:** `src/auth/providers.ts`; tests `src/__tests__/authProviders.test.ts` (cursor `validate()` boundaries, reserved provider markers).
+- **Notes:** Cursor `validate()` enforces 16–512 chars, charset `[A-Za-z0-9_\-:.]`, no whitespace. Claude/Codex marked `status: 'reserved'`.
 
 ### T3: Add interactive masked prompt helper
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done
+- **Evidence:** `src/auth/prompt.ts` exporting `promptSecret` and `PromptNotInteractiveError`; covered indirectly by `authCli.test.ts` non-TTY rejection path.
+- **Notes:** Uses `node:readline` with a muted writable that swallows everything except `\r`/`\n`. Refuses to run when stdin/stdout are not TTY.
 
 ### T4: Add `auth` CLI dispatcher
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done
+- **Evidence:** `src/auth/authCli.ts`; tests `src/__tests__/authCli.test.ts` (status JSON shape, `--from-env`, `--from-env VAR`, missing-VAR failure, `--from-stdin`, validation refusal, non-TTY rejection, `unset` paths, reserved providers exit 2).
+- **Notes:** Two-line restart hint after every save/unset. Reserved providers exit 2. `--from-env VAR` is authoritative — never falls back.
 
 ### T5: Wire `auth` into `cli.ts` and `daemonCli.ts`
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done
+- **Evidence:** `src/cli.ts` adds `auth` branch; `src/daemon/daemonCli.ts` adds `'auth'` to `daemonCommands` and dispatches to `runAuthCli`. Help text updated in both. Smoke: `node dist/cli.js auth --help` and `auth status --json` exit 0 with expected output.
+- **Notes:** Daemon CLI calls `process.exit(exit)` on non-zero auth exit so reserved-provider exit 2 propagates.
 
 ### T6: Daemon-side secrets load on startup
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done
+- **Evidence:** `src/daemon/bootDaemon.ts` (extracted from `daemonMain.ts`); `createBackendRegistry(store, options?)` already supports `cursorAdapter` test injection. `daemonAuthLoad.test.ts` boots in-process with a fake `CursorSdkAdapter` and asserts the captured `apiKey`: file-only case → file value; env+file → env sentinel.
+- **Notes:** Order in `bootDaemon`: `ensureSecureRoot` → `loadUserSecretsIntoEnv` (env wins) → log summary → acquire pid → IPC. Failures during secrets load are logged and swallowed so the daemon keeps starting. Smoke: `node dist/daemon/daemonMain.js` starts cleanly with the new loader; daemon log records "secrets file ... not present; skipping" when no file.
 
 ### T7: Doctor formatter source identification
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done
+- **Evidence:** `src/contract.ts` (additive `auth.source_kind`/`auth.source_path`); `src/diagnostics.ts` (`getBackendStatus` overlays `loadUserSecrets()` onto `process.env` with env winning, populates fields, renders `(VAR, env)` or `(VAR, file: <path>)` via `formatAuthSource`); `src/__tests__/diagnostics.test.ts` covers all five matrix cases (env-only, file-only, both, perm-blocked file with no env, perm-blocked file with env). `contract.test.ts` asserts the additive parse. Smoke: `agent-orchestrator doctor` renders the source string correctly.
+- **Notes:** Permission-failure noise suppressed when env is set (env wins; file irrelevant).
 
 ### T8: Precedence + missing-key tests
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done
+- **Evidence:** `src/__tests__/authPrecedence.test.ts` asserts (a) SPAWN_FAILED shape unchanged when neither env nor file provides the key (`code='SPAWN_FAILED'`, `details.binary='@cursor/sdk'`, `details.auth_env='CURSOR_API_KEY'`, `details.category='auth'`, `details.retryable=false`, `details.install_hint`); (b) doctor reports `source_kind='file'` when env unset and file set; (c) doctor reports `source_kind='env'` when both are set.
+- **Notes:** Existing `cursorRuntime.test.ts` "classifies a missing CURSOR_API_KEY" continues to assert the run-level `latest_error.category='auth'`.
 
 ### T9: Docs
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done
+- **Evidence:** New `docs/development/auth-setup.md`; README links to it next to the Cursor prerequisites; `docs/development/cursor-backend.md` updated to point at the new flow; `docs/development/mcp-tooling.md` clarifies that `mcp-secrets.env` is repo-dev-only and not loaded by the daemon.
+- **Notes:** Doc explicitly warns against putting secrets in shell profiles, MCP config, or repo files; documents env-wins precedence and the restart-required UX.
 
 ### T10: Release-quality verification
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done
+- **Evidence:** `pnpm verify` succeeds end-to-end after the hardening pass: build OK; tests `287 pass / 0 fail / 1 skipped`; `check-publish-ready`, `resolve-publish-tag`, `pnpm audit --prod` ("No known vulnerabilities found"), and `npm pack --dry-run` all clean. `node scripts/sync-ai-workspace.mjs --check` reports projections in sync.
+- **Notes:** No new dependency. Contract change is additive only (two optional fields on `BackendDiagnostic.auth`).
+
+### Hardening follow-up (review-2026-05-04-hardening-followup)
+- **Finding 1 (`auth status` reserved-provider drift):** `runStatus()` now treats `file_set` as an effective source only when `provider.status === 'wired'`. Reserved-provider rows continue to surface `file_set: true` for drift visibility but report `effective_status: 'unknown'` and `effective_source: null`. Env precedence stays provider-agnostic, so an env-set reserved-provider key still counts as ready. New tests in `authCli.test.ts`: an `ANTHROPIC_API_KEY` file entry leaves claude as `reserved` / `unknown` / `file_set: true`; an env-set `ANTHROPIC_API_KEY` still reads as `effective_source: 'env'`, `ready`.
+- **Finding 2 (cursor refusal hints lost on SDK-missing):** `diagnoseCursorBackend` now builds `authHints` once (auth hint when not ready, plus `secrets.refusal.hint` when env is unset and the file is unreadable) and includes them in *both* the SDK-missing and SDK-available return paths. New test in `diagnostics.test.ts`: SDK missing + secrets file mode 0o644 surfaces both the SDK install hint *and* the chmod hint. The pre-existing "installed-but-broken" test was updated to assert the rebuild hint exists rather than asserting `hints.length === 1`, reflecting that auth hints are no longer hidden behind SDK install hints.
+- **Docs:** `docs/development/auth-setup.md` clarifies reserved-provider drift reporting (file_set without effective backing).
+- **Verify:** `pnpm verify` clean — `290 pass / 0 fail / 1 skipped`, audit clean, npm pack dry-run clean.
+
+### Hardening pass (review-2026-05-04-implementation-hardening)
+- **Finding 1 (allowlisted daemon env injection):** `loadUserSecretsIntoEnv` now accepts `allowedKeys`. `bootDaemon` derives the allowlist from `AUTH_PROVIDERS` filtered to `status === 'wired'` (today only `CURSOR_API_KEY`). Disallowed keys are reported via `summary.skippedBecauseDisallowed` and logged but never applied. New tests: `userSecrets.test.ts` allowlist case; `daemonAuthLoad.test.ts` "refuses to inject non-wired-provider keys (e.g. NODE_OPTIONS, ANTHROPIC_API_KEY)".
+- **Finding 2 (`doctor` resilience):** `getBackendStatus()` now skips `loadUserSecrets()` entirely when `process.env.CURSOR_API_KEY` is set (env wins; file is not probed). `loadUserSecrets()` itself wraps `statSync` and `readFileSync` and converts read failures into a `refusal` rather than throwing. `diagnoseCursorBackend` accepts `LoadedSecrets | null` and only surfaces the chmod/read-failure hint when env is unset. New tests in `authPrecedence.test.ts`: env-present + bad path → no crash, no file noise; env-absent + bad path → `auth_unknown` with a refusal hint. New `userSecrets.test.ts` "returns a refusal (not a throw) when the path points at a directory".
+- **Docs:** `docs/development/auth-setup.md` "Where it is read" table updated to describe the wired-provider allowlist and the env-wins doctor short-circuit.

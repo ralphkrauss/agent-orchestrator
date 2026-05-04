@@ -22,6 +22,9 @@ if (command === 'doctor') {
 } else if (command === 'monitor') {
   const { runMonitorCli } = await import('./monitorCli.js');
   process.exitCode = await runMonitorCli(process.argv.slice(3));
+} else if (command === 'auth') {
+  const { runAuthCli } = await import('./auth/authCli.js');
+  process.exitCode = await runAuthCli(process.argv.slice(3));
 } else if (isDaemonCliCommand(command)) {
   try {
     await runDaemonCli(process.argv.slice(2));
@@ -40,6 +43,9 @@ Usage:
   agent-orchestrator opencode     Start OpenCode in orchestration mode
   agent-orchestrator claude       Start Claude Code in orchestration mode (recommended rich-feature harness)
   agent-orchestrator monitor <run_id> [--json-line] [--since <id>]
+  agent-orchestrator auth status [--json]
+  agent-orchestrator auth <provider> [--from-env [VAR] | --from-stdin]
+  agent-orchestrator auth unset <provider>
   agent-orchestrator status       Show daemon status
   agent-orchestrator status --json
   agent-orchestrator runs [--json] [--prompts]
@@ -59,6 +65,9 @@ Standalone daemon alias:
   agent-orchestrator-daemon stop [--force]
   agent-orchestrator-daemon restart [--force]
   agent-orchestrator-daemon prune --older-than-days <days> [--dry-run]
+  agent-orchestrator-daemon auth status [--json]
+  agent-orchestrator-daemon auth <provider> [--from-env [VAR] | --from-stdin]
+  agent-orchestrator-daemon auth unset <provider>
 
 OpenCode orchestration:
   agent-orchestrator-opencode [options]

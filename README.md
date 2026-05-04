@@ -27,9 +27,12 @@ node dist/cli.js
 - Codex CLI installed and authenticated if you want Codex workers.
 - Claude CLI installed and authenticated if you want Claude workers.
 - `@cursor/sdk` installed (ships as an optional dependency) and `CURSOR_API_KEY`
-  exported in the daemon environment if you want Cursor workers. Cursor runs
-  use the SDK in-process, local runtime only; tokens are billed to your Cursor
-  account. See `docs/development/cursor-backend.md`.
+  available to the daemon (set via `agent-orchestrator auth cursor` or exported
+  in the daemon environment) if you want Cursor workers. Cursor runs use the
+  SDK in-process, local runtime only; tokens are billed to your Cursor account.
+  See `docs/development/cursor-backend.md` and
+  [`docs/development/auth-setup.md`](docs/development/auth-setup.md) for the
+  daemon-managed credential file.
 
 Linux and macOS use Unix sockets and POSIX process groups. Windows uses a
 per-store named pipe for daemon IPC and `taskkill` for worker process-tree

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { chmod, mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { delimiter, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { getBackendStatus } from '../diagnostics.js';
+import { getBackendStatus, formatBackendStatus } from '../diagnostics.js';
 import { createBackendRegistry } from '../backend/registry.js';
 import { OrchestratorService } from '../orchestratorService.js';
 import { getPackageVersion } from '../packageMetadata.js';
@@ -71,10 +71,10 @@ describe('backend diagnostics', () => {
     assert.equal(cursor.status, 'missing');
     assert.equal(cursor.path, '/fake/node_modules/@cursor/sdk/dist/index.js');
     assert.ok(cursor.checks.some((check) => check.name === '@cursor/sdk module resolvable' && !check.ok));
-    assert.equal(cursor.hints.length, 1);
-    assert.match(cursor.hints[0]!, /pnpm rebuild @cursor\/sdk/);
-    assert.match(cursor.hints[0]!, /\/fake\/node_modules\/@cursor\/sdk\/dist\/index\.js/);
-    assert.match(cursor.hints[0]!, /sqlite3/i);
+    const sdkHint = cursor.hints.find((hint) => /pnpm rebuild @cursor\/sdk/.test(hint));
+    assert.ok(sdkHint, `expected SDK rebuild hint in ${JSON.stringify(cursor.hints)}`);
+    assert.match(sdkHint!, /\/fake\/node_modules\/@cursor\/sdk\/dist\/index\.js/);
+    assert.match(sdkHint!, /sqlite3/i);
   });
 
   it('reports missing backend binaries without failing the whole report', async () => {
@@ -232,6 +232,115 @@ describe('backend diagnostics', () => {
     assert.ok(cli.every((backend) => backend.checks.some((check) => !check.ok && check.message?.includes('--model'))));
   });
 });
+
+describe('cursor auth source identification', () => {
+  let originalSecretsFile: string | undefined;
+  let originalCursor: string | undefined;
+  beforeEach(() => {
+    originalSecretsFile = process.env.AGENT_ORCHESTRATOR_SECRETS_FILE;
+    originalCursor = process.env.CURSOR_API_KEY;
+    delete process.env.CURSOR_API_KEY;
+    delete process.env.AGENT_ORCHESTRATOR_SECRETS_FILE;
+  });
+  afterEach(() => {
+    if (originalSecretsFile === undefined) delete process.env.AGENT_ORCHESTRATOR_SECRETS_FILE;
+    else process.env.AGENT_ORCHESTRATOR_SECRETS_FILE = originalSecretsFile;
+    if (originalCursor === undefined) delete process.env.CURSOR_API_KEY;
+    else process.env.CURSOR_API_KEY = originalCursor;
+  });
+
+  const okAdapter = {
+    available: async () => ({ ok: true as const, modulePath: '/fake/cursor-sdk' }),
+    loadAgentApi: async () => { throw new Error('not used'); },
+  };
+
+  it('env-only: source_kind=env, formatter renders (CURSOR_API_KEY, env)', async () => {
+    process.env.CURSOR_API_KEY = 'envvalue';
+    const report = await getBackendStatus({ cursorSdkAdapter: okAdapter });
+    const cursor = report.backends.find((b) => b.name === 'cursor')!;
+    assert.equal(cursor.auth.status, 'ready');
+    assert.equal(cursor.auth.source, 'CURSOR_API_KEY');
+    assert.equal(cursor.auth.source_kind, 'env');
+    assert.equal(cursor.auth.source_path, undefined);
+    assert.match(formatBackendStatus(report), /auth: ready \(CURSOR_API_KEY, env\)/);
+  });
+
+  it('file-only: source_kind=file, source_path set, formatter shows file path', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'agent-diag-auth-'));
+    const secretsPath = join(dir, 'secrets.env');
+    await writeFile(secretsPath, 'CURSOR_API_KEY=fromfile\n', { mode: 0o600 });
+    process.env.AGENT_ORCHESTRATOR_SECRETS_FILE = secretsPath;
+    const report = await getBackendStatus({ cursorSdkAdapter: okAdapter });
+    const cursor = report.backends.find((b) => b.name === 'cursor')!;
+    assert.equal(cursor.auth.status, 'ready');
+    assert.equal(cursor.auth.source_kind, 'file');
+    assert.equal(cursor.auth.source_path, secretsPath);
+    assert.match(formatBackendStatus(report), new RegExp(`auth: ready \\(CURSOR_API_KEY, file: ${escapeRegex(secretsPath)}\\)`));
+  });
+
+  it('env-and-file: env wins, source_kind=env regardless of file value', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'agent-diag-auth-'));
+    const secretsPath = join(dir, 'secrets.env');
+    await writeFile(secretsPath, 'CURSOR_API_KEY=fromfile\n', { mode: 0o600 });
+    process.env.AGENT_ORCHESTRATOR_SECRETS_FILE = secretsPath;
+    process.env.CURSOR_API_KEY = 'fromfile'; // even when values match, env wins
+    const report = await getBackendStatus({ cursorSdkAdapter: okAdapter });
+    const cursor = report.backends.find((b) => b.name === 'cursor')!;
+    assert.equal(cursor.auth.source_kind, 'env');
+    assert.equal(cursor.auth.source_path, undefined);
+  });
+
+  it('env-absent + file present but world-readable: auth_unknown, chmod hint, no source_kind', async () => {
+    if (process.platform === 'win32') return; // perm-check is POSIX-only
+    const dir = await mkdtemp(join(tmpdir(), 'agent-diag-auth-'));
+    const secretsPath = join(dir, 'secrets.env');
+    await writeFile(secretsPath, 'CURSOR_API_KEY=fromfile\n');
+    await chmod(secretsPath, 0o644);
+    process.env.AGENT_ORCHESTRATOR_SECRETS_FILE = secretsPath;
+    const report = await getBackendStatus({ cursorSdkAdapter: okAdapter });
+    const cursor = report.backends.find((b) => b.name === 'cursor')!;
+    assert.equal(cursor.auth.status, 'unknown');
+    assert.equal(cursor.auth.source_kind, undefined);
+    assert.ok(cursor.hints.some((h) => /chmod 600/.test(h)), `expected chmod hint in ${JSON.stringify(cursor.hints)}`);
+  });
+
+  it('surfaces the secrets refusal hint even when @cursor/sdk is missing (SDK-missing branch)', async () => {
+    if (process.platform === 'win32') return;
+    const dir = await mkdtemp(join(tmpdir(), 'agent-diag-auth-'));
+    const secretsPath = join(dir, 'secrets.env');
+    await writeFile(secretsPath, 'CURSOR_API_KEY=fromfile\n');
+    await chmod(secretsPath, 0o644);
+    process.env.AGENT_ORCHESTRATOR_SECRETS_FILE = secretsPath;
+    const missing = {
+      available: async () => ({ ok: false as const, reason: 'not installed' }),
+      loadAgentApi: async () => { throw new Error('not installed'); },
+    };
+    const report = await getBackendStatus({ cursorSdkAdapter: missing });
+    const cursor = report.backends.find((b) => b.name === 'cursor')!;
+    assert.equal(cursor.status, 'missing');
+    assert.ok(cursor.hints.some((h) => /Install @cursor\/sdk|pnpm add @cursor\/sdk/.test(h)), 'expected SDK install hint');
+    assert.ok(cursor.hints.some((h) => /chmod 600/.test(h)), `expected chmod hint alongside the SDK hint, got ${JSON.stringify(cursor.hints)}`);
+  });
+
+  it('env-set + file world-readable: ready via env, no chmod hint', async () => {
+    if (process.platform === 'win32') return;
+    const dir = await mkdtemp(join(tmpdir(), 'agent-diag-auth-'));
+    const secretsPath = join(dir, 'secrets.env');
+    await writeFile(secretsPath, 'CURSOR_API_KEY=fromfile\n');
+    await chmod(secretsPath, 0o644);
+    process.env.AGENT_ORCHESTRATOR_SECRETS_FILE = secretsPath;
+    process.env.CURSOR_API_KEY = 'envwins';
+    const report = await getBackendStatus({ cursorSdkAdapter: okAdapter });
+    const cursor = report.backends.find((b) => b.name === 'cursor')!;
+    assert.equal(cursor.auth.status, 'ready');
+    assert.equal(cursor.auth.source_kind, 'env');
+    assert.ok(!cursor.hints.some((h) => /chmod/.test(h)), `expected no chmod hint in ${JSON.stringify(cursor.hints)}`);
+  });
+});
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 async function writeMockCli(bin: string, name: string, responses: [string, string][]): Promise<void> {
   const cases = responses

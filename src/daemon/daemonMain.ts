@@ -1,16 +1,11 @@
 #!/usr/bin/env node
-import { closeSync, existsSync, lstatSync, openSync, readFileSync, unlinkSync, writeFileSync, type Stats } from 'node:fs';
-import { lstat, rm } from 'node:fs/promises';
+import { existsSync, unlinkSync } from 'node:fs';
 import { appendFileSync } from 'node:fs';
-import { IpcServer } from '../ipc/server.js';
-import { createBackendRegistry } from '../backend/registry.js';
-import { OrchestratorService } from '../orchestratorService.js';
-import { RunStore, ensureSecureRoot } from '../runStore.js';
+import { bootDaemon, readPidFile, unlinkOwnedIpcEndpointSync } from './bootDaemon.js';
 import { daemonPaths } from './paths.js';
 
 const paths = daemonPaths();
-let pidFd: number | null = null;
-let ipcServer: IpcServer | null = null;
+let bootedShutdown: (() => Promise<void>) | null = null;
 
 function log(message: string): void {
   const line = `[${new Date().toISOString()}] ${message}\n`;
@@ -19,142 +14,33 @@ function log(message: string): void {
 }
 
 async function main(): Promise<void> {
-  await ensureSecureRoot(paths.home);
-  acquirePidFile();
-  await cleanupIpcEndpoint();
-
-  const store = new RunStore(paths.home);
-  const service = new OrchestratorService(store, createBackendRegistry(store), log);
-  await service.initialize();
-
-  ipcServer = new IpcServer(paths.ipc.path, async (method, params, context) => service.dispatch(method, params, context));
-  if (paths.ipc.transport === 'unix_socket') {
-    const oldUmask = process.umask(0o177);
-    try {
-      await ipcServer.listen();
-    } finally {
-      process.umask(oldUmask);
-    }
-  } else {
-    await ipcServer.listen();
-  }
-
-  log(`daemon started pid=${process.pid} ipc=${paths.ipc.path}`);
+  const booted = await bootDaemon({ paths, log });
+  bootedShutdown = booted.shutdown;
 
   const forceShutdown = () => {
-    void service.shutdown({ force: true });
+    void booted.service.shutdown({ force: true });
   };
   process.on('SIGTERM', forceShutdown);
   process.on('SIGINT', forceShutdown);
 }
 
-function acquirePidFile(): void {
-  try {
-    pidFd = openSync(paths.pid, 'wx', 0o600);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-    const existingPid = readExistingPid();
-    if (existingPid && isPidAlive(existingPid)) {
-      throw new Error(`another agent-orchestrator daemon is running with pid ${existingPid}`);
-    }
-    unlinkSync(paths.pid);
-    pidFd = openSync(paths.pid, 'wx', 0o600);
-  }
-  writeFileSync(pidFd, `${process.pid}\n`);
-}
-
-function readExistingPid(): number | null {
-  try {
-    const pid = Number.parseInt(readFileSync(paths.pid, 'utf8').trim(), 10);
-    return Number.isFinite(pid) ? pid : null;
-  } catch {
-    return null;
-  }
-}
-
-function isPidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function cleanupIpcEndpoint(): Promise<void> {
-  const cleanupPath = paths.ipc.cleanupPath;
-  if (!cleanupPath) return;
-
-  let info: Stats;
-  try {
-    info = await lstat(cleanupPath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-    throw error;
-  }
-
-  const uid = process.getuid?.();
-  if (typeof uid === 'number' && info.uid !== uid) {
-    throw new Error(`Refusing to remove foreign-owned IPC endpoint ${cleanupPath} owned by uid ${info.uid}`);
-  }
-  try {
-    await rm(cleanupPath, { force: true });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-  }
-}
-
-async function cleanup(): Promise<void> {
-  try {
-    await ipcServer?.close();
-  } catch {
-    // Ignore during process shutdown.
-  }
-  try {
-    await cleanupIpcEndpoint();
-  } catch {
-    // Ignore during process shutdown.
-  }
-  try {
-    if (pidFd !== null) closeSync(pidFd);
-    await rm(paths.pid, { force: true });
-  } catch {
-    // Ignore during process shutdown.
-  }
-}
-
 process.on('exit', () => {
   try {
-    if (pidFd !== null) closeSync(pidFd);
-    if (existsSync(paths.pid) && readExistingPid() === process.pid) unlinkSync(paths.pid);
+    if (existsSync(paths.pid) && readPidFile(paths.pid) === process.pid) unlinkSync(paths.pid);
     if (paths.ipc.cleanupPath) unlinkOwnedIpcEndpointSync(paths.ipc.cleanupPath);
   } catch {
     // Process is exiting; best effort only.
   }
 });
 
-function unlinkOwnedIpcEndpointSync(cleanupPath: string): void {
-  let info: Stats;
-  try {
-    info = lstatSync(cleanupPath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-    throw error;
-  }
-
-  const uid = process.getuid?.();
-  if (typeof uid === 'number' && info.uid !== uid) {
-    throw new Error(`Refusing to remove foreign-owned IPC endpoint ${cleanupPath} owned by uid ${info.uid}`);
-  }
-  try {
-    unlinkSync(cleanupPath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-  }
-}
-
 main().catch(async (error) => {
   log(`fatal: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
-  await cleanup();
+  if (bootedShutdown) {
+    try {
+      await bootedShutdown();
+    } catch {
+      // ignore
+    }
+  }
   process.exit(1);
 });

@@ -21,7 +21,7 @@ import {
 import type { ObservabilitySnapshot, OrchestratorError } from '../contract.js';
 
 const paths = daemonPaths();
-const daemonCommands = new Set(['start', 'stop', 'restart', 'status', 'runs', 'watch', 'prune']);
+const daemonCommands = new Set(['start', 'stop', 'restart', 'status', 'runs', 'watch', 'prune', 'auth']);
 
 export function isDaemonCliCommand(command: string | undefined): boolean {
   return command !== undefined && daemonCommands.has(command);
@@ -56,6 +56,12 @@ export async function runDaemonCli(argv: readonly string[] = process.argv.slice(
     case 'prune':
       await prune(argv);
       break;
+    case 'auth': {
+      const { runAuthCli } = await import('../auth/authCli.js');
+      const exit = await runAuthCli(argv.slice(1));
+      if (exit !== 0) process.exit(exit);
+      break;
+    }
     default:
       process.stderr.write(daemonHelp());
       process.exit(1);
@@ -65,8 +71,8 @@ export async function runDaemonCli(argv: readonly string[] = process.argv.slice(
 function daemonHelp(): string {
   return [
     'Usage:',
-    '  agent-orchestrator start | stop [--force] | restart [--force] | status [--verbose|--json] | runs [--json] [--prompts] | watch [--interval-ms <ms>] [--limit <n>] | prune --older-than-days <days> [--dry-run]',
-    '  agent-orchestrator-daemon start | stop [--force] | restart [--force] | status [--verbose|--json] | runs [--json] [--prompts] | watch [--interval-ms <ms>] [--limit <n>] | prune --older-than-days <days> [--dry-run]',
+    '  agent-orchestrator start | stop [--force] | restart [--force] | status [--verbose|--json] | runs [--json] [--prompts] | watch [--interval-ms <ms>] [--limit <n>] | prune --older-than-days <days> [--dry-run] | auth ...',
+    '  agent-orchestrator-daemon start | stop [--force] | restart [--force] | status [--verbose|--json] | runs [--json] [--prompts] | watch [--interval-ms <ms>] [--limit <n>] | prune --older-than-days <days> [--dry-run] | auth ...',
     '',
   ].join('\n');
 }
