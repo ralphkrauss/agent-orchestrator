@@ -1,5 +1,7 @@
-import { access, readFile, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
+import { randomBytes } from 'node:crypto';
 import {
   AckRunNotificationInputSchema,
   BackendSchema,
@@ -18,6 +20,7 @@ import {
   ShutdownInputSchema,
   StartRunInputSchema,
   ServiceTierSchema,
+  UpsertWorkerProfileInputSchema,
   WaitForAnyRunInputSchema,
   WaitForRunInputSchema,
   wrapErr,
@@ -29,6 +32,7 @@ import {
   type ReasoningEffort,
   type ModelSource,
   type OrchestratorError,
+  type RpcPolicyContext,
   type StartRun,
   type RunStatus,
   type RunModelSettings,
@@ -36,6 +40,7 @@ import {
   type RunErrorCategory,
   type ServiceTier,
   type ToolResponse,
+  type UpsertWorkerProfile,
   type WorkerEvent,
   type WorkerResult,
 } from './contract.js';
@@ -44,10 +49,19 @@ import type { RuntimeRunHandle, WorkerRuntime } from './backend/runtime.js';
 import { getBackendStatus } from './diagnostics.js';
 import { captureGitSnapshot } from './gitSnapshot.js';
 import { buildObservabilitySnapshot } from './observability.js';
-import { createWorkerCapabilityCatalog, type ValidatedWorkerProfile } from './opencode/capabilities.js';
+import {
+  createWorkerCapabilityCatalog,
+  inspectWorkerProfiles,
+  parseWorkerProfileManifest,
+  type InspectedWorkerProfiles,
+  type InvalidWorkerProfile,
+  type ValidatedWorkerProfile,
+  type WorkerProfile,
+  type WorkerProfileManifest,
+} from './opencode/capabilities.js';
 import { getPackageVersion } from './packageMetadata.js';
 import { RunStore } from './runStore.js';
-import { loadValidatedWorkerProfilesFromFile, resolveWorkerProfilesFile } from './workerRouting.js';
+import { loadInspectedWorkerProfilesFromFile, resolveWorkerProfilesFile } from './workerRouting.js';
 
 interface OrchestratorConfig {
   default_idle_timeout_seconds: number;
@@ -75,6 +89,7 @@ type OrchestratorLogger = (message: string) => void;
 
 export interface OrchestratorDispatchContext {
   frontend_version?: string | null;
+  policy_context?: RpcPolicyContext | null;
 }
 
 interface ResolvedStartRunTarget {
@@ -89,6 +104,7 @@ interface ResolvedStartRunTarget {
 export class OrchestratorService {
   private readonly activeRuns = new Map<string, RuntimeRunHandle>();
   private readonly timers = new Map<string, NodeJS.Timeout>();
+  private readonly profileUpdateLocks = new Map<string, Promise<void>>();
   private config: OrchestratorConfig = defaultConfig;
   private shuttingDown = false;
 
@@ -116,6 +132,8 @@ export class OrchestratorService {
         return this.startRun(params);
       case 'list_worker_profiles':
         return this.listWorkerProfiles(params);
+      case 'upsert_worker_profile':
+        return this.upsertWorkerProfile(params, context);
       case 'list_runs':
         return wrapOk({ runs: await this.store.listRuns() });
       case 'get_run_status':
@@ -219,6 +237,17 @@ export class OrchestratorService {
 
     const profile = loaded.profiles.profiles[input.profile ?? ''];
     if (!profile) {
+      const invalidProfile = loaded.profiles.invalid_profiles[input.profile ?? ''];
+      if (invalidProfile) {
+        return {
+          ok: false,
+          error: orchestratorError('INVALID_INPUT', `Worker profile ${input.profile} is invalid: ${invalidProfile.errors.join('; ')}`, {
+            profile: input.profile,
+            profiles_file: profilesFile,
+            errors: invalidProfile.errors,
+          }),
+        };
+      }
       return {
         ok: false,
         error: orchestratorError('INVALID_INPUT', `Worker profile ${input.profile} was not found in ${profilesFile}`, {
@@ -285,29 +314,97 @@ export class OrchestratorService {
       profiles_file: profilesFile,
       profiles: Object.values(loaded.profiles.profiles)
         .sort((a, b) => a.id.localeCompare(b.id))
-        .map((profile) => ({
-          id: profile.id,
-          backend: profile.backend,
-          model: profile.model ?? null,
-          variant: profile.variant ?? null,
-          reasoning_effort: profile.reasoning_effort ?? null,
-          service_tier: profile.service_tier ?? null,
-          description: profile.description ?? null,
-          metadata: profile.metadata ?? {},
-          capability: {
-            backend: profile.capability.backend,
-            display_name: profile.capability.display_name,
-            availability_status: profile.capability.availability_status,
-            supports_start: profile.capability.supports_start,
-            supports_resume: profile.capability.supports_resume,
-          },
-        })),
+        .map(formatValidProfile),
+      invalid_profiles: invalidProfileList(loaded.profiles),
+      diagnostics: loaded.profiles.errors,
     });
   }
 
-  private async loadLiveWorkerProfiles(profilesFile: string): ReturnType<typeof loadValidatedWorkerProfilesFromFile> {
+  async upsertWorkerProfile(params: unknown, context: OrchestratorDispatchContext = {}): Promise<ToolResult> {
+    const parsed = UpsertWorkerProfileInputSchema.safeParse(params);
+    if (!parsed.success) return invalidInput(parsed.error.message);
+    const input = parsed.data;
+    const profilesFile = resolveWorkerProfilesFile(input.profiles_file, input.cwd);
+    const policyError = enforcePolicyContextForUpsert(profilesFile, context.policy_context, input.cwd);
+    if (policyError) return wrapErr(policyError);
+    return await this.withProfileUpdateLock(profilesFile, () => this.upsertWorkerProfileLocked(input, profilesFile));
+  }
+
+  private async upsertWorkerProfileLocked(input: UpsertWorkerProfile, profilesFile: string): Promise<ToolResult> {
+    const loaded = await readWorkerProfileManifestForUpdate(profilesFile);
+    if (!loaded.ok) return wrapErr(loaded.error);
+    const previous = loaded.manifest.profiles[input.profile] ?? null;
+    if (!previous && !input.create_if_missing) {
+      return wrapErr(orchestratorError('INVALID_INPUT', `Worker profile ${input.profile} was not found in ${profilesFile}`, {
+        profile: input.profile,
+        profiles_file: profilesFile,
+      }));
+    }
+
+    const nextProfile = workerProfileFromUpsert(input);
+    const nextManifest: WorkerProfileManifest = {
+      version: loaded.manifest.version,
+      profiles: {
+        ...loaded.manifest.profiles,
+        [input.profile]: nextProfile,
+      },
+    };
+
+    const parsedManifest = parseWorkerProfileManifest(nextManifest);
+    if (!parsedManifest.ok) {
+      return wrapErr(orchestratorError('INVALID_INPUT', `Worker profiles manifest would be invalid: ${parsedManifest.errors.join('; ')}`, {
+        profiles_file: profilesFile,
+        errors: parsedManifest.errors,
+      }));
+    }
     const status = await getBackendStatus();
-    return loadValidatedWorkerProfilesFromFile(profilesFile, createWorkerCapabilityCatalog(status));
+    const inspected = inspectWorkerProfiles(parsedManifest.value, createWorkerCapabilityCatalog(status));
+    const invalidTarget = inspected.invalid_profiles[input.profile];
+    if (invalidTarget) {
+      return wrapErr(orchestratorError('INVALID_INPUT', `Worker profile ${input.profile} would be invalid: ${invalidTarget.errors.join('; ')}`, {
+        profile: input.profile,
+        profiles_file: profilesFile,
+        errors: invalidTarget.errors,
+      }));
+    }
+
+    await mkdir(dirname(profilesFile), { recursive: true, mode: 0o700 });
+    await atomicWriteWorkerProfiles(profilesFile, `${JSON.stringify(parsedManifest.value, null, 2)}\n`);
+    const updated = inspected.profiles[input.profile]!;
+    return wrapOk({
+      profiles_file: profilesFile,
+      profile: formatValidProfile(updated),
+      previous_profile: previous,
+      created: previous === null,
+      invalid_profiles: invalidProfileList(inspected),
+      diagnostics: inspected.errors,
+    });
+  }
+
+  /**
+   * Serialize per-manifest read/validate/write so concurrent upserts to the
+   * same profiles file cannot race and clobber unrelated profile changes.
+   */
+  private async withProfileUpdateLock<T>(profilesFile: string, fn: () => Promise<T>): Promise<T> {
+    const previous = this.profileUpdateLocks.get(profilesFile) ?? Promise.resolve();
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    const tail = previous.then(() => released);
+    this.profileUpdateLocks.set(profilesFile, tail);
+    try {
+      await previous;
+      return await fn();
+    } finally {
+      release();
+      if (this.profileUpdateLocks.get(profilesFile) === tail) {
+        this.profileUpdateLocks.delete(profilesFile);
+      }
+    }
+  }
+
+  private async loadLiveWorkerProfiles(profilesFile: string): ReturnType<typeof loadInspectedWorkerProfilesFromFile> {
+    const status = await getBackendStatus();
+    return loadInspectedWorkerProfilesFromFile(profilesFile, createWorkerCapabilityCatalog(status));
   }
 
   async sendFollowup(params: unknown): Promise<ToolResult> {
@@ -501,7 +598,7 @@ export class OrchestratorService {
     if (!parsed.success) return invalidInput(parsed.error.message);
     const run = await this.store.loadRun(parsed.data.run_id);
     if (!run) return unknownRun(parsed.data.run_id);
-    return wrapOk({ run_summary: run.meta, result: run.result });
+    return wrapOk({ run_summary: run.meta, result: resultWithAssistantSummaryFallback(run.result, run.events) });
   }
 
   async shutdown(params: unknown): Promise<ToolResult> {
@@ -802,6 +899,22 @@ function progressEventSummary(event: WorkerEvent): string | null {
   return null;
 }
 
+function resultWithAssistantSummaryFallback(result: WorkerResult | null, events: WorkerEvent[]): WorkerResult | null {
+  if (!result || result.summary.trim()) return result;
+  const fallback = latestAssistantMessage(events);
+  return fallback ? { ...result, summary: fallback } : result;
+}
+
+function latestAssistantMessage(events: WorkerEvent[]): string | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!;
+    if (event.type !== 'assistant_message') continue;
+    const text = textFromValue(event.payload);
+    if (text) return text;
+  }
+  return null;
+}
+
 function toolName(payload: Record<string, unknown>): string {
   return stringFromRecord(payload, 'name')
     ?? stringFromRecord(payload, 'tool_name')
@@ -900,6 +1013,112 @@ function preSpawnError(backend: Backend, message: string, context: Record<string
     fatal: true,
     context,
   };
+}
+
+function enforcePolicyContextForUpsert(
+  resolvedProfilesFile: string,
+  policyContext: RpcPolicyContext | null | undefined,
+  requestCwd: string | undefined,
+): OrchestratorError | null {
+  const allowed = policyContext?.writable_profiles_file;
+  if (!allowed) return null;
+  const resolvedAllowed = resolveWorkerProfilesFile(allowed, requestCwd);
+  if (resolvedAllowed === resolvedProfilesFile) return null;
+  return orchestratorError(
+    'INVALID_INPUT',
+    `upsert_worker_profile is restricted to the harness-pinned profiles manifest (${resolvedAllowed}); refusing to write ${resolvedProfilesFile}`,
+    { profiles_file: resolvedProfilesFile, allowed_profiles_file: resolvedAllowed },
+  );
+}
+
+let atomicWriteCounter = 0;
+
+/**
+ * Replace a profiles manifest file atomically. Concurrent readers
+ * (`list_worker_profiles`, `start_run`, etc.) only ever see the prior or new
+ * full file, never a half-written truncated one. The per-manifest update lock
+ * still serializes writers; this protects independent readers.
+ */
+async function atomicWriteWorkerProfiles(profilesFile: string, content: string): Promise<void> {
+  const dir = dirname(profilesFile);
+  // Unique per-process suffix so overlapping operations cannot share a temp
+  // path even if invoked back-to-back at the same millisecond.
+  atomicWriteCounter = (atomicWriteCounter + 1) >>> 0;
+  const suffix = `${process.pid}-${Date.now()}-${atomicWriteCounter}-${randomBytes(6).toString('hex')}`;
+  const tempFile = join(dir, `.${basename(profilesFile)}.tmp-${suffix}`);
+  try {
+    await writeFile(tempFile, content, { mode: 0o600 });
+    await rename(tempFile, profilesFile);
+  } catch (error) {
+    await rm(tempFile, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function readWorkerProfileManifestForUpdate(
+  profilesFile: string,
+): Promise<{ ok: true; manifest: WorkerProfileManifest } | { ok: false; error: OrchestratorError }> {
+  let value: unknown = { version: 1, profiles: {} };
+  try {
+    value = JSON.parse(await readFile(profilesFile, 'utf8')) as unknown;
+  } catch (error) {
+    const code = typeof error === 'object' && error && 'code' in error ? String(error.code) : '';
+    if (code !== 'ENOENT') {
+      return {
+        ok: false,
+        error: orchestratorError('INVALID_INPUT', `Failed to read worker profiles manifest ${profilesFile}: ${error instanceof Error ? error.message : String(error)}`, {
+          profiles_file: profilesFile,
+        }),
+      };
+    }
+  }
+
+  const parsed = parseWorkerProfileManifest(value);
+  if (!parsed.ok) {
+    return {
+      ok: false,
+      error: orchestratorError('INVALID_INPUT', `Worker profiles manifest is invalid: ${parsed.errors.join('; ')}`, {
+        profiles_file: profilesFile,
+        errors: parsed.errors,
+      }),
+    };
+  }
+  return { ok: true, manifest: parsed.value };
+}
+
+function workerProfileFromUpsert(input: UpsertWorkerProfile): WorkerProfile {
+  const profile: WorkerProfile = { backend: input.backend };
+  if (input.model !== undefined) profile.model = input.model;
+  if (input.variant !== undefined) profile.variant = input.variant;
+  if (input.reasoning_effort !== undefined) profile.reasoning_effort = input.reasoning_effort;
+  if (input.service_tier !== undefined) profile.service_tier = input.service_tier;
+  if (input.description !== undefined) profile.description = input.description;
+  if (input.metadata !== undefined) profile.metadata = input.metadata;
+  return profile;
+}
+
+function formatValidProfile(profile: ValidatedWorkerProfile): Record<string, unknown> {
+  return {
+    id: profile.id,
+    backend: profile.backend,
+    model: profile.model ?? null,
+    variant: profile.variant ?? null,
+    reasoning_effort: profile.reasoning_effort ?? null,
+    service_tier: profile.service_tier ?? null,
+    description: profile.description ?? null,
+    metadata: profile.metadata ?? {},
+    capability: {
+      backend: profile.capability.backend,
+      display_name: profile.capability.display_name,
+      availability_status: profile.capability.availability_status,
+      supports_start: profile.capability.supports_start,
+      supports_resume: profile.capability.supports_resume,
+    },
+  };
+}
+
+function invalidProfileList(profiles: InspectedWorkerProfiles): InvalidWorkerProfile[] {
+  return Object.values(profiles.invalid_profiles).sort((a, b) => a.id.localeCompare(b.id));
 }
 
 function hasModelSettingsInput(input: { reasoning_effort?: ReasoningEffort; service_tier?: ServiceTier }): boolean {

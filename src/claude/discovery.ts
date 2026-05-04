@@ -10,14 +10,21 @@ export interface ClaudeSurfaceReport {
     settings_flag: boolean;
     setting_sources_flag: boolean;
     /**
+     * Reported for diagnostics only. The harness intentionally does not pass
+     * this flag because the supervisor should keep normal slash commands such
+     * as /exit and /skills available.
+     */
+    disable_slash_commands_flag: boolean;
+    /**
      * `--tools` is the load-bearing built-in availability restriction. The
-     * supervisor envelope sets `--tools "Read,Glob,Grep"` so Edit/Write/Bash
-     * etc. are unavailable as built-ins. Required.
+     * supervisor launch sets `--tools "Read,Glob,Grep,Bash,Skill"` so only
+     * read-only inspection, the pinned monitor command surface, and skill
+     * loading are available as built-in tools. Required.
      */
     tools_flag: boolean;
     /**
-     * `--allowed-tools` pre-approves the agent-orchestrator MCP tools the
-     * supervisor uses to wait for and reconcile run notifications. Required.
+     * `--allowed-tools` pre-approves the pinned Bash monitor and safe
+     * agent-orchestrator MCP tools. Required.
      */
     allowed_tools_flag: boolean;
     /**
@@ -54,6 +61,7 @@ const EXPECTED_FLAGS: { key: keyof ClaudeSurfaceReport['surfaces']; pattern: Reg
   { key: 'strict_mcp_config_flag', pattern: /--strict-mcp-config\b/, required: true },
   { key: 'settings_flag', pattern: /--settings\b/, required: true },
   { key: 'setting_sources_flag', pattern: /--setting-sources\b/, required: true },
+  { key: 'disable_slash_commands_flag', pattern: /--disable-slash-commands\b/, required: false },
   // --tools is the actual security boundary for built-in tool availability.
   { key: 'tools_flag', pattern: /(?:^|\s)--tools\b/, required: true },
   // --append-system-prompt-file is how the supervisor system prompt is injected.

@@ -33,6 +33,15 @@ describe('MCP tool registration', () => {
     const profiles = schemaFor('list_worker_profiles');
     assert.equal(Object.hasOwn(profiles.properties, 'profiles_file'), true);
 
+    const upsertProfile = schemaFor('upsert_worker_profile');
+    assert.deepStrictEqual(upsertProfile.required, ['profile', 'backend']);
+    assert.equal(Object.hasOwn(upsertProfile.properties, 'profiles_file'), true);
+    assert.equal(Object.hasOwn(upsertProfile.properties, 'cwd'), true);
+    assert.equal(Object.hasOwn(upsertProfile.properties, 'model'), true);
+    assert.equal(Object.hasOwn(upsertProfile.properties, 'reasoning_effort'), true);
+    assert.equal(Object.hasOwn(upsertProfile.properties, 'service_tier'), true);
+    assert.equal(Object.hasOwn(upsertProfile.properties, 'create_if_missing'), true);
+
     const followup = schemaFor('send_followup');
     assert.equal(Object.hasOwn(followup.properties, 'metadata'), true);
     assert.equal(Object.hasOwn(followup.properties, 'reasoning_effort'), true);

@@ -1,7 +1,10 @@
 export {
   createWorkerCapabilityCatalog,
+  inspectWorkerProfiles,
   parseWorkerProfileManifest,
   validateWorkerProfiles,
+  type InspectedWorkerProfiles,
+  type InvalidWorkerProfile,
   type WorkerBackendCapability,
   type WorkerCapabilityCatalog,
   type WorkerProfile,

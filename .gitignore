@@ -1,6 +1,7 @@
 dist/
 node_modules/
 coverage/
+.agent-orchestrator-local/
 *.log
 *.tgz
 .env

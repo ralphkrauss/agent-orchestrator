@@ -40,7 +40,13 @@ node scripts/sync-ai-workspace.mjs --check
 ## OpenCode Orchestration Skills
 
 The OpenCode orchestration launcher uses supervisor-only orchestration skills
-from the shared `.agents/skills/` root.
+from the shared `.agents/skills/` root. The Claude orchestration launcher reads
+the same `orchestrate-*` skill files and embeds their instructions into its
+generated supervisor prompt. Claude itself launches from the target workspace,
+and the launcher mirrors the projected `.claude/skills` directory into the
+redirected `HOME/.claude/skills` so `/skills` works without enabling project
+settings. The launcher restricts MCP and editing tools through explicit Claude
+flags and generated settings.
 
 Project-owned orchestration skills live beside normal skills under
 `.agents/skills/orchestrate-{name}/SKILL.md`. At launch,

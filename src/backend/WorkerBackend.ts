@@ -47,6 +47,7 @@ export interface FinalizeContext {
   commandsRun: string[];
   artifacts: { name: string; path: string }[];
   errors: RunError[];
+  lastAssistantMessage?: string;
 }
 
 export interface FinalizedWorkerResult {

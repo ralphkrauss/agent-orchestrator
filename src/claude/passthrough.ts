@@ -24,10 +24,11 @@ const FORBIDDEN_FLAGS = new Set<string>([
   '--agents',
   '--agent',
   '--permission-mode',
+  // The harness keeps slash commands enabled so /exit and /skills continue to
+  // work from the target workspace.
   '--disable-slash-commands',
-  // --bare disables CLAUDE.md auto-discovery and skill discovery, which would
-  // hide the curated <envelope>/.claude/skills/orchestrate-* surface that the
-  // supervisor depends on. Treat it like --disable-slash-commands.
+  // --bare also changes Claude's memory, plugin, auth/keychain, and built-in
+  // discovery behavior. The harness owns those through its restricted launch.
   '--bare',
 ]);
 

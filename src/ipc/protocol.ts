@@ -7,19 +7,29 @@ import {
   RpcRequestSchema,
   type OrchestratorError,
   type RpcMethod,
+  type RpcPolicyContext,
   type RpcRequest,
   type RpcResponse,
 } from '../contract.js';
 import { getPackageVersion } from '../packageMetadata.js';
 
-export function createRpcRequest(method: RpcMethod, params?: unknown, frontendVersion = getPackageVersion()): RpcRequest {
-  return {
+export function createRpcRequest(
+  method: RpcMethod,
+  params?: unknown,
+  frontendVersion = getPackageVersion(),
+  policyContext?: RpcPolicyContext,
+): RpcRequest {
+  const request: RpcRequest = {
     protocol_version: PROTOCOL_VERSION,
     frontend_version: frontendVersion,
     id: randomUUID(),
     method,
     params,
   };
+  if (policyContext && Object.keys(policyContext).length > 0) {
+    request.policy_context = policyContext;
+  }
+  return request;
 }
 
 export function encodeFrame(value: unknown): Buffer {

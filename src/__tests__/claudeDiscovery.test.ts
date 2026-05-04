@@ -37,6 +37,7 @@ Options:
   --append-system-prompt <prompt>                   Append a system prompt
   --bare                                            Minimal mode
   --dangerously-skip-permissions                    Bypass all permission checks
+  --disable-slash-commands                          Disable all slash commands and skills
   --disallowedTools, --disallowed-tools <tools...>  Comma or space-separated list of tool names to deny
   --mcp-config <configs...>                         Load MCP servers from JSON
   --output-format <format>                          Output format
@@ -65,6 +66,7 @@ describe('Claude surface discovery', () => {
     assert.equal(report.surfaces.strict_mcp_config_flag, true);
     assert.equal(report.surfaces.settings_flag, true);
     assert.equal(report.surfaces.setting_sources_flag, true);
+    assert.equal(report.surfaces.disable_slash_commands_flag, true);
     assert.equal(report.forbidden_surfaces.includes('--dangerously-skip-permissions'), true, '--dangerously-skip-permissions must be reported as forbidden');
     assert.match(report.version ?? '', /99\.0\.0/);
   });
@@ -102,6 +104,15 @@ describe('Claude surface discovery', () => {
     const report = await discoverClaudeSurface(binary);
     assert.equal(report.surfaces.append_system_prompt_file_flag, false);
     assert.equal(report.recommended_path, 'unsupported');
+  });
+
+  it('keeps recommended_path=isolated_envelope when --disable-slash-commands is missing because slash commands stay enabled', async () => {
+    const helpWithoutDisableSlashCommands = FULL_HELP.replace(/^.*--disable-slash-commands.*$/m, '');
+    const binary = await fakeClaudeBinary(helpWithoutDisableSlashCommands);
+    const report = await discoverClaudeSurface(binary);
+    assert.equal(report.surfaces.disable_slash_commands_flag, false);
+    assert.equal(report.recommended_path, 'isolated_envelope');
+    assert.equal(report.errors.some((line) => line.includes('disable_slash_commands_flag')), false);
   });
 
   it('keeps recommended_path=isolated_envelope when --disallowed-tools is missing, because explicit denies live in settings', async () => {
@@ -146,6 +157,7 @@ describe('Claude surface discovery', () => {
     const text = summarizeReport(report);
     assert.match(text, /tools_flag: present/);
     assert.match(text, /allowed_tools_flag: present/);
+    assert.match(text, /disable_slash_commands_flag: present/);
     assert.match(text, /permission_mode_flag: present/);
     assert.match(text, /append_system_prompt_file_flag: present/);
   });

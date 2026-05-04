@@ -60,11 +60,11 @@ describe('daemon CLI', () => {
 
     try {
       const restart = await execFileAsync(process.execPath, [cliPath, 'restart'], { env, timeout: 10_000 });
-      assert.match(restart.stdout, /agent-orchestrator daemon is stopped/);
-      assert.match(restart.stdout, /agent-orchestrator daemon started pid=/);
+      assert.match(restart.stdout, new RegExp(`agent-orchestrator daemon is stopped store=${escapeRegExp(home)}`));
+      assert.match(restart.stdout, new RegExp(`agent-orchestrator daemon started pid=(?:\\d+|unknown) store=${escapeRegExp(home)}`));
 
       const status = await execFileAsync(process.execPath, [cliPath, 'status'], { env, timeout: 10_000 });
-      assert.match(status.stdout, /running pid=/);
+      assert.match(status.stdout, new RegExp(`running pid=\\d+ store=${escapeRegExp(home)}`));
       assert.match(status.stdout, /version_match=true/);
 
       const jsonStatus = await execFileAsync(process.execPath, [cliPath, 'status', '--json'], { env, timeout: 10_000 });
@@ -88,11 +88,11 @@ describe('daemon CLI', () => {
 
     try {
       const restart = await execFileAsync(process.execPath, [daemonCliPath, 'restart'], { env, timeout: 10_000 });
-      assert.match(restart.stdout, /agent-orchestrator daemon is stopped/);
-      assert.match(restart.stdout, /agent-orchestrator daemon started pid=/);
+      assert.match(restart.stdout, new RegExp(`agent-orchestrator daemon is stopped store=${escapeRegExp(home)}`));
+      assert.match(restart.stdout, new RegExp(`agent-orchestrator daemon started pid=(?:\\d+|unknown) store=${escapeRegExp(home)}`));
 
       const status = await execFileAsync(process.execPath, [daemonCliPath, 'status'], { env, timeout: 10_000 });
-      assert.match(status.stdout, /running pid=/);
+      assert.match(status.stdout, new RegExp(`running pid=\\d+ store=${escapeRegExp(home)}`));
       assert.match(status.stdout, new RegExp(`daemon_version=${escapeRegExp(getPackageVersion())}`));
       assert.match(status.stdout, new RegExp(`frontend_version=${escapeRegExp(getPackageVersion())}`));
       assert.match(status.stdout, /version_match=true/);
@@ -128,6 +128,7 @@ describe('daemon CLI', () => {
       await staleServer.listen();
 
       const staleStatus = await execFileAsync(process.execPath, [daemonCliPath, 'status'], { env, timeout: 10_000 });
+      assert.match(staleStatus.stdout, new RegExp(`running pid=\\d+ store=${escapeRegExp(home)}`));
       assert.match(staleStatus.stdout, /daemon_version=0\.0\.0-stale/);
       assert.match(staleStatus.stdout, /version_match=false/);
       assert.match(staleStatus.stdout, /runs=unavailable/);
@@ -147,8 +148,8 @@ describe('daemon CLI', () => {
       assert.match(staleWatch.stdout, /sessions: 0 runs: 0/);
 
       const restart = await execFileAsync(process.execPath, [daemonCliPath, 'restart'], { env, timeout: 10_000 });
-      assert.match(restart.stdout, /agent-orchestrator daemon stopping/);
-      assert.match(restart.stdout, /agent-orchestrator daemon started pid=/);
+      assert.match(restart.stdout, new RegExp(`agent-orchestrator daemon stopping store=${escapeRegExp(home)}`));
+      assert.match(restart.stdout, new RegExp(`agent-orchestrator daemon started pid=(?:\\d+|unknown) store=${escapeRegExp(home)}`));
 
       const currentStatus = await execFileAsync(process.execPath, [daemonCliPath, 'status'], { env, timeout: 10_000 });
       assert.match(currentStatus.stdout, new RegExp(`daemon_version=${escapeRegExp(getPackageVersion())}`));

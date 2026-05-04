@@ -1,10 +1,11 @@
 import { createServer, type Server as NetServer, type Socket } from 'node:net';
 import { FrameReader, rpcErr, rpcErrFromError, rpcOk, validateRpcRequest, writeFrame } from './protocol.js';
-import type { RpcMethod } from '../contract.js';
+import type { RpcMethod, RpcPolicyContext } from '../contract.js';
 import { getPackageVersion } from '../packageMetadata.js';
 
 export interface RpcContext {
   frontend_version: string | null;
+  policy_context: RpcPolicyContext | null;
 }
 
 export type RpcHandler = (method: RpcMethod, params: unknown, context: RpcContext) => Promise<unknown>;
@@ -61,7 +62,10 @@ export class IpcServer {
             writeFrame(socket, rpcErrFromError(request.id ?? id, request.error));
             continue;
           }
-          const result = await this.handler(request.method, request.params, { frontend_version: request.frontend_version ?? null });
+          const result = await this.handler(request.method, request.params, {
+            frontend_version: request.frontend_version ?? null,
+            policy_context: request.policy_context ?? null,
+          });
           writeFrame(socket, rpcOk(request.id, result));
         } catch (error) {
           writeFrame(socket, rpcErr(id, 'INTERNAL', error instanceof Error ? error.message : String(error)));

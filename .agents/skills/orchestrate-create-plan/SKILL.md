@@ -21,6 +21,29 @@ critiques drafts until the plan is complete.
   target workspace cwd from supervisor context.
 - If the required validated profile aliases are unavailable, stop and ask the
   user to configure valid profiles before starting worker runs.
+- If the user asks the supervisor to repair a worker profile, use
+  `list_worker_profiles` diagnostics and `upsert_worker_profile`. Do not start a
+  worker just to edit the profiles manifest.
+
+## Decision Classification And Approval
+
+Classify worker proposals before accepting them into the plan:
+
+- **Routine planning detail:** fills in implementation steps, chooses local
+  code structure, selects existing repository commands, or plans small bugfixes
+  while preserving the user's stated goal and accepted behavior. Do not ask the
+  human for these.
+- **Human approval required:** changes product scope, user-facing behavior,
+  public CLI/MCP/API contracts, worker orchestration flow, permission/tool
+  surfaces, security boundaries, release/publish behavior, dependency policy, or
+  substitutes a named technology/API/SDK/capability. Promote these to **Open
+  Human Decisions** before accepting the change.
+
+Do not let reviewer/creator agreement, security hardening, simplification, or
+"safer" implementation language override the user's requested behavior. First
+ask whether the desired behavior can be preserved with a safer implementation.
+If preserving it may be impossible or materially changes tradeoffs, ask the
+human with concrete options.
 
 ## Workflow
 
@@ -58,46 +81,56 @@ critiques drafts until the plan is complete.
       existing patterns, or approved project rules provide enough evidence;
     - collect unresolved uncertainties as **Reviewer Questions** in the plan for
       the plan reviewer to answer first, not as direct human prompts;
+    - record explicit behavior invariants and **Human Approval Triggers** when
+      the issue or user request depends on a specific workflow, permission
+      surface, public contract, integration, or capability;
     - write or update the repository-native plan in the location selected by
       the create-plan workflow;
     - clearly separate confirmed decisions, assumptions, Reviewer Questions,
       Open Human Decisions, risks, and implementation tasks, using `none` for
       empty sections.
 4. **Start the reviewer.** Ask the reviewer to get familiar with the same issue,
-   repository context, and current plan draft. Instruct it to:
+    repository context, and current plan draft. Instruct it to:
     - answer the plan creator's Reviewer Questions when confidence is high based
       on the issue, repository context, existing patterns, and project rules;
-   - flag when a question depends on product intent or requirements that cannot
-     be inferred from the issue or codebase;
-   - flag any proposed scope substitution, such as replacing the user's named
-     technology, API, SDK, product surface, or acceptance target with a different
-     implementation surface;
-   - review the plan for unclear, underspecified, incorrect, risky, or missing
-     content;
-   - provide concise, actionable feedback for the plan creator.
+    - flag when a question depends on product intent or requirements that cannot
+      be inferred from the issue or codebase;
+    - flag any proposed scope substitution, such as replacing the user's named
+      technology, API, SDK, product surface, or acceptance target with a different
+      implementation surface;
+    - flag any proposed permission/tool-surface, workflow, public-contract, or
+      user-facing behavior change that is not explicitly approved by the issue,
+      plan, or human;
+    - review the plan for unclear, underspecified, incorrect, risky, or missing
+      content;
+    - provide concise, actionable feedback for the plan creator.
 5. **Bridge questions without defaulting to the human.** When the plan creator
     records Reviewer Questions, send them to the reviewer first. The reviewer
     should answer or resolve every question it can, then identify only the
     residual **Open Human Decisions**. Only ask the human when both conditions
     are true:
-   - the question affects product requirements, user-facing behavior, scope, or
-     acceptance criteria; and
-   - the reviewer is not confident answering from the issue and repository
-     context.
-6. **Escalate scope substitutions before alignment.** If either worker proposes
-   a material scope substitution, pause the loop and ask the human before
-   accepting it. Present the original scope, proposed replacement, why the
-   worker recommends changing scope, risks/tradeoffs, and a clear choice. Do
-   not let reviewer/creator agreement override human intent for product scope,
-   acceptance criteria, named technologies, or user-facing behavior.
+    - the question affects product requirements, user-facing behavior, scope, or
+      acceptance criteria; and
+    - the reviewer is not confident answering from the issue and repository
+      context.
+6. **Escalate material behavior or scope changes before alignment.** If either
+   worker proposes a material scope substitution, behavior change, permission or
+   tool-surface change, public contract change, release/publish policy change,
+   or removal/degradation of a requested capability, pause the loop and ask the
+   human before accepting it. Present the original intent, proposed replacement,
+   why the worker recommends changing it, whether there is an option that
+   preserves the original behavior safely, risks/tradeoffs, and a clear choice.
+   Do not let reviewer/creator agreement override human intent for product
+   scope, acceptance criteria, named technologies, workflow behavior, permission
+   surfaces, or user-facing behavior.
 7. **Iterate to alignment.** Pass reviewer answers and feedback to the plan
     creator, wait for an updated plan, then send the updated plan back to the
     reviewer. If any Reviewer Questions remain, the reviewer must either answer
     them, mark them non-blocking assumptions, or promote them to Open Human
     Decisions with a concise reason and concrete options. Continue until:
-   - the reviewer says the plan is ready or has no blocking feedback; and
-   - the plan creator agrees Reviewer Questions are resolved, explicitly
-     documented as assumptions, or promoted to Open Human Decisions.
+    - the reviewer says the plan is ready or has no blocking feedback; and
+    - the plan creator agrees Reviewer Questions are resolved, explicitly
+      documented as assumptions, or promoted to Open Human Decisions.
 8. **Avoid over-specifying implementation.** The final plan should be complete
    enough to guide a developer, with clear scope, decisions, risks, tasks,
    acceptance criteria, and quality gates, but should not micromanage every
@@ -122,13 +155,15 @@ Use short, role-specific follow-ups during the loop:
   Reviewer Questions you can answer confidently from the issue, repository
   context, existing patterns, and project rules. Do not send reviewer-answerable
   questions to the human. Promote only true product/scope, behavior,
-  acceptance-criteria, policy, or material scope-substitution decisions to Open
-  Human Decisions, with concrete options and consequences. Identify only
-  blocking or materially useful feedback. Say when the plan is ready."
+  acceptance-criteria, policy, permission/tool-surface, public-contract,
+  release/publish, or material scope-substitution decisions to Open Human
+  Decisions, with concrete options and consequences. Identify only blocking or
+  materially useful feedback. Say when the plan is ready."
 - To the plan creator: "Incorporate the reviewer feedback, update the plan, and
   list any remaining Reviewer Questions and Open Human Decisions. Do not ask the
   human directly. Only keep questions open when they materially affect
-  implementation or product requirements and the reviewer could not answer them."
+  implementation, approved behavior, permission/tool surfaces, public contracts,
+  or product requirements and the reviewer could not answer them."
 - To the plan creator after approval: "The reviewer says the plan is ready.
   Commit and push only the create-plan workflow artifacts for this plan and the
   branch index. Do not include source changes. Report the commit SHA, pushed
@@ -140,6 +175,8 @@ Escalate to the user only for unclear product requirements that the reviewer
 cannot answer confidently, such as final scope boundaries, user-facing behavior,
 business rules, acceptance criteria, or tradeoffs that require product judgment.
 
-Always escalate proposed material scope substitutions, even when the reviewer
-and plan creator agree. The escalation must include the argument for changing
-scope and the consequences of keeping the original scope.
+Always escalate proposed material scope substitutions, behavior changes,
+permission/tool-surface changes, public contract changes, release/publish policy
+changes, or removals/degradations of requested capabilities, even when the
+reviewer and plan creator agree. The escalation must include the argument for
+changing scope and the consequences of preserving the original behavior.

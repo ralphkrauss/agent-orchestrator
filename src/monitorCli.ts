@@ -87,7 +87,9 @@ the wake notification and exits with the documented exit-code table:
   5  daemon unavailable
   6  argument error
 
-This CLI is for non-Claude clients (e.g. external monitoring tools).
+The Claude Code supervisor uses this CLI as its current-turn wake path
+through a pinned background Bash invocation; non-Claude clients (external
+monitoring tools, user shells, etc.) can use it the same way.
 \`--json-line\` is currently always on and is reserved for forward-compat
 with future non-JSON output; the contract is one JSON line per wake.
 `;

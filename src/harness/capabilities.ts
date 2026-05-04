@@ -50,6 +50,18 @@ export interface ValidatedWorkerProfiles {
   profiles: Record<string, ValidatedWorkerProfile>;
 }
 
+export interface InvalidWorkerProfile {
+  id: string;
+  backend: string | null;
+  description: string | null;
+  errors: string[];
+}
+
+export interface InspectedWorkerProfiles extends ValidatedWorkerProfiles {
+  invalid_profiles: Record<string, InvalidWorkerProfile>;
+  errors: string[];
+}
+
 export function createWorkerCapabilityCatalog(statusReport?: BackendStatusReport | null): WorkerCapabilityCatalog {
   const diagnostics = new Map((statusReport?.backends ?? []).map((backend) => [backend.name, backend]));
   const generatedAt = new Date().toISOString();
@@ -119,9 +131,20 @@ export function validateWorkerProfiles(
   manifest: WorkerProfileManifest,
   catalog: WorkerCapabilityCatalog,
 ): { ok: true; value: ValidatedWorkerProfiles } | { ok: false; errors: string[] } {
+  const inspected = inspectWorkerProfiles(manifest, catalog);
+  return inspected.errors.length > 0
+    ? { ok: false, errors: inspected.errors }
+    : { ok: true, value: { manifest: inspected.manifest, profiles: inspected.profiles } };
+}
+
+export function inspectWorkerProfiles(
+  manifest: WorkerProfileManifest,
+  catalog: WorkerCapabilityCatalog,
+): InspectedWorkerProfiles {
   const errors: string[] = [];
   const capabilities = new Map(catalog.backends.map((capability) => [capability.backend, capability]));
   const profiles: Record<string, ValidatedWorkerProfile> = {};
+  const invalid_profiles: Record<string, InvalidWorkerProfile> = {};
 
   if (Object.keys(manifest.profiles).length === 0) {
     errors.push('profiles must contain at least one worker profile');
@@ -129,22 +152,28 @@ export function validateWorkerProfiles(
 
   for (const [profileId, profile] of Object.entries(manifest.profiles)) {
     if (!isSafeId(profileId)) {
-      errors.push(`profile id ${JSON.stringify(profileId)} must use letters, numbers, dots, underscores, or hyphens`);
+      const message = `profile id ${JSON.stringify(profileId)} must use letters, numbers, dots, underscores, or hyphens`;
+      errors.push(message);
+      invalid_profiles[profileId] = invalidProfile(profileId, profile, [message]);
       continue;
     }
     const capability = capabilities.get(profile.backend);
     if (!capability) {
-      errors.push(`profile ${profileId} references unknown backend ${profile.backend}`);
+      const message = `profile ${profileId} references unknown backend ${profile.backend}`;
+      errors.push(message);
+      invalid_profiles[profileId] = invalidProfile(profileId, profile, [message]);
       continue;
     }
     const profileErrors = validateProfile(profileId, profile, capability);
     errors.push(...profileErrors);
     if (profileErrors.length === 0) {
       profiles[profileId] = { id: profileId, ...profile, capability };
+    } else {
+      invalid_profiles[profileId] = invalidProfile(profileId, profile, profileErrors);
     }
   }
 
-  return errors.length > 0 ? { ok: false, errors } : { ok: true, value: { manifest, profiles } };
+  return { manifest, profiles, invalid_profiles, errors };
 }
 
 function availabilityFor(backend: string, status: string | undefined): Pick<WorkerBackendCapability, 'available' | 'availability_status'> {
@@ -201,6 +230,15 @@ function validateCodexProfile(profileId: string, profile: WorkerProfile): string
     return [`profile ${profileId} must use a Codex CLI model id, not provider-prefixed model ${profile.model}`];
   }
   return [];
+}
+
+function invalidProfile(profileId: string, profile: WorkerProfile, errors: string[]): InvalidWorkerProfile {
+  return {
+    id: profileId,
+    backend: profile.backend || null,
+    description: profile.description ?? null,
+    errors,
+  };
 }
 
 function isSafeId(value: string): boolean {

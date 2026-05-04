@@ -11,16 +11,18 @@ import {
   CLAUDE_SUPERVISOR_BUILTIN_TOOLS,
   claudeOrchestratorMcpToolAllowList,
   claudeOrchestratorMcpToolDenyList,
+  evaluateClaudeBashPermission,
   orchestratorMcpToolAllowList,
   stringifyClaudeSupervisorSettings,
 } from '../claude/permission.js';
+import { buildMonitorBashCommand, resolveMonitorPin } from '../claude/monitorPin.js';
 import { validateClaudePassthroughArgs } from '../claude/passthrough.js';
-import { curateOrchestrateSkills, listOrchestrationSkills } from '../claude/skills.js';
+import { curateOrchestrateSkills, listOrchestrationSkills, mirrorClaudeProjectSkills } from '../claude/skills.js';
 import {
   buildClaudeHarnessConfig,
   stringifyClaudeMcpConfig,
 } from '../claude/config.js';
-import { buildClaudeEnvelope, buildClaudeSpawnArgs, parseClaudeLauncherArgs } from '../claude/launcher.js';
+import { buildClaudeEnvelope, buildClaudeSpawnArgs, parseClaudeLauncherArgs, runClaudeLauncher } from '../claude/launcher.js';
 import { createWorkerCapabilityCatalog } from '../harness/capabilities.js';
 
 describe('Claude harness permission and allowlist', () => {
@@ -29,37 +31,260 @@ describe('Claude harness permission and allowlist', () => {
     assert.deepStrictEqual(orchestratorMcpToolAllowList(), expected);
   });
 
-  it('built-in tool surface excludes Bash entirely', () => {
-    assert.deepStrictEqual([...CLAUDE_SUPERVISOR_BUILTIN_TOOLS], ['Read', 'Glob', 'Grep']);
-    for (const entry of buildClaudeAllowedToolsList()) {
-      assert.ok(!entry.startsWith('Bash'), `--allowed-tools must not contain a Bash entry, got ${entry}`);
-    }
+  it('built-in tool surface includes read-only inspection, the pinned Bash monitor, Skill, and MCP tools', () => {
+    const monitorPin = resolveMonitorPin({ AGENT_ORCHESTRATOR_BIN: '/opt/agent-orchestrator' });
+    const allow = buildClaudeAllowedToolsList({
+      monitorBashAllowPatterns: monitorPin.monitor_bash_allow_patterns,
+    });
+    assert.deepStrictEqual([...CLAUDE_SUPERVISOR_BUILTIN_TOOLS], ['Read', 'Glob', 'Grep', 'Bash', 'Skill']);
+    assert.ok(allow.includes('Read'));
+    assert.ok(allow.includes('Glob'));
+    assert.ok(allow.includes('Grep'));
+    assert.ok(allow.includes(`Bash(${process.execPath} /opt/agent-orchestrator monitor * --json-line)`));
+    assert.ok(allow.includes(`Bash(${process.execPath} /opt/agent-orchestrator monitor * --json-line --since *)`));
+    assert.equal(allow.includes(`Bash(${process.execPath} /opt/agent-orchestrator monitor *)`), false, 'broad monitor * pattern must be replaced by explicit argv shapes');
+    // Positive Bash inspection allowlist: pwd and git status are the only
+    // non-monitor commands the supervisor is permitted to run. Other
+    // read-only commands such as `git log`, `cat`, `ls`, etc. are deliberately
+    // not allowlisted, so the deny list does not have to enumerate every
+    // possible bypass.
+    assert.ok(allow.includes('Bash(pwd)'));
+    assert.ok(allow.includes('Bash(git status)'));
+    assert.ok(allow.includes('Bash(git status *)'));
+    assert.equal(allow.includes('Bash(git log *)'), false);
+    assert.equal(allow.includes('Bash(cat *)'), false);
+    assert.equal(allow.includes('Bash(ls *)'), false);
+    assert.ok(allow.includes('Skill'));
+    assert.ok(allow.includes(`mcp__${CLAUDE_MCP_SERVER_NAME}__start_run`));
   });
 
-  it('claudeOrchestratorMcpToolDenyList denies only wait_for_run; wait_for_any_run and list_run_notifications are now allowlisted', () => {
+  it('claudeOrchestratorMcpToolDenyList denies MCP blocking wait tools because Bash monitor is the wake path', () => {
     assert.deepStrictEqual(claudeOrchestratorMcpToolDenyList(), [
+      `mcp__${CLAUDE_MCP_SERVER_NAME}__wait_for_any_run`,
       `mcp__${CLAUDE_MCP_SERVER_NAME}__wait_for_run`,
     ]);
     const allow = claudeOrchestratorMcpToolAllowList();
-    assert.ok(allow.includes(`mcp__${CLAUDE_MCP_SERVER_NAME}__wait_for_any_run`));
     assert.ok(allow.includes(`mcp__${CLAUDE_MCP_SERVER_NAME}__list_run_notifications`));
+    assert.ok(!allow.includes(`mcp__${CLAUDE_MCP_SERVER_NAME}__wait_for_any_run`));
     assert.ok(!allow.includes(`mcp__${CLAUDE_MCP_SERVER_NAME}__wait_for_run`));
   });
 
-  it('builds settings that allow Read/Glob/Grep + agent-orchestrator MCP tools, denying other write/exfil tools', () => {
-    const settings = buildClaudeSupervisorSettings();
+  it('builds settings that allow read-only inspection, the pinned monitor, Skill, and safe MCP tools while denying editing surfaces', () => {
+    const monitorPin = resolveMonitorPin({ AGENT_ORCHESTRATOR_BIN: '/opt/agent-orchestrator' });
+    const settings = buildClaudeSupervisorSettings({
+      monitorBashAllowPatterns: monitorPin.monitor_bash_allow_patterns,
+    });
     assert.deepStrictEqual(
       [...settings.permissions.allow].sort(),
-      ['Glob', 'Grep', 'Read', ...claudeOrchestratorMcpToolAllowList()].sort(),
+      [
+        'Read',
+        'Glob',
+        'Grep',
+        `Bash(${process.execPath} /opt/agent-orchestrator monitor * --json-line)`,
+        `Bash(${process.execPath} /opt/agent-orchestrator monitor * --json-line --since *)`,
+        'Bash(pwd)',
+        'Bash(git status)',
+        'Bash(git status *)',
+        'Skill',
+        ...claudeOrchestratorMcpToolAllowList(),
+      ].sort(),
     );
     assert.equal(settings.permissions.defaultMode, 'dontAsk');
     for (const denied of ['Edit', 'Write', 'WebFetch', 'WebSearch', 'Task', 'NotebookEdit', 'TodoWrite']) {
       assert.ok(settings.permissions.deny.includes(denied), `${denied} must be denied`);
     }
+    for (const denied of ['Bash(*;*)', 'Bash(*&*)', 'Bash(*|*)', 'Bash(*>*)', 'Bash(*<*)', 'Bash(*$*)', 'Bash(*`*)']) {
+      assert.ok(settings.permissions.deny.includes(denied), `${denied} must be denied`);
+    }
+    assert.ok(settings.permissions.deny.includes('Bash(*&*)'), 'Bash(*&*) must block && command chaining');
+    for (const denied of ['Bash(touch *)', 'Bash(rm *)', 'Bash(mv *)', 'Bash(cp *)', 'Bash(git add *)', 'Bash(git commit *)', 'Bash(git push *)']) {
+      assert.ok(settings.permissions.deny.includes(denied), `${denied} must be denied`);
+    }
+    // Script interpreters and inline-script flags are denied so write/exec
+    // escape hatches such as `python -c ...` cannot run even if the model picks
+    // a binary that was not enumerated by name. `node` is intentionally omitted
+    // from first-token denies because the pinned monitor itself runs through
+    // process.execPath; generic node commands are still not permitted by the
+    // positive allowlist and inline execution is caught below.
+    for (const denied of [
+      'Bash(python *)', 'Bash(python3 *)', 'Bash(*/python *)', 'Bash(*/python3 *)',
+      'Bash(perl *)', 'Bash(ruby *)', 'Bash(php *)',
+      'Bash(bash *)', 'Bash(sh *)', 'Bash(zsh *)',
+      'Bash(*/bash *)', 'Bash(*/sh *)',
+      'Bash(eval *)', 'Bash(exec *)', 'Bash(env *)', 'Bash(xargs *)', 'Bash(sudo *)',
+      'Bash(*-e *)', 'Bash(*-c *)', 'Bash(*--eval*)', 'Bash(*--exec*)',
+    ]) {
+      assert.ok(settings.permissions.deny.includes(denied), `${denied} must be denied`);
+    }
+    assert.equal(settings.permissions.deny.includes('Bash(node *)'), false, 'node first-token deny would shadow the pinned monitor');
+    assert.equal(settings.permissions.deny.includes('Bash(*/node *)'), false, 'absolute node deny would shadow the pinned monitor');
+    assert.equal(evaluateClaudeBashPermission(settings, `${process.execPath} -e "process.exit(0)"`).permitted, false);
+    // Package managers and network/file-transfer tools are denied so the
+    // supervisor cannot install code or exfiltrate via curl/wget/ssh/etc.
+    for (const denied of [
+      'Bash(npm *)', 'Bash(pnpm *)', 'Bash(yarn *)', 'Bash(npx *)',
+      'Bash(pip *)', 'Bash(pip3 *)', 'Bash(pipx *)', 'Bash(uv *)', 'Bash(uvx *)',
+      'Bash(cargo *)', 'Bash(go *)', 'Bash(brew *)', 'Bash(apt *)', 'Bash(apt-get *)',
+      'Bash(curl *)', 'Bash(wget *)', 'Bash(scp *)', 'Bash(rsync *)', 'Bash(ssh *)',
+      'Bash(docker *)', 'Bash(kubectl *)',
+      'Bash(make *)', 'Bash(just *)',
+    ]) {
+      assert.ok(settings.permissions.deny.includes(denied), `${denied} must be denied`);
+    }
+    // Mutating or network-touching git subcommands beyond the originals are
+    // also denied so `git rm`, `git fetch`, `git pull`, `git clone`, etc. cannot run.
+    for (const denied of [
+      'Bash(git rm *)', 'Bash(git mv *)', 'Bash(git fetch *)', 'Bash(git pull *)',
+      'Bash(git clone *)', 'Bash(git init)', 'Bash(git init *)',
+      'Bash(git worktree *)', 'Bash(git remote *)', 'Bash(git submodule *)',
+      'Bash(git ls-remote *)', 'Bash(git update-index *)', 'Bash(git update-ref *)',
+      'Bash(git filter-branch *)', 'Bash(git revert *)',
+    ]) {
+      assert.ok(settings.permissions.deny.includes(denied), `${denied} must be denied`);
+    }
+    // Bypass-resistance: git global options that smuggle a mutating subcommand
+    // past first-token deny entries (`git -C dir add file`,
+    // `git --git-dir=.git add file`), and shell command-dispatch builtins
+    // (`command touch x`, `builtin touch x`) are explicitly denied.
+    for (const denied of [
+      'Bash(git -C *)', 'Bash(git -c *)',
+      'Bash(git --git-dir*)', 'Bash(git --work-tree*)',
+      'Bash(git --no-pager *)', 'Bash(git --exec-path*)',
+      'Bash(command *)', 'Bash(*/command *)', 'Bash(builtin *)',
+      'Bash(*\\*)',
+    ]) {
+      assert.ok(settings.permissions.deny.includes(denied), `${denied} must be denied`);
+    }
+    assert.equal(settings.permissions.deny.includes('Bash'), false, 'bare Bash deny would shadow the pinned monitor allow rule');
+    assert.equal(settings.permissions.deny.includes('Skill'), false);
+    assert.equal(settings.permissions.deny.includes('Read'), false);
+    assert.equal(settings.permissions.deny.includes('Glob'), false);
+    assert.equal(settings.permissions.deny.includes('Grep'), false);
+    assert.ok(settings.permissions.deny.includes(`mcp__${CLAUDE_MCP_SERVER_NAME}__wait_for_any_run`));
     assert.ok(settings.permissions.deny.includes(`mcp__${CLAUDE_MCP_SERVER_NAME}__wait_for_run`));
     assert.equal(settings.enableAllProjectMcpServers, false);
     const json = stringifyClaudeSupervisorSettings(settings);
     JSON.parse(json);
+  });
+
+  it('builds monitor commands only for daemon-generated id shapes', () => {
+    const monitorPin = resolveMonitorPin({ AGENT_ORCHESTRATOR_BIN: '/opt/agent-orchestrator' });
+    assert.equal(
+      buildMonitorBashCommand(monitorPin, '01KQRTVEP1Y0ANFYCSXZJ2FHPZ'),
+      `${process.execPath} /opt/agent-orchestrator monitor 01KQRTVEP1Y0ANFYCSXZJ2FHPZ --json-line`,
+    );
+    assert.throws(() => buildMonitorBashCommand(monitorPin, '01KQRTVEP1Y0ANFYCSXZJ2FHPZ;touch /tmp/x'));
+    assert.throws(() => buildMonitorBashCommand(monitorPin, '01KQRTVEP1Y0ANFYCSXZJ2FHPZ', true, 'bad;cursor'));
+  });
+
+  it('POSIX-quotes monitor command tokens that contain spaces or parentheses', () => {
+    const pin = resolveMonitorPin({ AGENT_ORCHESTRATOR_BIN: '/opt/agent orchestrator (1)/cli.js' });
+    // The bin contains a space and parentheses, so it must be single-quoted in
+    // both the command_prefix_string used in prompts and in the explicit Bash
+    // allow patterns derived from it. Spaces and parens are not in the
+    // supervisor's Bash deny list, so the allow rule remains effective.
+    assert.ok(pin.command_prefix_string.includes(`'/opt/agent orchestrator (1)/cli.js'`));
+    for (const pattern of pin.monitor_bash_allow_patterns) {
+      assert.ok(pattern.startsWith('Bash('));
+      assert.ok(pattern.includes(`'/opt/agent orchestrator (1)/cli.js'`));
+    }
+    assert.equal(
+      buildMonitorBashCommand(pin, '01KQRTVEP1Y0ANFYCSXZJ2FHPZ'),
+      `${pin.command_prefix_string} monitor 01KQRTVEP1Y0ANFYCSXZJ2FHPZ --json-line`,
+    );
+  });
+
+  it('rejects monitor paths that would survive POSIX quoting and be shadowed by the Bash deny list', () => {
+    // Each of these characters is denied by `Bash(*<char>*)` regardless of
+    // context, so a path containing them — even when single-quoted — would
+    // produce an allow pattern the deny list would shadow. The single quote in
+    // particular is unsafe because POSIX quoting transforms it to `'\''`,
+    // which contains a backslash and matches `Bash(*\\*)`. resolveMonitorPin
+    // must fail fast with an actionable error rather than emit an allow rule
+    // that silently does not match the spawned monitor command.
+    for (const unsafeBin of [
+      `/opt/o'q/cli.js`,    // single quote -> `'\''` -> contains `\`
+      '/opt/a;b/cli.js',    // semicolon -> Bash(*;*) deny
+      '/opt/a&b/cli.js',    // ampersand -> Bash(*&*) deny
+      '/opt/a|b/cli.js',    // pipe      -> Bash(*|*) deny
+      '/opt/a$b/cli.js',    // dollar    -> Bash(*$*) deny
+      '/opt/a`b/cli.js',    // backtick  -> Bash(*`*) deny
+      '/opt/a\\b/cli.js',   // backslash -> Bash(*\\*) deny
+      '/opt/a<b/cli.js',    // redirect  -> Bash(*<*) deny
+      '/opt/a>b/cli.js',    // redirect  -> Bash(*>*) deny
+      '/opt/a\nb/cli.js',   // newline   -> Bash(*\n*) deny
+    ]) {
+      assert.throws(
+        () => resolveMonitorPin({ AGENT_ORCHESTRATOR_BIN: unsafeBin }),
+        /Bash deny list would shadow|Reinstall agent-orchestrator/,
+        `expected resolveMonitorPin to reject ${JSON.stringify(unsafeBin)}`,
+      );
+    }
+  });
+
+  it('exposes explicit monitor argv shapes (no broad monitor *) in monitor_bash_allow_patterns', () => {
+    const pin = resolveMonitorPin({ AGENT_ORCHESTRATOR_BIN: '/opt/agent-orchestrator' });
+    assert.deepStrictEqual(pin.monitor_bash_allow_patterns, [
+      `Bash(${process.execPath} /opt/agent-orchestrator monitor * --json-line)`,
+      `Bash(${process.execPath} /opt/agent-orchestrator monitor * --json-line --since *)`,
+    ]);
+  });
+
+  it('permits the exact pinned monitor commands without deny-list shadowing', () => {
+    const pin = resolveMonitorPin({ AGENT_ORCHESTRATOR_BIN: '/opt/agent-orchestrator' });
+    const settings = buildClaudeSupervisorSettings({
+      monitorBashAllowPatterns: pin.monitor_bash_allow_patterns,
+    });
+    const runId = '01KQRTVEP1Y0ANFYCSXZJ2FHPZ';
+    const notificationId = '00000000000000000151-01KQRTW38GARC7T3EMG6BTRD2N';
+    for (const command of [
+      buildMonitorBashCommand(pin, runId),
+      buildMonitorBashCommand(pin, runId, true, notificationId),
+    ]) {
+      const decision = evaluateClaudeBashPermission(settings, command);
+      assert.ok(decision.allowedBy.length > 0, `${command} must match a monitor allow pattern`);
+      assert.deepStrictEqual(decision.deniedBy, [], `${command} must not match any deny pattern`);
+      assert.equal(decision.permitted, true);
+    }
+
+    for (const command of [
+      'touch /tmp/x',
+      `${process.execPath} -e "require('fs').writeFileSync('/tmp/x','x')"`,
+      'git add README.md',
+      'git -C . add README.md',
+      'command touch /tmp/x',
+      `${buildMonitorBashCommand(pin, runId)} && touch /tmp/x`,
+    ]) {
+      assert.equal(evaluateClaudeBashPermission(settings, command).permitted, false, `${command} must not be permitted`);
+    }
+  });
+
+  it('rejects the bare monitor form so all emitted commands stay inside the JSON-line allowlist', () => {
+    const pin = resolveMonitorPin({ AGENT_ORCHESTRATOR_BIN: '/opt/agent-orchestrator' });
+    const settings = buildClaudeSupervisorSettings({
+      monitorBashAllowPatterns: pin.monitor_bash_allow_patterns,
+    });
+    const runId = '01KQRTVEP1Y0ANFYCSXZJ2FHPZ';
+    const notificationId = '00000000000000000151-01KQRTW38GARC7T3EMG6BTRD2N';
+    // The bare form would produce a command the supervisor's own allowlist
+    // (which only enumerates --json-line shapes) does not match. The builder
+    // must refuse it instead of silently emitting an unallowlisted command.
+    assert.throws(
+      () => buildMonitorBashCommand(pin, runId, false),
+      /must use --json-line/,
+    );
+    // The supported no-cursor and cursored JSON-line shapes still match the
+    // generated Bash allow patterns and are not shadowed by deny rules.
+    for (const command of [
+      buildMonitorBashCommand(pin, runId),
+      buildMonitorBashCommand(pin, runId, true, notificationId),
+    ]) {
+      assert.ok(command.endsWith('--json-line') || command.includes('--json-line --since '));
+      const decision = evaluateClaudeBashPermission(settings, command);
+      assert.ok(decision.allowedBy.length > 0, `${command} must match a monitor allow pattern`);
+      assert.deepStrictEqual(decision.deniedBy, [], `${command} must not match any deny pattern`);
+      assert.equal(decision.permitted, true);
+    }
   });
 });
 
@@ -82,10 +307,8 @@ describe('Claude passthrough hardening', () => {
       '--permission-mode',
       '--tools',
       '--disable-slash-commands',
-      // --bare disables skill / CLAUDE.md / plugin / MCP auto-discovery,
-      // which would hide the curated <envelope>/.claude/skills/orchestrate-*
-      // surface the supervisor depends on. Forbidden for the same reason as
-      // --disable-slash-commands.
+      // --bare changes Claude memory, plugin, auth/keychain, and discovery
+      // behavior owned by the harness envelope.
       '--bare',
     ]) {
       const result = validateClaudePassthroughArgs([flag]);
@@ -122,7 +345,10 @@ describe('Claude skill curation', () => {
     assert.deepStrictEqual(listed, ['orchestrate-create-plan', 'orchestrate-implement-plan']);
 
     const ephemeral = await mkdtemp(join(tmpdir(), 'agent-claude-skills-out-'));
-    const result = await curateOrchestrateSkills({ sourceSkillRoot: sourceRoot, ephemeralSkillRoot: ephemeral });
+    const result = await curateOrchestrateSkills({
+      sourceSkillRoot: sourceRoot,
+      ephemeralSkillRoot: ephemeral,
+    });
     assert.deepStrictEqual(result.orchestrationSkillNames, ['orchestrate-create-plan', 'orchestrate-implement-plan']);
     const body = await readFile(join(ephemeral, 'orchestrate-implement-plan', 'SKILL.md'), 'utf8');
     assert.match(body, /orchestrate-implement-plan/);
@@ -149,43 +375,169 @@ describe('Claude skill curation', () => {
     assert.deepStrictEqual(result.orchestrationSkillNames, ['orchestrate-good']);
     await assert.rejects(() => readFile(join(ephemeral, 'orchestrate-evil', 'SKILL.md'), 'utf8'));
   });
+
+  it('mirrors normal workspace skills into the redirected user skill root and skips symlinks', async () => {
+    const sourceRoot = await mkdtemp(join(tmpdir(), 'agent-claude-project-skills-'));
+    await mkdir(join(sourceRoot, 'orchestrate-good', 'references'), { recursive: true });
+    await writeFile(join(sourceRoot, 'orchestrate-good', 'SKILL.md'), '---\nname: orchestrate-good\n---\n');
+    await writeFile(join(sourceRoot, 'orchestrate-good', 'references', 'notes.md'), 'details');
+    await mkdir(join(sourceRoot, 'review'), { recursive: true });
+    await writeFile(join(sourceRoot, 'review', 'SKILL.md'), '---\nname: review\n---\n');
+    await mkdir(join(sourceRoot, 'bad'), { recursive: true });
+    const sensitiveFile = join(sourceRoot, '..', 'sensitive.txt');
+    await writeFile(sensitiveFile, 'do-not-copy');
+    await symlink(sensitiveFile, join(sourceRoot, 'bad', 'SKILL.md'));
+
+    const targetRoot = await mkdtemp(join(tmpdir(), 'agent-claude-user-skills-'));
+    const result = await mirrorClaudeProjectSkills({ sourceSkillRoot: sourceRoot, targetSkillRoot: targetRoot });
+
+    assert.deepStrictEqual(result.skillNames, ['orchestrate-good', 'review']);
+    assert.match(await readFile(join(targetRoot, 'orchestrate-good', 'SKILL.md'), 'utf8'), /orchestrate-good/);
+    assert.equal(await readFile(join(targetRoot, 'orchestrate-good', 'references', 'notes.md'), 'utf8'), 'details');
+    assert.match(await readFile(join(targetRoot, 'review', 'SKILL.md'), 'utf8'), /review/);
+    await assert.rejects(() => readFile(join(targetRoot, 'bad', 'SKILL.md'), 'utf8'));
+  });
+
+  it('re-validates SKILL.md at the copy/read boundary and refuses files swapped to a symlink after discovery', async () => {
+    const sourceRoot = await mkdtemp(join(tmpdir(), 'agent-claude-skill-tocttou-'));
+    await mkdir(join(sourceRoot, 'orchestrate-good'), { recursive: true });
+    const goodSkillFile = join(sourceRoot, 'orchestrate-good', 'SKILL.md');
+    await writeFile(goodSkillFile, '---\nname: orchestrate-good\n---\nlegitimate body');
+    // Drop in another regular-file skill that will be swapped to a symlink
+    // after listClaudeSkills has run.
+    await mkdir(join(sourceRoot, 'orchestrate-evil'), { recursive: true });
+    const evilSkillFile = join(sourceRoot, 'orchestrate-evil', 'SKILL.md');
+    await writeFile(evilSkillFile, '---\nname: orchestrate-evil\n---\nplaceholder');
+    const sensitiveFile = join(sourceRoot, '..', 'tocttou-secret.txt');
+    await writeFile(sensitiveFile, 'do-not-curate');
+
+    // Discovery sees both as regular files.
+    const listed = await listOrchestrationSkills(sourceRoot);
+    assert.deepStrictEqual(listed, ['orchestrate-evil', 'orchestrate-good']);
+
+    // Swap the evil skill to a symlink that points outside the source root.
+    const { rm: rmFile, symlink: symlinkAsync } = await import('node:fs/promises');
+    await rmFile(evilSkillFile);
+    await symlinkAsync(sensitiveFile, evilSkillFile);
+
+    const ephemeral = await mkdtemp(join(tmpdir(), 'agent-claude-skill-tocttou-out-'));
+    const result = await curateOrchestrateSkills({ sourceSkillRoot: sourceRoot, ephemeralSkillRoot: ephemeral });
+    assert.deepStrictEqual(result.orchestrationSkillNames, ['orchestrate-good']);
+    await assert.rejects(() => readFile(join(ephemeral, 'orchestrate-evil', 'SKILL.md'), 'utf8'));
+    for (const skill of result.orchestrationSkills) {
+      assert.equal(skill.name, 'orchestrate-good');
+      assert.doesNotMatch(skill.content, /do-not-curate/);
+    }
+  });
+
+  it('propagates unexpected I/O errors during skill re-validation rather than silently dropping required orchestrate-* skills', async () => {
+    if (process.getuid?.() === 0) return; // root bypasses permission bits; skip
+    const sourceRoot = await mkdtemp(join(tmpdir(), 'agent-claude-skill-eacces-'));
+    await mkdir(join(sourceRoot, 'orchestrate-good'), { recursive: true });
+    const skillFile = join(sourceRoot, 'orchestrate-good', 'SKILL.md');
+    await writeFile(skillFile, '---\nname: orchestrate-good\n---\nbody');
+    const { chmod } = await import('node:fs/promises');
+    await chmod(skillFile, 0o000);
+    const ephemeral = await mkdtemp(join(tmpdir(), 'agent-claude-skill-eacces-out-'));
+    try {
+      await assert.rejects(
+        () => curateOrchestrateSkills({ sourceSkillRoot: sourceRoot, ephemeralSkillRoot: ephemeral }),
+        (error: NodeJS.ErrnoException) => error.code === 'EACCES' || error.code === 'EPERM',
+        'unexpected open(...) errors must surface, not silently drop the skill',
+      );
+    } finally {
+      await chmod(skillFile, 0o600);
+    }
+  });
+
+  it('rejects unsafe skill directory names (newlines, control characters, leading punctuation) before they enter the prompt or skill mirror', async () => {
+    const sourceRoot = await mkdtemp(join(tmpdir(), 'agent-claude-unsafe-skills-'));
+    await mkdir(join(sourceRoot, 'orchestrate-good'), { recursive: true });
+    await writeFile(join(sourceRoot, 'orchestrate-good', 'SKILL.md'), '---\nname: orchestrate-good\n---\nbody');
+    // Names with newlines, control characters, or path-shaped prefixes are
+    // skipped so they cannot inject prompt lines or escape the skill root.
+    for (const unsafeName of ['orchestrate-bad\nNew-Section', 'orchestrate\tname', '.hidden-skill', '-leading-dash', 'has space']) {
+      await mkdir(join(sourceRoot, unsafeName), { recursive: true });
+      await writeFile(join(sourceRoot, unsafeName, 'SKILL.md'), '---\nname: x\n---\n');
+    }
+
+    const listed = await listOrchestrationSkills(sourceRoot);
+    assert.deepStrictEqual(listed, ['orchestrate-good']);
+
+    const ephemeral = await mkdtemp(join(tmpdir(), 'agent-claude-unsafe-skills-out-'));
+    const result = await curateOrchestrateSkills({ sourceSkillRoot: sourceRoot, ephemeralSkillRoot: ephemeral });
+    assert.deepStrictEqual(result.orchestrationSkillNames, ['orchestrate-good']);
+
+    const targetRoot = await mkdtemp(join(tmpdir(), 'agent-claude-unsafe-mirror-'));
+    const mirror = await mirrorClaudeProjectSkills({ sourceSkillRoot: sourceRoot, targetSkillRoot: targetRoot });
+    assert.deepStrictEqual(mirror.skillNames, ['orchestrate-good']);
+  });
 });
 
 describe('Claude harness config builder', () => {
-  it('builds a system prompt that uses MCP wait_for_any_run as the primary wake path and excludes Bash entirely', () => {
+  it('builds a system prompt that uses pinned Bash monitors as the primary wake path and embeds curated workflows', () => {
+    const monitorPin = resolveMonitorPin({ AGENT_ORCHESTRATOR_BIN: '/opt/agent-orchestrator' });
     const catalog = createWorkerCapabilityCatalog(null);
     const config = buildClaudeHarnessConfig({
       targetCwd: '/tmp/work',
       manifestPath: '/tmp/work/profiles.json',
       ephemeralSkillRoot: '/tmp/skills',
       orchestrationSkillNames: ['orchestrate-create-plan', 'orchestrate-implement-plan'],
+      orchestrationSkills: [
+        { name: 'orchestrate-create-plan', content: '# plan workflow\nUse the planning loop.' },
+        { name: 'orchestrate-implement-plan', content: '# implementation workflow\nUse the implementation loop.' },
+      ],
+      runtimeSkillRoot: '/tmp/home/.claude/skills',
+      runtimeSkillNames: ['orchestrate-create-plan', 'review'],
       catalog,
       profileDiagnostics: [],
       mcpCliPath: '/opt/agent-orchestrator/dist/cli.js',
+      monitorPin,
     });
     assert.match(config.systemPrompt, /agent-orchestrator/);
     assert.match(config.systemPrompt, /orchestrate-create-plan/);
     assert.match(config.systemPrompt, /persistent agent-orchestrator daemon owns worker subprocesses/);
     assert.match(config.systemPrompt, /runs continue in the daemon after the supervisor returns control/);
     assert.match(config.systemPrompt, /durable notification records are authoritative/);
-    assert.match(config.systemPrompt, /Bash is not available in this envelope/);
-    assert.match(config.systemPrompt, /mcp__agent-orchestrator__wait_for_any_run/);
+    assert.match(config.systemPrompt, /Bash is restricted by an explicit allowlist/);
+    assert.match(config.systemPrompt, /Bash\(pwd\), Bash\(git status\), and Bash\(git status \*\)/);
+    assert.match(config.systemPrompt, /will be denied/);
+    assert.match(config.systemPrompt, /Do not attempt to run other shell commands/);
+    assert.match(config.systemPrompt, /\/opt\/agent-orchestrator monitor <run_id> --json-line/);
+    assert.match(config.systemPrompt, /Bash run_in_background: true/);
+    assert.match(config.systemPrompt, /Claude slash commands are enabled/);
+    assert.match(config.systemPrompt, /Skill tool is available/);
+    assert.match(config.systemPrompt, /Embedded orchestration workflow instructions/);
+    assert.match(config.systemPrompt, /# plan workflow/);
+    assert.match(config.systemPrompt, /upsert_worker_profile/);
     assert.match(config.systemPrompt, /mcp__agent-orchestrator__list_run_notifications/);
     assert.match(config.systemPrompt, /For each active run, use exactly one active wait mechanism at a time/);
     assert.match(config.systemPrompt, /Progress and status checks/);
     assert.match(config.systemPrompt, /mcp__agent-orchestrator__get_run_progress first/);
     assert.match(config.systemPrompt, /Do not inspect Claude Code internal files under \.claude\/projects or tool-results/);
+    assert.match(config.systemPrompt, /Do not call wait_for_any_run or wait_for_run in the Claude supervisor/);
     assert.match(config.systemPrompt, /Cross-turn reconciliation/);
-    assert.doesNotMatch(config.systemPrompt, /pinned monitor/i);
-    assert.doesNotMatch(config.systemPrompt, /run_in_background/);
+    assert.doesNotMatch(config.systemPrompt, /^- mcp__agent-orchestrator__wait_for_any_run$/m);
+    assert.doesNotMatch(config.systemPrompt, /^- mcp__agent-orchestrator__wait_for_run$/m);
     assert.deepStrictEqual(Object.keys(config.mcpConfig.mcpServers), [CLAUDE_MCP_SERVER_NAME]);
+    // The MCP server entry pins the writable profiles manifest path so the
+    // MCP frontend can refuse upsert_worker_profile calls that target other
+    // paths.
+    assert.deepStrictEqual(
+      config.mcpConfig.mcpServers[CLAUDE_MCP_SERVER_NAME]?.env,
+      { AGENT_ORCHESTRATOR_WRITABLE_PROFILES_FILE: '/tmp/work/profiles.json' },
+    );
     const mcpJson = stringifyClaudeMcpConfig(config.mcpConfig);
-    JSON.parse(mcpJson);
+    const parsedMcp = JSON.parse(mcpJson);
+    assert.equal(
+      parsedMcp.mcpServers['agent-orchestrator'].env.AGENT_ORCHESTRATOR_WRITABLE_PROFILES_FILE,
+      '/tmp/work/profiles.json',
+    );
   });
 });
 
 describe('Claude launcher envelope', () => {
-  it('builds an isolated envelope: --strict-mcp-config + MCP-only wake path, no Bash, no --add-dir, no --dangerously-skip-permissions, no --disable-slash-commands', async () => {
+  it('builds a restricted workspace launch: --strict-mcp-config + read-only tools + pinned Bash monitor, no --add-dir, no dangerous permissions', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'agent-claude-launch-'));
     const skillsPath = join(cwd, '.agents', 'skills');
     await mkdir(join(skillsPath, 'orchestrate-foo'), { recursive: true });
@@ -198,46 +550,67 @@ describe('Claude launcher envelope', () => {
 
     const parsed = parseClaudeLauncherArgs(
       ['--cwd', cwd, '--profiles-file', profilesPath, '--skills', skillsPath, '--state-dir', stateDir],
-      {},
+      { AGENT_ORCHESTRATOR_BIN: '/opt/agent-orchestrator' },
       cwd,
     );
     assert.equal(parsed.ok, true);
     if (!parsed.ok) return;
     const built = await buildClaudeEnvelope({
       options: parsed.value,
-      env: {},
+      env: { AGENT_ORCHESTRATOR_BIN: '/opt/agent-orchestrator' },
       catalog: createWorkerCapabilityCatalog(null),
       profilesResult: { profiles: undefined, diagnostics: [] },
     });
     try {
       const settings = JSON.parse(built.settingsContent);
+      assert.equal(built.launchCwd, cwd);
       assert.equal(settings.enableAllProjectMcpServers, false);
       assert.ok(Array.isArray(settings.permissions.allow));
       assert.equal(settings.permissions.defaultMode, 'dontAsk');
-      for (const entry of settings.permissions.allow) {
-        assert.ok(!String(entry).startsWith('Bash'), `settings.permissions.allow must not include any Bash entry, got ${entry}`);
-      }
+      assert.ok(settings.permissions.allow.includes(`Bash(${process.execPath} /opt/agent-orchestrator monitor * --json-line)`));
+      assert.ok(settings.permissions.allow.includes(`Bash(${process.execPath} /opt/agent-orchestrator monitor * --json-line --since *)`));
+      assert.equal(settings.permissions.allow.includes(`Bash(${process.execPath} /opt/agent-orchestrator monitor *)`), false, 'broad monitor * pattern must be replaced by explicit argv shapes');
+      assert.ok(settings.permissions.allow.includes('Skill'));
+      assert.ok(settings.permissions.allow.includes('Read'));
+      assert.ok(settings.permissions.allow.includes('Glob'));
+      assert.ok(settings.permissions.allow.includes('Grep'));
+      assert.equal(settings.permissions.deny.includes('Bash'), false);
+      assert.equal(settings.permissions.deny.includes('Skill'), false);
+      assert.equal(settings.permissions.deny.includes('Read'), false);
+      assert.equal(settings.permissions.deny.includes('Glob'), false);
+      assert.equal(settings.permissions.deny.includes('Grep'), false);
+      assert.equal(settings.permissions.deny.includes('Edit'), true);
+      assert.equal(settings.permissions.deny.includes('Write'), true);
+      assert.ok(settings.permissions.deny.includes('Bash(*;*)'));
+      assert.ok(settings.permissions.deny.includes('Bash(*&*)'));
       const mcp = JSON.parse(built.mcpConfigContent);
       assert.deepStrictEqual(Object.keys(mcp.mcpServers), [CLAUDE_MCP_SERVER_NAME]);
+      assert.equal(
+        mcp.mcpServers[CLAUDE_MCP_SERVER_NAME].env.AGENT_ORCHESTRATOR_WRITABLE_PROFILES_FILE,
+        profilesPath,
+        'Claude MCP entry must pin the writable profiles manifest path so the supervisor cannot use upsert_worker_profile to write arbitrary files',
+      );
       assert.ok(built.spawnArgs.includes('--strict-mcp-config'), 'spawn args must include --strict-mcp-config');
       assert.ok(!built.spawnArgs.includes('--dangerously-skip-permissions'));
       assert.ok(!built.spawnArgs.includes('--disable-slash-commands'));
       assert.ok(!built.spawnArgs.includes('--add-dir'));
       assert.ok(built.spawnArgs.includes('--tools'));
       const toolsValue = built.spawnArgs[built.spawnArgs.indexOf('--tools') + 1] ?? '';
-      assert.equal(toolsValue, 'Read,Glob,Grep', '--tools must contain only Read,Glob,Grep (no Bash)');
+      assert.equal(toolsValue, 'Read,Glob,Grep,Bash,Skill');
       assert.ok(built.spawnArgs.includes('--allowed-tools'));
       const allowedTools = built.spawnArgs[built.spawnArgs.indexOf('--allowed-tools') + 1] ?? '';
       const allowedTokens = allowedTools.split(',');
       assert.ok(allowedTokens.includes('Read'));
       assert.ok(allowedTokens.includes('Glob'));
       assert.ok(allowedTokens.includes('Grep'));
+      assert.ok(allowedTokens.includes(`Bash(${process.execPath} /opt/agent-orchestrator monitor * --json-line)`));
+      assert.ok(allowedTokens.includes(`Bash(${process.execPath} /opt/agent-orchestrator monitor * --json-line --since *)`));
+      assert.equal(allowedTokens.includes(`Bash(${process.execPath} /opt/agent-orchestrator monitor *)`), false);
+      assert.ok(allowedTokens.includes('Skill'));
       assert.ok(allowedTokens.includes('mcp__agent-orchestrator__start_run'));
-      assert.ok(allowedTokens.includes('mcp__agent-orchestrator__wait_for_any_run'));
+      assert.ok(allowedTokens.includes('mcp__agent-orchestrator__upsert_worker_profile'));
       assert.ok(allowedTokens.includes('mcp__agent-orchestrator__list_run_notifications'));
-      for (const token of allowedTokens) {
-        assert.ok(!token.startsWith('Bash'), `--allowed-tools must not contain a Bash entry, got ${token}`);
-      }
+      assert.ok(!allowedTokens.includes('mcp__agent-orchestrator__wait_for_any_run'));
       assert.ok(!allowedTokens.includes('mcp__agent-orchestrator__wait_for_run'));
       assert.ok(built.spawnArgs.includes('--permission-mode'));
       assert.equal(built.spawnArgs[built.spawnArgs.indexOf('--permission-mode') + 1], 'dontAsk');
@@ -245,6 +618,12 @@ describe('Claude launcher envelope', () => {
       assert.equal(built.spawnEnv.HOME, join(stateDir, 'home'));
       assert.equal(built.spawnEnv.XDG_CONFIG_HOME, join(stateDir, 'home', '.config'));
       assert.equal(built.spawnEnv.CLAUDE_CONFIG_DIR, join(stateDir, 'home', '.claude'));
+      assert.equal(built.userSkillsRoot, join(stateDir, 'home', '.claude', 'skills'));
+      assert.deepStrictEqual(built.userSkillNames, []);
+      assert.deepStrictEqual(
+        JSON.parse(await readFile(join(stateDir, 'home', '.claude', 'settings.json'), 'utf8')),
+        settings,
+      );
       assert.equal(built.spawnEnv.NO_COLOR, undefined);
       assert.equal(built.spawnEnv.AGENT_ORCHESTRATOR_HOME, process.env.AGENT_ORCHESTRATOR_HOME ?? join(process.env.HOME ?? '', '.agent-orchestrator'));
       assert.notEqual(built.spawnEnv.HOME, join(built.envelopeDir, 'home'));
@@ -263,7 +642,7 @@ describe('Claude launcher envelope', () => {
       await writeFile(join(built.envelopeDir, 'CLAUDE.md'), 'stale project memory');
       const rebuilt = await buildClaudeEnvelope({
         options: parsed.value,
-        env: {},
+        env: { AGENT_ORCHESTRATOR_BIN: '/opt/agent-orchestrator' },
         catalog: createWorkerCapabilityCatalog(null),
         profilesResult: { profiles: undefined, diagnostics: [] },
       });
@@ -318,41 +697,83 @@ describe('Claude launcher envelope', () => {
     }
   });
 
+  it('rejects inline --profiles-json that fails manifest validation (matches the syntax-error fail-fast behavior)', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'agent-claude-bad-inline-manifest-'));
+    // Manifest schema is strict; an unknown top-level field triggers
+    // parseWorkerProfileManifest to reject the manifest.
+    const badManifest = JSON.stringify({ version: 1, profiles: {}, unexpected: true });
+    let stderr = '';
+    const code = await runClaudeLauncher(
+      ['--cwd', cwd, '--profiles-json', badManifest, '--print-config'],
+      {
+        stdout: { write: () => true } as unknown as NodeJS.WritableStream,
+        stderr: { write: (chunk: string | Uint8Array) => { stderr += typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'); return true; } } as unknown as NodeJS.WritableStream,
+        env: { AGENT_ORCHESTRATOR_HOME: join(cwd, 'home') },
+      },
+    );
+    assert.equal(code, 1, 'inline manifest validation errors must fail fast');
+    assert.notEqual(stderr, '', 'expected an error message on stderr');
+  });
+
+  it('rejects inline --profiles-json that parses but fails inspectWorkerProfiles (semantic errors must also fail fast)', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'agent-claude-bad-inline-inspect-'));
+    // Schema is satisfied (the manifest parses), but the profile id contains
+    // characters that inspectWorkerProfiles rejects, so this manifest fails at
+    // semantic inspection rather than at parse time.
+    const inspectFailureManifest = JSON.stringify({
+      version: 1,
+      profiles: {
+        'bad id!': { backend: 'claude', model: 'claude-opus-4-7' },
+      },
+    });
+    let stderr = '';
+    const code = await runClaudeLauncher(
+      ['--cwd', cwd, '--profiles-json', inspectFailureManifest, '--print-config'],
+      {
+        stdout: { write: () => true } as unknown as NodeJS.WritableStream,
+        stderr: { write: (chunk: string | Uint8Array) => { stderr += typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'); return true; } } as unknown as NodeJS.WritableStream,
+        env: { AGENT_ORCHESTRATOR_HOME: join(cwd, 'home') },
+      },
+    );
+    assert.equal(code, 1, 'inline manifest inspection errors must fail fast');
+    assert.notEqual(stderr, '', 'expected an error message on stderr');
+  });
+
   it('buildClaudeSpawnArgs sets the canonical isolation flags, comma-joined --allowed-tools, and deny-by-default mode', () => {
     const args = buildClaudeSpawnArgs({
       settingsPath: '/x/settings.json',
       mcpConfigPath: '/x/mcp.json',
       systemPromptPath: '/x/system.md',
-      builtinTools: ['Read', 'Glob', 'Grep'],
-      allowedTools: ['Read', 'Glob', 'Grep', 'mcp__agent-orchestrator__start_run', 'mcp__agent-orchestrator__wait_for_any_run'],
+      builtinTools: ['Read', 'Glob', 'Grep', 'Bash', 'Skill'],
+      allowedTools: ['Read', 'Glob', 'Grep', 'Bash(/x/agent-orchestrator monitor *)', 'Skill', 'mcp__agent-orchestrator__start_run'],
       passthrough: ['--print', '--output-format', 'json'],
     });
     assert.ok(args.includes('--strict-mcp-config'));
     assert.ok(args.includes('--mcp-config'));
     assert.ok(args.includes('--settings'));
     assert.ok(args.includes('--setting-sources'));
-    assert.equal(args[args.indexOf('--setting-sources') + 1], '');
+    assert.equal(args[args.indexOf('--setting-sources') + 1], 'user');
+    assert.ok(!args.includes('--disable-slash-commands'));
     assert.ok(args.includes('--append-system-prompt-file'));
     assert.ok(args.includes('--tools'));
-    assert.equal(args[args.indexOf('--tools') + 1], 'Read,Glob,Grep');
+    assert.equal(args[args.indexOf('--tools') + 1], 'Read,Glob,Grep,Bash,Skill');
     assert.ok(args.includes('--allowed-tools'));
     const allowedValue = args[args.indexOf('--allowed-tools') + 1] ?? '';
     assert.deepStrictEqual(
       allowedValue.split(','),
-      ['Read', 'Glob', 'Grep', 'mcp__agent-orchestrator__start_run', 'mcp__agent-orchestrator__wait_for_any_run'],
+      ['Read', 'Glob', 'Grep', 'Bash(/x/agent-orchestrator monitor *)', 'Skill', 'mcp__agent-orchestrator__start_run'],
       '--allowed-tools must be comma-joined and round-trip the input list exactly',
     );
     assert.ok(args.includes('--permission-mode'));
     assert.equal(args[args.indexOf('--permission-mode') + 1], 'dontAsk');
     assert.ok(!args.includes('--dangerously-skip-permissions'));
-    assert.ok(!args.includes('--disable-slash-commands'));
     assert.ok(!args.includes('--add-dir'));
     assert.deepStrictEqual(args.slice(-3), ['--print', '--output-format', 'json'], 'passthrough args appended last');
   });
 });
 
 describe('Claude launcher leak-proof tests', () => {
-  it('does not load poisoned project-level .claude/* or .mcp.json from the target workspace, exposes only orchestrate-* skills, and never exposes Bash to the supervisor', async () => {
+  it('uses the target workspace for normal skills while restricting MCP/settings and embedded orchestrate instructions', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'agent-claude-leak-'));
     await writeFile(join(cwd, '.mcp.json'), JSON.stringify({ mcpServers: { evil: { command: 'evil' } } }));
     await mkdir(join(cwd, '.claude'), { recursive: true });
@@ -372,12 +793,16 @@ describe('Claude launcher leak-proof tests', () => {
     await writeFile(join(skillsPath, 'review', 'SKILL.md'), '---\nname: review\n---\n');
     const stateDir = join(cwd, 'claude-state');
 
-    const parsed = parseClaudeLauncherArgs(['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir], {}, cwd);
+    const parsed = parseClaudeLauncherArgs(
+      ['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir],
+      { AGENT_ORCHESTRATOR_BIN: '/opt/agent-orchestrator' },
+      cwd,
+    );
     assert.equal(parsed.ok, true);
     if (!parsed.ok) return;
     const built = await buildClaudeEnvelope({
       options: parsed.value,
-      env: {},
+      env: { AGENT_ORCHESTRATOR_BIN: '/opt/agent-orchestrator' },
       catalog: createWorkerCapabilityCatalog(null),
       profilesResult: { profiles: undefined, diagnostics: [] },
     });
@@ -388,79 +813,138 @@ describe('Claude launcher leak-proof tests', () => {
       const settings = JSON.parse(built.settingsContent);
       assert.equal(settings.enableAllProjectMcpServers, false);
       assert.ok(built.spawnArgs.includes('--setting-sources'));
-      assert.equal(built.spawnArgs[built.spawnArgs.indexOf('--setting-sources') + 1], '');
+      assert.equal(built.spawnArgs[built.spawnArgs.indexOf('--setting-sources') + 1], 'user');
+      assert.equal(built.launchCwd, cwd);
       const curated = await readFile(join(built.skillsRoot, 'orchestrate-good', 'SKILL.md'), 'utf8');
       assert.match(curated, /orchestrate-good/);
       await assert.rejects(() => readFile(join(built.skillsRoot, 'evil-skill', 'SKILL.md'), 'utf8'));
       await assert.rejects(() => readFile(join(built.skillsRoot, 'review', 'SKILL.md'), 'utf8'));
-      const projectClaude = join(built.envelopeDir, '.claude');
-      const entries = (await readFile(join(projectClaude, 'skills', 'orchestrate-good', 'SKILL.md'), 'utf8'));
+      assert.match(await readFile(join(cwd, '.claude', 'skills', 'evil-skill', 'SKILL.md'), 'utf8'), /name: evil/);
+      assert.equal(built.userSkillsRoot, join(stateDir, 'home', '.claude', 'skills'));
+      assert.deepStrictEqual(built.userSkillNames, ['evil-skill']);
+      assert.match(await readFile(join(built.userSkillsRoot, 'evil-skill', 'SKILL.md'), 'utf8'), /name: evil/);
+      const envelopeClaude = join(built.envelopeDir, '.claude');
+      const entries = (await readFile(join(envelopeClaude, 'skills', 'orchestrate-good', 'SKILL.md'), 'utf8'));
       assert.match(entries, /orchestrate-good/);
-      await assert.rejects(() => readFile(join(projectClaude, 'commands', 'evil.md'), 'utf8'));
-      await assert.rejects(() => readFile(join(projectClaude, 'agents', 'evil-agent.md'), 'utf8'));
-      await assert.rejects(() => readFile(join(projectClaude, 'hooks', 'evil.sh'), 'utf8'));
-      await assert.rejects(() => readFile(join(projectClaude, 'settings.json'), 'utf8'));
+      const targetClaude = join(cwd, '.claude');
+      assert.match(await readFile(join(targetClaude, 'commands', 'evil.md'), 'utf8'), /evil/);
+      assert.match(await readFile(join(targetClaude, 'agents', 'evil-agent.md'), 'utf8'), /evil/);
+      assert.match(await readFile(join(targetClaude, 'hooks', 'evil.sh'), 'utf8'), /#!\/bin\/sh/);
+      assert.match(await readFile(join(targetClaude, 'settings.json'), 'utf8'), /permissions/);
       await assert.rejects(() => readFile(join(built.envelopeDir, '.mcp.json'), 'utf8'));
       assert.ok(!built.spawnArgs.includes('--add-dir'));
-      assert.equal(built.spawnArgs[built.spawnArgs.indexOf('--tools') + 1], 'Read,Glob,Grep');
+      assert.ok(!built.spawnArgs.includes('--disable-slash-commands'));
+      assert.equal(built.spawnArgs[built.spawnArgs.indexOf('--tools') + 1], 'Read,Glob,Grep,Bash,Skill');
       assert.ok(built.spawnArgs.includes('--allowed-tools'));
       const allowedValue = built.spawnArgs[built.spawnArgs.indexOf('--allowed-tools') + 1] ?? '';
       const allowedTokens = allowedValue.split(',');
-      assert.ok(allowedTokens.includes('mcp__agent-orchestrator__wait_for_any_run'));
+      assert.ok(allowedTokens.includes(`Bash(${process.execPath} /opt/agent-orchestrator monitor * --json-line)`));
+      assert.ok(allowedTokens.includes(`Bash(${process.execPath} /opt/agent-orchestrator monitor * --json-line --since *)`));
+      assert.equal(allowedTokens.includes(`Bash(${process.execPath} /opt/agent-orchestrator monitor *)`), false);
+      assert.ok(allowedTokens.includes('Skill'));
+      assert.ok(allowedTokens.includes('Read'));
+      assert.ok(allowedTokens.includes('Glob'));
+      assert.ok(allowedTokens.includes('Grep'));
+      assert.ok(!allowedTokens.includes('mcp__agent-orchestrator__wait_for_any_run'));
       assert.ok(allowedTokens.includes('mcp__agent-orchestrator__list_run_notifications'));
-      for (const token of allowedTokens) {
-        assert.ok(!token.startsWith('Bash'), `--allowed-tools must not contain a Bash entry, got ${token}`);
-      }
+      assert.ok(allowedTokens.includes('mcp__agent-orchestrator__upsert_worker_profile'));
       assert.equal(built.spawnArgs[built.spawnArgs.indexOf('--permission-mode') + 1], 'dontAsk');
       assert.notEqual(built.spawnEnv.HOME, process.env.HOME);
       assert.equal(built.spawnEnv.HOME, join(stateDir, 'home'));
       assert.equal(built.spawnEnv.CLAUDE_CONFIG_DIR, join(stateDir, 'home', '.claude'));
+      assert.deepStrictEqual(
+        JSON.parse(await readFile(join(stateDir, 'home', '.claude', 'settings.json'), 'utf8')),
+        settings,
+      );
       assert.equal(built.spawnEnv.NO_COLOR, undefined);
       assert.notEqual(built.spawnEnv.HOME, join(built.envelopeDir, 'home'));
       const promptText = built.systemPrompt;
-      assert.match(promptText, /mcp__agent-orchestrator__wait_for_any_run/);
+      assert.match(promptText, /Bash is restricted by an explicit allowlist/);
+      assert.match(promptText, /Do not attempt to run other shell commands/);
+      assert.match(promptText, /Bash run_in_background: true/);
+      assert.match(promptText, /Claude slash commands are enabled/);
+      assert.match(promptText, /Skill tool is available/);
+      assert.match(promptText, /Embedded orchestration workflow instructions/);
+      assert.match(promptText, /orchestrate-good/);
+      assert.doesNotMatch(promptText, /^- mcp__agent-orchestrator__wait_for_any_run$/m);
       assert.match(promptText, /mcp__agent-orchestrator__list_run_notifications/);
-      assert.match(promptText, /Bash is not available in this envelope/);
       assert.match(promptText, /For each active run, use exactly one active wait mechanism at a time/);
       assert.match(promptText, /mcp__agent-orchestrator__get_run_progress first/);
-      assert.doesNotMatch(promptText, /pinned monitor/i);
-      assert.doesNotMatch(promptText, /run_in_background/);
     } finally {
       await built.cleanup();
     }
     assert.equal((await stat(stateDir)).isDirectory(), true);
   });
 
-  it('Bash is excluded across the entire supervisor envelope', async () => {
+  it('Bash allows read-only inspection and the pinned monitor while write-shaped shell commands are denied', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'agent-claude-no-bash-'));
     const skillsPath = join(cwd, '.agents', 'skills');
     await mkdir(join(skillsPath, 'orchestrate-foo'), { recursive: true });
     await writeFile(join(skillsPath, 'orchestrate-foo', 'SKILL.md'), '---\nname: orchestrate-foo\n---\nbody');
     const stateDir = join(cwd, 'claude-state');
-    const parsed = parseClaudeLauncherArgs(['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir], {}, cwd);
+    const parsed = parseClaudeLauncherArgs(
+      ['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir],
+      { AGENT_ORCHESTRATOR_BIN: '/opt/agent-orchestrator' },
+      cwd,
+    );
     assert.equal(parsed.ok, true);
     if (!parsed.ok) return;
     const built = await buildClaudeEnvelope({
       options: parsed.value,
-      env: {},
+      env: { AGENT_ORCHESTRATOR_BIN: '/opt/agent-orchestrator' },
       catalog: createWorkerCapabilityCatalog(null),
       profilesResult: { profiles: undefined, diagnostics: [] },
     });
     try {
       const toolsValue = built.spawnArgs[built.spawnArgs.indexOf('--tools') + 1] ?? '';
       const allowedValue = built.spawnArgs[built.spawnArgs.indexOf('--allowed-tools') + 1] ?? '';
-      assert.ok(!toolsValue.includes('Bash'), `--tools must not include Bash, got ${toolsValue}`);
-      assert.ok(!allowedValue.includes('Bash'), `--allowed-tools must not include Bash, got ${allowedValue}`);
+      assert.equal(toolsValue, 'Read,Glob,Grep,Bash,Skill');
+      assert.ok(allowedValue.includes(`Bash(${process.execPath} /opt/agent-orchestrator monitor * --json-line)`));
+      assert.ok(allowedValue.includes(`Bash(${process.execPath} /opt/agent-orchestrator monitor * --json-line --since *)`));
+      assert.equal(allowedValue.includes(`Bash(${process.execPath} /opt/agent-orchestrator monitor *)`), false);
+      assert.ok(allowedValue.split(',').includes('Read'));
+      assert.ok(allowedValue.split(',').includes('Glob'));
+      assert.ok(allowedValue.split(',').includes('Grep'));
+      assert.ok(allowedValue.split(',').includes('Skill'));
       const settings = JSON.parse(built.settingsContent);
-      for (const entry of settings.permissions.allow) {
-        assert.ok(!String(entry).startsWith('Bash'), `settings.permissions.allow must not include Bash, got ${entry}`);
-      }
+      // The Bash allow rules are exactly: pinned monitor, pwd, git status,
+      // git status *. Any other Bash command (including read-only commands
+      // such as `git log`, `cat`, `ls`, plus the bypasses such as
+      // `git -C . add` or `command touch /tmp/x`) is not in the allow list,
+      // so it is denied by the deny-by-default permission mode.
+      const bashAllow = settings.permissions.allow.filter((entry: string) => entry.startsWith('Bash')).sort();
+      assert.deepStrictEqual(
+        bashAllow,
+        [
+          `Bash(${process.execPath} /opt/agent-orchestrator monitor * --json-line)`,
+          `Bash(${process.execPath} /opt/agent-orchestrator monitor * --json-line --since *)`,
+          'Bash(git status)',
+          'Bash(git status *)',
+          'Bash(pwd)',
+        ].sort(),
+      );
+      assert.deepStrictEqual(settings.permissions.allow.filter((entry: string) => entry.startsWith('Skill')), ['Skill']);
+      assert.ok(settings.permissions.allow.includes('Read'));
+      assert.ok(settings.permissions.allow.includes('Glob'));
+      assert.ok(settings.permissions.allow.includes('Grep'));
+      assert.equal(settings.permissions.deny.includes('Bash'), false);
+      assert.equal(settings.permissions.deny.includes('Skill'), false);
+      assert.equal(settings.permissions.deny.includes('Read'), false);
+      assert.equal(settings.permissions.deny.includes('Glob'), false);
+      assert.equal(settings.permissions.deny.includes('Grep'), false);
+      assert.equal(settings.permissions.deny.includes('Edit'), true);
+      assert.equal(settings.permissions.deny.includes('Write'), true);
+      assert.ok(settings.permissions.deny.includes('Bash(*;*)'));
+      assert.ok(settings.permissions.deny.includes('Bash(*&*)'), 'Bash(*&*) must block && command chaining');
+      assert.ok(settings.permissions.deny.includes('Bash(*$*)'));
+      assert.ok(settings.permissions.deny.includes('Bash(touch *)'));
+      assert.ok(settings.permissions.deny.includes('Bash(rm *)'));
+      assert.ok(settings.permissions.deny.includes('Bash(git add *)'));
+      assert.ok(settings.permissions.deny.includes('Bash(git push *)'));
       const bashLines = built.systemPrompt.split('\n').filter((line) => /\bBash\b/.test(line));
-      // The only acceptable mention of Bash is the explicit "not available" line.
-      assert.equal(bashLines.length, 1, `system prompt must mention Bash exactly once, got: ${bashLines.join('\\n')}`);
-      assert.match(bashLines[0]!, /not available in this envelope/);
-      assert.doesNotMatch(built.systemPrompt, /Bash run_in_background/);
-      assert.doesNotMatch(built.systemPrompt, /pinned monitor/i);
+      assert.ok(bashLines.some((line) => /restricted by an explicit allowlist/.test(line)));
+      assert.match(built.systemPrompt, /Bash run_in_background: true/);
+      assert.match(built.systemPrompt, /Do not call wait_for_any_run or wait_for_run in the Claude supervisor/);
     } finally {
       await built.cleanup();
     }

@@ -1,8 +1,13 @@
 import { connect } from 'node:net';
 import { once } from 'node:events';
 import { createRpcRequest, FrameReader, writeFrame } from './protocol.js';
-import { orchestratorError, type OrchestratorError, RpcResponseSchema, type RpcMethod } from '../contract.js';
+import { orchestratorError, type OrchestratorError, type RpcPolicyContext, RpcResponseSchema, type RpcMethod } from '../contract.js';
 import { getPackageVersion } from '../packageMetadata.js';
+
+export interface IpcRequestOptions {
+  timeoutMs?: number;
+  policyContext?: RpcPolicyContext;
+}
 
 export class IpcClient {
   constructor(
@@ -10,11 +15,19 @@ export class IpcClient {
     private readonly frontendVersion = getPackageVersion(),
   ) {}
 
-  async request<T = unknown>(method: RpcMethod, params?: unknown, timeoutMs = 30_000): Promise<T> {
+  async request<T = unknown>(
+    method: RpcMethod,
+    params?: unknown,
+    optionsOrTimeoutMs: IpcRequestOptions | number = 30_000,
+  ): Promise<T> {
+    const options: IpcRequestOptions = typeof optionsOrTimeoutMs === 'number'
+      ? { timeoutMs: optionsOrTimeoutMs }
+      : optionsOrTimeoutMs;
+    const timeoutMs = options.timeoutMs ?? 30_000;
     const socket = connect(this.socketPath);
     try {
       await once(socket, 'connect');
-      const request = createRpcRequest(method, params, this.frontendVersion);
+      const request = createRpcRequest(method, params, this.frontendVersion, options.policyContext);
       const reader = new FrameReader();
       return await new Promise<T>((resolve, reject) => {
         const timer = setTimeout(() => {

@@ -49,7 +49,7 @@ export const tools = [
   },
   {
     name: 'list_worker_profiles',
-    description: 'List validated worker profile aliases from the live profiles file.',
+    description: 'List worker profile aliases from the live profiles file. Returns valid profiles plus invalid profile diagnostics so one broken profile does not hide the rest.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -62,6 +62,51 @@ export const tools = [
           description: 'Base directory for resolving a relative profiles_file.',
         },
       },
+    },
+  },
+  {
+    name: 'upsert_worker_profile',
+    description: 'Create or replace one worker profile in the live profiles manifest, then validate that profile. Use this to repair profile setup without dispatching a worker to edit config files.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        profiles_file: {
+          type: 'string',
+          description: 'Profiles manifest to update. Defaults to ~/.config/agent-orchestrator/profiles.json.',
+        },
+        cwd: {
+          type: 'string',
+          description: 'Base directory for resolving a relative profiles_file.',
+        },
+        profile: {
+          type: 'string',
+          description: 'Profile alias to create or replace.',
+        },
+        backend: {
+          type: 'string',
+          enum: ['codex', 'claude', 'cursor'],
+        },
+        model: {
+          type: 'string',
+          description: 'Worker model id for this profile.',
+        },
+        variant: { type: 'string' },
+        reasoning_effort: {
+          type: 'string',
+          enum: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+        },
+        service_tier: {
+          type: 'string',
+          enum: ['fast', 'flex', 'normal'],
+        },
+        description: { type: 'string' },
+        metadata: { type: 'object', additionalProperties: true },
+        create_if_missing: {
+          type: 'boolean',
+          description: 'When false, fail if the profile alias does not already exist. Defaults to true.',
+        },
+      },
+      required: ['profile', 'backend'],
     },
   },
   {

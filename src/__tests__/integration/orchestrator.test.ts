@@ -40,6 +40,28 @@ describe('agent orchestrator integration with mock CLIs', () => {
     assert.equal((result.ok ? (result as unknown as { run_summary: { session_id: string } }).run_summary : null)?.session_id, 'codex-session-1');
   });
 
+  it('get_run_result falls back to the last assistant message for older empty-summary results', async () => {
+    const fixture = await createFixture();
+    const store = new RunStore(fixture.home);
+    const service = new OrchestratorService(store, createBackendRegistry(store));
+    await service.initialize();
+    const run = await store.createRun({ backend: 'codex', cwd: fixture.root });
+    await store.appendEvent(run.run_id, { type: 'assistant_message', payload: { text: 'Stored final answer.' } });
+    await store.markTerminal(run.run_id, 'completed', [], {
+      status: 'completed',
+      summary: '',
+      files_changed: [],
+      commands_run: [],
+      artifacts: [],
+      errors: [],
+    });
+
+    const result = await service.getRunResult({ run_id: run.run_id });
+    assert.equal(result.ok, true);
+    const payload = result.ok ? (result as unknown as { result: { summary: string } }).result : null;
+    assert.equal(payload?.summary, 'Stored final answer.');
+  });
+
   it('runs Claude in a non-git cwd with event-derived files_changed fallback', async () => {
     const fixture = await createFixture();
     const cwd = await mkdtemp(join(tmpdir(), 'agent-non-git-'));
@@ -218,11 +240,12 @@ describe('agent orchestrator integration with mock CLIs', () => {
     process.env.PATH = join(fixture.root, 'missing-bin');
 
     const listed = await service.listWorkerProfiles({ profiles_file: profilesFile, cwd: repo });
-    assert.equal(listed.ok, false);
-    assert.match(
-      listed.ok ? '' : listed.error.message,
-      /profile live-implementation uses unavailable backend codex \(missing\)/,
-    );
+    assert.equal(listed.ok, true);
+    const listedProfiles = listed as unknown as { invalid_profiles: Array<{ id: string; errors: string[] }>; profiles: unknown[]; diagnostics: string[] };
+    assert.deepStrictEqual(listedProfiles.profiles, []);
+    assert.equal(listedProfiles.invalid_profiles[0]?.id, 'live-implementation');
+    assert.ok(listedProfiles.invalid_profiles[0]?.errors.some((error) => /profile live-implementation uses unavailable backend codex \(missing\)/.test(error)));
+    assert.ok(listedProfiles.diagnostics.some((error) => /profile live-implementation uses unavailable backend codex \(missing\)/.test(error)));
 
     const start = await service.startRun({
       profile: 'live-implementation',
@@ -236,6 +259,262 @@ describe('agent orchestrator integration with mock CLIs', () => {
       /profile live-implementation uses unavailable backend codex \(missing\)/,
     );
     assert.deepStrictEqual(await service.store.listRuns(), []);
+  });
+
+  it('keeps valid live profiles usable when another profile is invalid', async () => {
+    const fixture = await createFixture();
+    const repo = await createGitRepo(fixture.root);
+    const service = await createService(fixture.home);
+    const profilesFile = join(fixture.root, 'profiles.json');
+    await writeFile(profilesFile, JSON.stringify({
+      version: 1,
+      profiles: {
+        'live-implementation': {
+          backend: 'codex',
+          model: 'gpt-5.2',
+          reasoning_effort: 'high',
+        },
+        'broken-cursor': {
+          backend: 'cursor',
+          model: 'composer-2',
+          reasoning_effort: 'high',
+        },
+      },
+    }, null, 2));
+
+    const listed = await service.listWorkerProfiles({ profiles_file: profilesFile, cwd: repo });
+    assert.equal(listed.ok, true);
+    const payload = listed as unknown as {
+      profiles: Array<{ id: string; backend: string }>;
+      invalid_profiles: Array<{ id: string; errors: string[] }>;
+    };
+    assert.deepStrictEqual(payload.profiles.map((profile) => profile.id), ['live-implementation']);
+    assert.equal(payload.invalid_profiles[0]?.id, 'broken-cursor');
+    assert.ok(payload.invalid_profiles[0]?.errors.some((error) => /reasoning_effort/.test(error)));
+
+    const start = await service.startRun({
+      profile: 'live-implementation',
+      profiles_file: profilesFile,
+      prompt: 'hello despite invalid peer',
+      cwd: repo,
+    });
+    assert.equal(start.ok, true);
+    const runId = start.ok ? (start as unknown as { run_id: string }).run_id : '';
+    await service.waitForRun({ run_id: runId, wait_seconds: 5 });
+
+    const broken = await service.startRun({
+      profile: 'broken-cursor',
+      profiles_file: profilesFile,
+      prompt: 'should not launch',
+      cwd: repo,
+    });
+    assertInvalidInput(broken, /Worker profile broken-cursor is invalid/);
+  });
+
+  it('upserts one worker profile through the daemon while preserving unrelated invalid profile diagnostics', async () => {
+    const fixture = await createFixture();
+    const repo = await createGitRepo(fixture.root);
+    const service = await createService(fixture.home);
+    const profilesFile = join(fixture.root, 'profiles.json');
+    await writeFile(profilesFile, JSON.stringify({
+      version: 1,
+      profiles: {
+        implementation: {
+          backend: 'codex',
+          model: 'openai/gpt-5.2',
+          reasoning_effort: 'high',
+        },
+        unrelated: {
+          backend: 'cursor',
+          model: 'composer-2',
+          reasoning_effort: 'high',
+        },
+      },
+    }, null, 2));
+
+    const repaired = await service.upsertWorkerProfile({
+      profiles_file: profilesFile,
+      cwd: repo,
+      profile: 'implementation',
+      backend: 'codex',
+      model: 'gpt-5.4',
+      reasoning_effort: 'medium',
+      description: 'Implementation worker',
+    });
+    assert.equal(repaired.ok, true);
+    const repairedPayload = repaired as unknown as {
+      profile: { id: string; model: string; reasoning_effort: string };
+      previous_profile: { model: string };
+      invalid_profiles: Array<{ id: string; errors: string[] }>;
+    };
+    assert.equal(repairedPayload.profile.id, 'implementation');
+    assert.equal(repairedPayload.profile.model, 'gpt-5.4');
+    assert.equal(repairedPayload.profile.reasoning_effort, 'medium');
+    assert.equal(repairedPayload.previous_profile.model, 'openai/gpt-5.2');
+    assert.equal(repairedPayload.invalid_profiles[0]?.id, 'unrelated');
+
+    const file = JSON.parse(await readFile(profilesFile, 'utf8')) as {
+      profiles: Record<string, Record<string, unknown>>;
+    };
+    assert.deepStrictEqual(file.profiles.implementation, {
+      backend: 'codex',
+      model: 'gpt-5.4',
+      reasoning_effort: 'medium',
+      description: 'Implementation worker',
+    });
+    assert.equal(file.profiles.unrelated?.reasoning_effort, 'high');
+
+    const listed = await service.listWorkerProfiles({ profiles_file: profilesFile, cwd: repo });
+    assert.equal(listed.ok, true);
+    const listedPayload = listed as unknown as {
+      profiles: Array<{ id: string; model: string }>;
+      invalid_profiles: Array<{ id: string }>;
+    };
+    assert.deepStrictEqual(listedPayload.profiles.map((profile) => profile.id), ['implementation']);
+    assert.equal(listedPayload.invalid_profiles[0]?.id, 'unrelated');
+  });
+
+  it('enforces per-request writable-profiles policy context inside the daemon write path', async () => {
+    const fixture = await createFixture();
+    const repo = await createGitRepo(fixture.root);
+    const service = await createService(fixture.home);
+    const pinnedFile = join(fixture.root, 'pinned.json');
+    const otherFile = join(fixture.root, 'other.json');
+    await writeFile(pinnedFile, JSON.stringify({ version: 1, profiles: {} }, null, 2));
+    await writeFile(otherFile, JSON.stringify({ version: 1, profiles: {} }, null, 2));
+
+    // Pinned-path upsert with matching policy context succeeds.
+    const allowed = await service.dispatch('upsert_worker_profile', {
+      profiles_file: pinnedFile,
+      cwd: repo,
+      profile: 'planner',
+      backend: 'codex',
+      model: 'gpt-5.4',
+      reasoning_effort: 'medium',
+    }, { policy_context: { writable_profiles_file: pinnedFile } });
+    const allowedRes = allowed as { ok: boolean };
+    assert.equal(allowedRes.ok, true, 'pinned-path upsert with matching policy must succeed');
+
+    // Non-pinned upsert with policy context is denied by the daemon write path.
+    const denied = await service.dispatch('upsert_worker_profile', {
+      profiles_file: otherFile,
+      cwd: repo,
+      profile: 'planner',
+      backend: 'codex',
+      model: 'gpt-5.4',
+      reasoning_effort: 'medium',
+    }, { policy_context: { writable_profiles_file: pinnedFile } });
+    const deniedRes = denied as { ok: false; error: { code: string; message: string } };
+    assert.equal(deniedRes.ok, false);
+    assert.equal(deniedRes.error.code, 'INVALID_INPUT');
+    assert.match(deniedRes.error.message, /restricted to the harness-pinned profiles manifest/);
+    const otherContent = JSON.parse(await readFile(otherFile, 'utf8')) as { profiles: Record<string, unknown> };
+    assert.deepStrictEqual(otherContent.profiles, {}, 'denied upsert must not write to non-pinned manifest');
+
+    // Generic client without policy context can write any path.
+    const generic = await service.dispatch('upsert_worker_profile', {
+      profiles_file: otherFile,
+      cwd: repo,
+      profile: 'planner',
+      backend: 'codex',
+      model: 'gpt-5.4',
+      reasoning_effort: 'medium',
+    });
+    const genericRes = generic as { ok: boolean };
+    assert.equal(genericRes.ok, true, 'generic client (no policy context) keeps current behavior');
+  });
+
+  it('serializes concurrent upserts to the same manifest so neither change is lost', async () => {
+    const fixture = await createFixture();
+    const repo = await createGitRepo(fixture.root);
+    const service = await createService(fixture.home);
+    const profilesFile = join(fixture.root, 'profiles.json');
+    await writeFile(profilesFile, JSON.stringify({ version: 1, profiles: {} }, null, 2));
+
+    const [a, b] = await Promise.all([
+      service.upsertWorkerProfile({
+        profiles_file: profilesFile,
+        cwd: repo,
+        profile: 'one',
+        backend: 'codex',
+        model: 'gpt-5.4',
+        reasoning_effort: 'medium',
+      }),
+      service.upsertWorkerProfile({
+        profiles_file: profilesFile,
+        cwd: repo,
+        profile: 'two',
+        backend: 'codex',
+        model: 'gpt-5.4',
+        reasoning_effort: 'high',
+      }),
+    ]);
+    assert.equal(a.ok, true);
+    assert.equal(b.ok, true);
+    const persisted = JSON.parse(await readFile(profilesFile, 'utf8')) as {
+      profiles: Record<string, { reasoning_effort?: string }>;
+    };
+    assert.equal(persisted.profiles.one?.reasoning_effort, 'medium', 'first concurrent upsert must persist');
+    assert.equal(persisted.profiles.two?.reasoning_effort, 'high', 'second concurrent upsert must persist');
+  });
+
+  it('writes profiles atomically so concurrent readers never observe a partial manifest', async () => {
+    const fixture = await createFixture();
+    const repo = await createGitRepo(fixture.root);
+    const service = await createService(fixture.home);
+    const profilesFile = join(fixture.root, 'profiles.json');
+    const originalManifest = {
+      version: 1,
+      profiles: {
+        seed: { backend: 'codex', model: 'gpt-5.4', reasoning_effort: 'low' },
+      },
+    };
+    await writeFile(profilesFile, `${JSON.stringify(originalManifest, null, 2)}\n`);
+
+    let stop = false;
+    const observed: string[] = [];
+    const reader = (async () => {
+      while (!stop) {
+        try {
+          const text = await readFile(profilesFile, 'utf8');
+          observed.push(text);
+        } catch (error) {
+          const code = typeof error === 'object' && error && 'code' in error ? String(error.code) : '';
+          // ENOENT would mean a truncate/replace race made the live file
+          // disappear, which is exactly what the atomic rename prevents.
+          assert.ok(code === 'ENOENT' ? false : true, `unexpected read error ${code}`);
+        }
+      }
+    })();
+
+    const writes: Array<Promise<unknown>> = [];
+    for (let i = 0; i < 8; i += 1) {
+      writes.push(
+        service.upsertWorkerProfile({
+          profiles_file: profilesFile,
+          cwd: repo,
+          profile: `p${i}`,
+          backend: 'codex',
+          model: 'gpt-5.4',
+          reasoning_effort: i % 2 === 0 ? 'medium' : 'high',
+        }),
+      );
+    }
+    const results = await Promise.all(writes);
+    for (const result of results) {
+      assert.equal((result as { ok: boolean }).ok, true);
+    }
+    stop = true;
+    await reader;
+
+    // Every observed snapshot during the write storm must be parseable JSON
+    // with the manifest shape; a truncated file would throw at JSON.parse.
+    assert.ok(observed.length > 0, 'reader should have observed at least one snapshot');
+    for (const snapshot of observed) {
+      const parsed = JSON.parse(snapshot) as { version?: number; profiles?: Record<string, unknown> };
+      assert.equal(parsed.version, 1, 'every observed snapshot must have manifest version 1');
+      assert.equal(typeof parsed.profiles, 'object');
+    }
   });
 
   it('rejects model settings that a backend cannot apply', async () => {

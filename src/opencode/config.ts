@@ -228,7 +228,9 @@ function formatProfileDiagnostics(profiles: ValidatedWorkerProfiles | undefined,
 
 function formatProfiles(profiles: ValidatedWorkerProfiles | undefined): string {
   if (!profiles) return '- No validated profiles loaded. Configure the profiles manifest before starting worker runs.';
-  return Object.values(profiles.profiles)
+  const validProfiles = Object.values(profiles.profiles);
+  if (validProfiles.length === 0) return '- No validated profiles are currently usable.';
+  return validProfiles
     .sort((a, b) => a.id.localeCompare(b.id))
     .map((profile) => {
       const settings = [

@@ -22,6 +22,9 @@ runs and does not directly edit source, commit, or push.
   manifest.
 - If the required validated profile aliases are unavailable, stop and ask the
   user to configure valid profiles before starting worker runs.
+- If the user asks the supervisor to repair a worker profile, use
+  `list_worker_profiles` diagnostics and `upsert_worker_profile`. Do not start a
+  worker just to edit the profiles manifest.
 
 ## Context Isolation Rules
 
@@ -35,6 +38,27 @@ runs and does not directly edit source, commit, or push.
   reviewer sessions with follow-up prompts. The implementer keeps the context of
   the full implementation, and the reviewer keeps the context of prior findings
   and fixes.
+
+## Change Classification And Approval
+
+Classify every implementer proposal and reviewer finding before turning it into
+work:
+
+- **Routine fix:** small bugfixes, local implementation corrections, tests,
+  docs, evidence updates, and refactors that preserve the approved plan,
+  accepted behavior, public contracts, permission/tool surfaces, and user-facing
+  workflow. Workers should handle these without interrupting the human.
+- **Human approval required:** any change that modifies or removes an approved
+  capability, changes product or user-facing behavior, alters CLI/MCP/API
+  contracts, changes worker orchestration flow, permission/tool surfaces,
+  security boundaries, release/publish behavior, dependency policy, or replaces
+  a named technology/API/SDK. These must become **Open Human Decisions** before
+  implementation.
+
+Security or code-review feedback is not permission to change scope by itself.
+When a finding exposes risk in an approved behavior, first look for a fix that
+preserves the behavior. If the available fix would materially change behavior or
+tooling, pause and ask the human with options.
 
 ## Workflow
 
@@ -52,6 +76,11 @@ runs and does not directly edit source, commit, or push.
      source, tests, and docs;
    - implement tasks narrowly and update plan evidence as required by the
      repository workflow;
+   - preserve the plan's approved behavior, public contracts, orchestration
+     workflow, and permission/tool surfaces unless the human explicitly approves
+     changing them;
+   - stop and report an **Open Human Decision** if a safe fix appears to require
+     changing approved behavior or removing/degrading a requested capability;
    - run the narrowest meaningful verification, then broader checks if feasible;
    - avoid committing, pushing, or changing unrelated files during this pass;
    - report changed files, task status, verification commands/results, residual
@@ -71,23 +100,35 @@ runs and does not directly edit source, commit, or push.
    - identify correctness, compatibility, error handling, persistence,
      cancellation, observability, security, and test coverage issues where
      relevant;
+   - classify each blocking finding as either a routine fix that preserves the
+     approved behavior or a human-approval-required behavior/scope/tooling
+     change;
+   - propose behavior-preserving fixes before recommending behavior removal or
+     permission/tool-surface changes;
    - separate blocking findings from non-blocking suggestions and test gaps;
    - say explicitly when the implementation is ready.
 5. **Iterate with existing sessions.** If the reviewer has blocking or material
-   feedback, send that feedback to the existing implementer session with
-   `send_followup`. Ask it to fix the findings, update plan evidence, rerun the
-   relevant verification, and report what changed. Then send the implementer's
-   response back to the existing reviewer session with `send_followup` for
-   re-review. Continue until:
+   feedback, classify it first. Send routine fixes to the existing implementer
+   session with `send_followup`. If the feedback would change approved behavior,
+   scope, public contracts, permission/tool surfaces, security boundaries,
+   release/publish behavior, dependency policy, or remove/degrade a requested
+   capability, pause and ask the human before asking the implementer to make
+   that change. For routine fixes, ask the implementer to fix the findings,
+   update plan evidence, rerun the relevant verification, and report what
+   changed. Then send the implementer's response back to the existing reviewer
+   session with `send_followup` for re-review. Continue until:
    - the reviewer says there are no blocking findings and the implementation is
      ready; and
    - the implementer agrees all review feedback has been addressed or explicitly
      documented as a non-blocking residual risk.
 6. **Escalate only true blockers.** Human escalation is not needed for ordinary
-   implementation tradeoffs or review fixes. Ask the human only when the plan
-   cannot be implemented as written, a required product/scope decision blocks
-   progress, a dependency or external-service action needs approval, or workers
-   disagree on a material issue they cannot resolve from the plan and repo.
+   implementation tradeoffs or behavior-preserving review fixes. Ask the human
+   only when the plan cannot be implemented as written, a required
+   product/scope/behavior decision blocks progress, a permission/tool-surface or
+   public-contract change is proposed, a requested capability would be removed
+   or degraded, a dependency or external-service action needs approval, or
+   workers disagree on a material issue they cannot resolve from the plan and
+   repo.
 7. **Collect remaining human decisions before commit.** Before asking for the
    final commit/push, explicitly list every unresolved human decision at the end
    of the status update, even when the workers consider the implementation
@@ -117,15 +158,22 @@ runs and does not directly edit source, commit, or push.
 - Initial implementer: "Use the repository `implement-plan` workflow. Locate
   the approved plan for the current branch, implement it task by task, update
   plan evidence, run relevant verification, and report changed files, results,
-  risks, and blockers. Do not commit or push yet."
+  risks, and blockers. Preserve approved behavior, public contracts,
+  orchestration workflow, and permission/tool surfaces. If a safe fix appears to
+  require changing any of those, stop and report an Open Human Decision with
+  options. Do not commit or push yet."
 - Initial reviewer: "Review the current working tree diff against the approved
   plan for this branch. Use the plan and repository context as your source of
   truth. Report blocking findings first, then non-blocking suggestions and test
-  gaps. Say explicitly whether the implementation is ready."
+  gaps. For each blocking finding, say whether it is a routine
+  behavior-preserving fix or requires human approval because it changes scope,
+  behavior, public contracts, workflow, permission/tool surfaces, or accepted
+  risk. Say explicitly whether the implementation is ready."
 - Reviewer feedback to implementer: "Address the reviewer feedback below in
-  this existing implementation session. Keep changes scoped, update plan
-  evidence, rerun relevant verification, and report what changed plus any
-  remaining risks."
+  this existing implementation session. Keep changes scoped and preserve
+  approved behavior, public contracts, workflow, and permission/tool surfaces
+  unless the human explicitly approved a change. Update plan evidence, rerun
+  relevant verification, and report what changed plus any remaining risks."
 - Implementer response to reviewer: "Re-review the updated implementation in
   this existing review session. Focus on the prior findings, any new diff, and
   whether the implementation now satisfies the approved plan. Say explicitly
@@ -145,9 +193,16 @@ runs and does not directly edit source, commit, or push.
 
 Escalate only when implementation is blocked by something the plan and
 repository context cannot resolve, such as a required product/scope decision,
-permission or dependency-change approval, external-service write, persistent
-failing quality gate that changes acceptance, or an irreconcilable material
-disagreement between implementer and reviewer.
+behavior change, permission/tool-surface or public-contract change, dependency
+change approval, external-service write, persistent failing quality gate that
+changes acceptance, removal/degradation of a requested capability, or an
+irreconcilable material disagreement between implementer and reviewer.
+
+Do **not** escalate small bugfixes, local implementation corrections, tests, or
+docs that preserve the approved behavior. Do **not** silently implement a
+review-suggested behavior/scope/tooling change merely because it is framed as a
+bugfix, simplification, or security hardening; promote it to **Open Human
+Decisions** first.
 
 Do **not** escalate merely to run existing repository setup, build, test, or
 verification commands such as `pnpm install --frozen-lockfile`, `pnpm build`,
