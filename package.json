@@ -1,6 +1,6 @@
 {
   "name": "@ralphkrauss/agent-orchestrator",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "MCP agent orchestrator for Codex and Claude worker runs",
   "type": "module",
   "main": "dist/index.js",
