@@ -29,6 +29,33 @@ GitHub replies. The resolution map drives implementation and final replies.
   `list_worker_profiles` diagnostics and `upsert_worker_profile`. Do not start a
   worker just to edit the profiles manifest.
 
+## Network Egress For Codex Reviewers
+
+PR comment review needs read access to GitHub APIs (review threads,
+conversation comments). Some backends sandbox bash network egress by default,
+so the supervisor should make external data available to the worker before
+delegating, rather than expecting every worker to call `gh api` itself.
+
+Recommended default: **supervisor pre-fetches**. Before delegating a step
+that needs PR data, the supervisor calls `gh api ...` itself and writes the
+JSON response to a temp file under the run's `cwd`, then passes the path to
+the worker prompt. The worker reads from disk and never needs outbound HTTP.
+This works regardless of backend.
+
+Alternatives the user may prefer for one or more profiles:
+
+- **Switch the affected profile to a `claude` backend** (Claude has its own
+  permission/network model independent of codex sandboxing).
+- **Set `codex_network: 'workspace'` on a narrow review-only codex profile**
+  (network on; deterministic across machines). Do not grant `'workspace'` to
+  general-purpose implementation profiles that also run untrusted work.
+- **Set `codex_network: 'user-config'` on the codex profile** (codex reads
+  the user's `~/.codex/config.toml` verbatim). For users who already manage a
+  trusted local codex network policy.
+
+This skill stays backend-agnostic: it does not pre-decide which path applies.
+The supervisor presents the options and the user chooses.
+
 ## Review Comment Decision Gate
 
 PR review comments are inputs to triage, not permission to change the feature's

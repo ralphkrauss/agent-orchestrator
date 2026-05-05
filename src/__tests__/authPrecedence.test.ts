@@ -42,7 +42,7 @@ describe('cursor auth precedence and missing-key shape', () => {
     const store = new RunStore(home);
     const cwd = await mkdtemp(join(tmpdir(), 'cursor-noauth-cwd-'));
     const runtime = new CursorSdkRuntime(okAdapter, { store, env: {} });
-    const result = await runtime.start({ runId: 'r1', prompt: 'p', cwd, model: 'composer-2', modelSettings: { reasoning_effort: null, service_tier: null, mode: null } });
+    const result = await runtime.start({ runId: 'r1', prompt: 'p', cwd, model: 'composer-2', modelSettings: { reasoning_effort: null, service_tier: null, mode: null, codex_network: null } });
     assert.equal(result.ok, false);
     if (result.ok) return;
     assert.equal(result.failure.code, 'SPAWN_FAILED');

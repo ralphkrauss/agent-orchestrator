@@ -375,7 +375,7 @@ function uniqueSettings(settings: ObservabilityRunSettings[]): ObservabilityRunS
   const seen = new Set<string>();
   const result: ObservabilityRunSettings[] = [];
   for (const item of settings) {
-    const key = `${item.reasoning_effort ?? ''}:${item.service_tier ?? ''}:${item.mode ?? ''}`;
+    const key = `${item.reasoning_effort ?? ''}:${item.service_tier ?? ''}:${item.mode ?? ''}:${item.codex_network ?? ''}`;
     if (seen.has(key)) continue;
     seen.add(key);
     result.push(item);

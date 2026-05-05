@@ -29,7 +29,7 @@ describe('RunStore', () => {
 
     const loaded = await store.loadRun(run.run_id);
     assert.equal(loaded?.meta.metadata.task, 'T2');
-    assert.deepStrictEqual(loaded?.meta.model_settings, { reasoning_effort: null, service_tier: null, mode: null });
+    assert.deepStrictEqual(loaded?.meta.model_settings, { reasoning_effort: null, service_tier: null, mode: null, codex_network: null });
     assert.equal(loaded?.meta.worker_invocation, null);
     assert.equal(loaded?.events.length, 2);
     assert.equal(await store.readPrompt(run.run_id), 'raw prompt text');
@@ -145,7 +145,7 @@ describe('RunStore', () => {
       cwd: root,
       model: 'gpt-5.2',
       model_source: 'explicit',
-      model_settings: { reasoning_effort: 'xhigh', service_tier: 'fast', mode: null },
+      model_settings: { reasoning_effort: 'xhigh', service_tier: 'fast', mode: null, codex_network: null },
       requested_session_id: 'session-1',
       observed_session_id: 'session-1',
       display: {
@@ -158,7 +158,9 @@ describe('RunStore', () => {
 
     const loaded = await store.loadMeta(run.run_id);
     assert.equal(loaded.model_source, 'explicit');
-    assert.deepStrictEqual(loaded.model_settings, { reasoning_effort: 'xhigh', service_tier: 'fast', mode: null });
+    // Schema applies the codex_network: null default when the field was not
+    // present on the persisted record (legacy back-compat).
+    assert.deepStrictEqual(loaded.model_settings, { reasoning_effort: 'xhigh', service_tier: 'fast', mode: null, codex_network: null });
     assert.equal(loaded.requested_session_id, 'session-1');
     assert.equal(loaded.observed_session_id, 'session-1');
     assert.equal(loaded.display.session_title, 'Session title');
