@@ -144,20 +144,28 @@ describe('agent orchestrator integration with mock CLIs', () => {
     assert.equal(parent.ok && (parent as unknown as { run_summary: { model_source: string; display: { session_title: string; prompt_title: string }; observed_session_id: string } }).run_summary.model_source, 'explicit');
     assert.equal(childInherited.ok && (childInherited as unknown as { run_summary: { model_source: string; requested_session_id: string; display: { session_title: string; prompt_title: string } } }).run_summary.model_source, 'inherited');
     assert.equal(childInherited.ok && (childInherited as unknown as { run_summary: { requested_session_id: string } }).run_summary.requested_session_id, 'codex-session-1');
-    assert.deepStrictEqual(parent.ok && (parent as unknown as { run_summary: { model_settings: unknown } }).run_summary.model_settings, { reasoning_effort: 'xhigh', service_tier: 'fast', mode: null });
-    assert.deepStrictEqual(childInherited.ok && (childInherited as unknown as { run_summary: { model_settings: unknown } }).run_summary.model_settings, { reasoning_effort: 'xhigh', service_tier: 'fast', mode: null });
-    assert.deepStrictEqual(childOverridden.ok && (childOverridden as unknown as { run_summary: { model_settings: unknown } }).run_summary.model_settings, { reasoning_effort: 'medium', service_tier: null, mode: 'normal' });
+    // Issue #31 (OD1=B locked): codex_network defaults to 'isolated' when the
+    // direct-mode start_run does not set it; mode is derived from
+    // codex_network ('isolated' => 'normal'), not from service_tier.
+    assert.deepStrictEqual(parent.ok && (parent as unknown as { run_summary: { model_settings: unknown } }).run_summary.model_settings, { reasoning_effort: 'xhigh', service_tier: 'fast', mode: 'normal', codex_network: 'isolated' });
+    assert.deepStrictEqual(childInherited.ok && (childInherited as unknown as { run_summary: { model_settings: unknown } }).run_summary.model_settings, { reasoning_effort: 'xhigh', service_tier: 'fast', mode: 'normal', codex_network: 'isolated' });
+    // Inverse-bug regression sibling (P5): service_tier='normal' alone (no
+    // codex_network override) under OD1=B still resolves through
+    // codex_network='isolated' so mode='normal' and --ignore-user-config is
+    // present, but for the new reason. service_tier='normal' continues to be
+    // suppressed in serialization because it is the codex CLI default.
+    assert.deepStrictEqual(childOverridden.ok && (childOverridden as unknown as { run_summary: { model_settings: unknown } }).run_summary.model_settings, { reasoning_effort: 'medium', service_tier: null, mode: 'normal', codex_network: 'isolated' });
     assert.deepStrictEqual(
       parent.ok && (parent as unknown as { run_summary: { worker_invocation: { args: string[] } } }).run_summary.worker_invocation.args,
-      ['exec', '--json', '--skip-git-repo-check', '--cd', repo, '--model', 'gpt-5.2', '-c', 'model_reasoning_effort="xhigh"', '-c', 'service_tier="fast"', '-'],
+      ['exec', '--json', '--skip-git-repo-check', '--ignore-user-config', '--cd', repo, '--model', 'gpt-5.2', '-c', 'model_reasoning_effort="xhigh"', '-c', 'service_tier="fast"', '-'],
     );
     assert.equal(parent.ok && (parent as unknown as { run_summary: { display: { session_title: string; prompt_title: string } } }).run_summary.display.session_title, 'Model session');
     assert.equal(childInherited.ok && (childInherited as unknown as { run_summary: { display: { session_title: string; prompt_title: string } } }).run_summary.display.prompt_title, 'Inherited model prompt');
     assert.equal(await service.store.readPrompt(parentId), 'hello');
 
     const args = await readJsonLines<string[]>(join(repo, 'codex-args.jsonl'));
-    assert.deepStrictEqual(args[0], ['exec', '--json', '--skip-git-repo-check', '--cd', repo, '--model', 'gpt-5.2', '-c', 'model_reasoning_effort="xhigh"', '-c', 'service_tier="fast"', '-']);
-    assert.deepStrictEqual(args[1], ['exec', 'resume', '--json', '--skip-git-repo-check', '--model', 'gpt-5.2', '-c', 'model_reasoning_effort="xhigh"', '-c', 'service_tier="fast"', 'codex-session-1', '-']);
+    assert.deepStrictEqual(args[0], ['exec', '--json', '--skip-git-repo-check', '--ignore-user-config', '--cd', repo, '--model', 'gpt-5.2', '-c', 'model_reasoning_effort="xhigh"', '-c', 'service_tier="fast"', '-']);
+    assert.deepStrictEqual(args[1], ['exec', 'resume', '--json', '--skip-git-repo-check', '--ignore-user-config', '--model', 'gpt-5.2', '-c', 'model_reasoning_effort="xhigh"', '-c', 'service_tier="fast"', 'codex-session-1', '-']);
     assert.deepStrictEqual(args[2], ['exec', 'resume', '--json', '--skip-git-repo-check', '--ignore-user-config', '--model', 'gpt-5.4', '-c', 'model_reasoning_effort="medium"', 'codex-session-1', '-']);
   });
 
@@ -226,8 +234,10 @@ describe('agent orchestrator integration with mock CLIs', () => {
     );
 
     const args = await readJsonLines<string[]>(join(repo, 'codex-args.jsonl'));
-    assert.deepStrictEqual(args[0], ['exec', '--json', '--skip-git-repo-check', '--cd', repo, '--model', 'gpt-5.2', '-c', 'model_reasoning_effort="high"', '-']);
-    assert.deepStrictEqual(args[1], ['exec', '--json', '--skip-git-repo-check', '--cd', repo, '--model', 'gpt-5.4', '-c', 'model_reasoning_effort="medium"', '-']);
+    // Issue #31: profile-mode codex starts default codex_network='isolated'
+    // when the profile does not set it, so --ignore-user-config is present.
+    assert.deepStrictEqual(args[0], ['exec', '--json', '--skip-git-repo-check', '--ignore-user-config', '--cd', repo, '--model', 'gpt-5.2', '-c', 'model_reasoning_effort="high"', '-']);
+    assert.deepStrictEqual(args[1], ['exec', '--json', '--skip-git-repo-check', '--ignore-user-config', '--cd', repo, '--model', 'gpt-5.4', '-c', 'model_reasoning_effort="medium"', '-']);
   });
 
   it('rejects live profile aliases when backend diagnostics report unavailable CLIs', async () => {
@@ -808,6 +818,340 @@ describe('agent orchestrator integration with mock CLIs', () => {
     assert.equal(swept?.meta.status, 'orphaned');
     assert.equal(swept?.events.at(-1)?.payload.status, 'orphaned');
     assert.ok(logMessages.some((message) => message.includes(`orphaned run ${running.run_id}`)));
+  });
+
+  // Issue #31 — OD1=B / OD2=B / C12 end-to-end coverage.
+  it('issue #31 (T9 / OD2=B): direct-mode codex_network=workspace flows into the codex argv', async () => {
+    const fixture = await createFixture();
+    const repo = await createGitRepo(fixture.root);
+    const service = await createService(fixture.home);
+
+    const start = await service.startRun({
+      backend: 'codex',
+      prompt: 'fetch zen',
+      cwd: repo,
+      model: 'gpt-5.5',
+      reasoning_effort: 'xhigh',
+      codex_network: 'workspace',
+    });
+    assert.equal(start.ok, true);
+    const runId = start.ok ? (start as unknown as { run_id: string }).run_id : '';
+    await service.waitForRun({ run_id: runId, wait_seconds: 5 });
+    const status = await service.getRunStatus({ run_id: runId });
+    assert.equal(status.ok, true);
+    const summary = (status as unknown as { run_summary: { model_settings: { codex_network: string; mode: string | null }; worker_invocation: { args: string[] } } }).run_summary;
+    assert.equal(summary.model_settings.codex_network, 'workspace');
+    assert.equal(summary.model_settings.mode, null);
+    assert.ok(summary.worker_invocation.args.includes('--ignore-user-config'));
+    assert.ok(summary.worker_invocation.args.includes('-c'));
+    assert.ok(summary.worker_invocation.args.includes('sandbox_workspace_write.network_access=true'));
+  });
+
+  it('issue #31 (T9 / OD2=B): start_run profile + codex_network is rejected as INVALID_INPUT', async () => {
+    const fixture = await createFixture();
+    const repo = await createGitRepo(fixture.root);
+    const service = await createService(fixture.home);
+    const profilesFile = join(fixture.root, 'profiles.json');
+    await writeProfilesFile(profilesFile, 'gpt-5.5', 'high');
+
+    const rejected = await service.startRun({
+      profile: 'live-implementation',
+      profiles_file: profilesFile,
+      prompt: 'hello',
+      cwd: repo,
+      codex_network: 'workspace',
+    });
+    assertInvalidInput(rejected, /Profile mode cannot be mixed with direct backend\/model\/reasoning_effort\/service_tier\/codex_network settings/);
+  });
+
+  it('issue #31 (T9): codex_network is rejected on non-codex direct-mode start_run', async () => {
+    const fixture = await createFixture();
+    const repo = await createGitRepo(fixture.root);
+    const service = await createService(fixture.home);
+
+    const rejected = await service.startRun({
+      backend: 'claude',
+      prompt: 'hello',
+      cwd: repo,
+      model: 'claude-opus-4-7',
+      codex_network: 'workspace',
+    });
+    assertInvalidInput(rejected, /codex_network is only supported on the codex backend/);
+  });
+
+  it('issue #31 (T10 / S3 / R8): send_followup inherits codex_network from the parent and accepts an explicit override', async () => {
+    const fixture = await createFixture();
+    const repo = await createGitRepo(fixture.root);
+    const service = await createService(fixture.home);
+
+    const start = await service.startRun({
+      backend: 'codex',
+      prompt: 'parent',
+      cwd: repo,
+      model: 'gpt-5.5',
+      codex_network: 'workspace',
+    });
+    const parentId = start.ok ? (start as unknown as { run_id: string }).run_id : '';
+    await service.waitForRun({ run_id: parentId, wait_seconds: 5 });
+
+    const inherited = await service.sendFollowup({ run_id: parentId, prompt: 'inherit' });
+    const inheritedId = inherited.ok ? (inherited as unknown as { run_id: string }).run_id : '';
+    await service.waitForRun({ run_id: inheritedId, wait_seconds: 5 });
+    const inheritedStatus = await service.getRunStatus({ run_id: inheritedId });
+    const inheritedSummary = (inheritedStatus as unknown as { run_summary: { model_settings: { codex_network: string }; worker_invocation: { args: string[] } } }).run_summary;
+    assert.equal(inheritedSummary.model_settings.codex_network, 'workspace', 'follow-up must inherit parent codex_network when no override is provided');
+    assert.ok(inheritedSummary.worker_invocation.args.includes('sandbox_workspace_write.network_access=true'));
+
+    const overridden = await service.sendFollowup({
+      run_id: parentId,
+      prompt: 'override',
+      codex_network: 'isolated',
+    });
+    const overriddenId = overridden.ok ? (overridden as unknown as { run_id: string }).run_id : '';
+    await service.waitForRun({ run_id: overriddenId, wait_seconds: 5 });
+    const overriddenStatus = await service.getRunStatus({ run_id: overriddenId });
+    const overriddenSummary = (overriddenStatus as unknown as { run_summary: { model_settings: { codex_network: string; mode: string | null }; worker_invocation: { args: string[] } } }).run_summary;
+    assert.equal(overriddenSummary.model_settings.codex_network, 'isolated', 'explicit codex_network argument must override inherited value');
+    assert.equal(overriddenSummary.model_settings.mode, 'normal');
+    assert.ok(overriddenSummary.worker_invocation.args.includes('--ignore-user-config'));
+    assert.equal(overriddenSummary.worker_invocation.args.includes('sandbox_workspace_write.network_access=true'), false);
+  });
+
+  it('issue #31 (T9 / OD2=B): send_followup rejects codex_network on profile-mode parents', async () => {
+    const fixture = await createFixture();
+    const repo = await createGitRepo(fixture.root);
+    const service = await createService(fixture.home);
+    const profilesFile = join(fixture.root, 'profiles.json');
+    await writeProfilesFile(profilesFile, 'gpt-5.5', 'high');
+
+    const start = await service.startRun({ profile: 'live-implementation', profiles_file: profilesFile, prompt: 'hello', cwd: repo });
+    const parentId = start.ok ? (start as unknown as { run_id: string }).run_id : '';
+    await service.waitForRun({ run_id: parentId, wait_seconds: 5 });
+
+    const rejected = await service.sendFollowup({
+      run_id: parentId,
+      prompt: 'override after profile',
+      codex_network: 'workspace',
+    });
+    assertInvalidInput(rejected, /Profile-mode follow-ups cannot override codex_network/);
+  });
+
+  it('issue #31 (T11 / C12): a codex run that defaulted codex_network emits exactly one non-blocking warning event', async () => {
+    const fixture = await createFixture();
+    const repo = await createGitRepo(fixture.root);
+    const service = await createService(fixture.home);
+
+    const defaulted = await service.startRun({ backend: 'codex', prompt: 'no codex_network', cwd: repo, model: 'gpt-5.5' });
+    const defaultedId = defaulted.ok ? (defaulted as unknown as { run_id: string }).run_id : '';
+    await service.waitForRun({ run_id: defaultedId, wait_seconds: 5 });
+    const defaultedRun = await service.store.loadRun(defaultedId);
+    const defaultedWarnings = (defaultedRun?.events ?? []).filter((event) => event.type === 'lifecycle' && (event.payload as { state?: string }).state === 'codex_network_defaulted');
+    assert.equal(defaultedWarnings.length, 1, 'exactly one warning event must fire when codex_network is defaulted');
+    assert.match(String(defaultedWarnings[0]?.payload.warning ?? ''), /codex_network not set/);
+    assert.match(String(defaultedWarnings[0]?.payload.warning ?? ''), /docs\/development\/codex-backend\.md/);
+    // The warning must not block the run.
+    assert.equal(defaultedRun?.meta.status, 'completed');
+
+    // Explicit codex_network must NOT emit the warning.
+    const explicit = await service.startRun({ backend: 'codex', prompt: 'explicit', cwd: repo, model: 'gpt-5.5', codex_network: 'workspace' });
+    const explicitId = explicit.ok ? (explicit as unknown as { run_id: string }).run_id : '';
+    await service.waitForRun({ run_id: explicitId, wait_seconds: 5 });
+    const explicitRun = await service.store.loadRun(explicitId);
+    const explicitWarnings = (explicitRun?.events ?? []).filter((event) => event.type === 'lifecycle' && (event.payload as { state?: string }).state === 'codex_network_defaulted');
+    assert.equal(explicitWarnings.length, 0, 'no warning event must fire when codex_network is set explicitly');
+  });
+
+  it('issue #31 (T11 / C12): profile-mode codex run that omits codex_network names the profile in the warning', async () => {
+    const fixture = await createFixture();
+    const repo = await createGitRepo(fixture.root);
+    const service = await createService(fixture.home);
+    const profilesFile = join(fixture.root, 'profiles.json');
+    await writeProfilesFile(profilesFile, 'gpt-5.5', 'high');
+
+    const start = await service.startRun({ profile: 'live-implementation', profiles_file: profilesFile, prompt: 'hello', cwd: repo });
+    const runId = start.ok ? (start as unknown as { run_id: string }).run_id : '';
+    await service.waitForRun({ run_id: runId, wait_seconds: 5 });
+    const run = await service.store.loadRun(runId);
+    const warnings = (run?.events ?? []).filter((event) => event.type === 'lifecycle' && (event.payload as { state?: string }).state === 'codex_network_defaulted');
+    assert.equal(warnings.length, 1);
+    assert.equal((warnings[0]?.payload as { profile: string }).profile, 'live-implementation');
+    assert.match(String(warnings[0]?.payload.warning ?? ''), /profile live-implementation/);
+  });
+
+  it('issue #31 (T9 / B1): chained send_followup of a profile-mode run still rejects codex_network on the second hop', async () => {
+    // Reviewer round 3 B1: `metadataForFollowup` strips worker_profile, so
+    // checking only the immediate parent leaves a bypass: profile -> followup
+    // (no override) -> followup (codex_network: workspace) used to slip
+    // through. The orchestrator now walks parent_run_id back to the chain
+    // root and consults that root's metadata.worker_profile flag.
+    const fixture = await createFixture();
+    const repo = await createGitRepo(fixture.root);
+    const service = await createService(fixture.home);
+    const profilesFile = join(fixture.root, 'profiles.json');
+    await writeProfilesFile(profilesFile, 'gpt-5.5', 'high');
+
+    const start = await service.startRun({ profile: 'live-implementation', profiles_file: profilesFile, prompt: 'hello', cwd: repo });
+    const parentId = start.ok ? (start as unknown as { run_id: string }).run_id : '';
+    await service.waitForRun({ run_id: parentId, wait_seconds: 5 });
+
+    const noOpFollow = await service.sendFollowup({ run_id: parentId, prompt: 'noop' });
+    assert.equal(noOpFollow.ok, true, 'middle follow-up without overrides must succeed');
+    const middleId = noOpFollow.ok ? (noOpFollow as unknown as { run_id: string }).run_id : '';
+    await service.waitForRun({ run_id: middleId, wait_seconds: 5 });
+
+    const rejected = await service.sendFollowup({
+      run_id: middleId,
+      prompt: 'override after chained follow-up',
+      codex_network: 'workspace',
+    });
+    assertInvalidInput(rejected, /Profile-mode follow-ups cannot override codex_network/);
+  });
+
+  it('issue #31 (T5 / B2): legacy parent with codex_network=null produces a child whose persisted codex_network is the resolved isolated default', async () => {
+    // Reviewer round 3 B2: a follow-up to a legacy codex run record (the
+    // ones written before issue #31, which load with codex_network: null
+    // because the schema applies that default) used to inherit null
+    // verbatim. The plan invariant is "effective codex_network lands in
+    // run_summary.model_settings"; sandboxArgs() defensively passes
+    // --ignore-user-config for null, so the runtime is correct, but the
+    // persisted record now also reflects the effective posture.
+    const fixture = await createFixture();
+    const repo = await createGitRepo(fixture.root);
+    const service = await createService(fixture.home);
+
+    // Synthesize a legacy parent: a completed codex run whose stored
+    // model_settings.codex_network is null (matches what runStore.ts loads
+    // for pre-issue-#31 records via the schema default).
+    const legacy = await service.store.createRun({
+      backend: 'codex',
+      cwd: repo,
+      prompt: 'legacy parent',
+      model: 'gpt-5.5',
+      model_source: 'explicit',
+      session_id: 'codex-session-1',
+      observed_session_id: 'codex-session-1',
+      model_settings: { reasoning_effort: 'high', service_tier: null, mode: null, codex_network: null },
+    });
+    await service.store.markTerminal(legacy.run_id, 'completed', [], {
+      status: 'completed',
+      summary: 'legacy ok',
+      files_changed: [],
+      commands_run: [],
+      artifacts: [],
+      errors: [],
+    });
+
+    const follow = await service.sendFollowup({ run_id: legacy.run_id, prompt: 'continue with no override' });
+    assert.equal(follow.ok, true);
+    const childId = follow.ok ? (follow as unknown as { run_id: string }).run_id : '';
+    await service.waitForRun({ run_id: childId, wait_seconds: 5 });
+    const childMeta = await service.store.loadMeta(childId);
+    assert.equal(childMeta.model_settings.codex_network, 'isolated', 'codex follow-up must persist the effective isolated default, not legacy null');
+    assert.equal(childMeta.model_settings.mode, 'normal', 'mode breadcrumb must be re-derived from the resolved codex_network');
+    assert.ok(childMeta.worker_invocation?.args.includes('--ignore-user-config'));
+  });
+
+  it('issue #31 (T5 / B2): non-codex follow-ups must keep codex_network as null (never carry the field)', async () => {
+    // B2 negative regression: claude / cursor follow-ups never carry
+    // codex_network. The legacy-null normalization path must be codex-only.
+    const fixture = await createFixture();
+    const repo = await createGitRepo(fixture.root);
+    const service = await createService(fixture.home);
+
+    const start = await service.startRun({ backend: 'claude', prompt: 'parent', cwd: repo, model: 'claude-opus-4-7' });
+    const parentId = start.ok ? (start as unknown as { run_id: string }).run_id : '';
+    await service.waitForRun({ run_id: parentId, wait_seconds: 5 });
+    const follow = await service.sendFollowup({ run_id: parentId, prompt: 'continue' });
+    const childId = follow.ok ? (follow as unknown as { run_id: string }).run_id : '';
+    await service.waitForRun({ run_id: childId, wait_seconds: 5 });
+    const childMeta = await service.store.loadMeta(childId);
+    assert.equal(childMeta.model_settings.codex_network, null, 'non-codex follow-ups must keep codex_network: null');
+  });
+
+  it('issue #31 (T2 / B3): orchestrator-level inverse-bug regression — service_tier=normal + codex_network=user-config produces argv WITHOUT --ignore-user-config', async () => {
+    // Reviewer round 3 B3: B3 wanted the inverse-bug pinned at the
+    // orchestrator service layer, not just at the codex backend's argv
+    // builder. This test calls the service end-to-end and inspects the
+    // recorded worker_invocation argv. The original foot-gun lived in
+    // modelSettingsForBackend's service_tier -> mode -> --ignore-user-config
+    // chain; the explicit codex_network: 'user-config' must override.
+    const fixture = await createFixture();
+    const repo = await createGitRepo(fixture.root);
+    const service = await createService(fixture.home);
+
+    const start = await service.startRun({
+      backend: 'codex',
+      prompt: 'inverse bug regression',
+      cwd: repo,
+      model: 'gpt-5.5',
+      reasoning_effort: 'high',
+      service_tier: 'normal',
+      codex_network: 'user-config',
+    });
+    assert.equal(start.ok, true);
+    const runId = start.ok ? (start as unknown as { run_id: string }).run_id : '';
+    await service.waitForRun({ run_id: runId, wait_seconds: 5 });
+    const status = await service.getRunStatus({ run_id: runId });
+    const summary = (status as unknown as { run_summary: { model_settings: { codex_network: string; mode: string | null; service_tier: string | null }; worker_invocation: { args: string[] } } }).run_summary;
+    assert.equal(summary.model_settings.codex_network, 'user-config');
+    assert.equal(summary.model_settings.mode, null, 'mode must be null when codex_network=user-config; legacy service_tier=normal must not re-derive mode');
+    assert.equal(
+      summary.worker_invocation.args.includes('--ignore-user-config'),
+      false,
+      '--ignore-user-config must NOT appear when codex_network=user-config, even though service_tier=normal historically forced it',
+    );
+  });
+
+  it('issue #31 (T4 / B4): real upsertWorkerProfile + listWorkerProfiles round-trip preserves codex_network across reload', async () => {
+    // Reviewer round 3 B4: drive the actual orchestrator service surface
+    // (not direct schema parsing). Create a codex profile with
+    // codex_network: 'workspace', simulate a daemon restart by constructing a
+    // fresh OrchestratorService over the same store/profiles file, and
+    // confirm listWorkerProfiles reads the field back intact.
+    const fixture = await createFixture();
+    const repo = await createGitRepo(fixture.root);
+    const service = await createService(fixture.home);
+    const profilesFile = join(fixture.root, 'profiles.json');
+    await writeFile(profilesFile, JSON.stringify({ version: 1, profiles: {} }, null, 2));
+
+    const upsert = await service.upsertWorkerProfile({
+      profiles_file: profilesFile,
+      cwd: repo,
+      profile: 'pr-comment-reviewer',
+      backend: 'codex',
+      model: 'gpt-5.5',
+      reasoning_effort: 'xhigh',
+      codex_network: 'workspace',
+      description: 'Needs network for gh api',
+    });
+    assert.equal(upsert.ok, true);
+    const upsertPayload = upsert as unknown as { profile: { id: string; codex_network: string | null } };
+    assert.equal(upsertPayload.profile.id, 'pr-comment-reviewer');
+    assert.equal(upsertPayload.profile.codex_network, 'workspace');
+
+    // Simulate a daemon restart: a fresh service over the same on-disk
+    // store/profiles file. listWorkerProfiles re-reads the manifest from
+    // disk via loadInspectedWorkerProfilesFromFile, so this path exercises
+    // the full reload code.
+    const restarted = await createService(fixture.home);
+    const listed = await restarted.listWorkerProfiles({ profiles_file: profilesFile, cwd: repo });
+    assert.equal(listed.ok, true);
+    const listedPayload = listed as unknown as { profiles: Array<{ id: string; codex_network: string | null }> };
+    const persisted = listedPayload.profiles.find((profile) => profile.id === 'pr-comment-reviewer');
+    assert.ok(persisted, 'profile must round-trip across reload');
+    assert.equal(persisted?.codex_network, 'workspace');
+
+    // upsertWorkerProfile must reject codex_network for non-codex backends
+    // with a clear error mentioning codex_network.
+    const claudeRejected = await service.upsertWorkerProfile({
+      profiles_file: profilesFile,
+      cwd: repo,
+      profile: 'claude-bogus',
+      backend: 'claude',
+      model: 'claude-opus-4-7',
+      codex_network: 'workspace',
+    });
+    assertInvalidInput(claudeRejected, /codex_network which is only supported on the codex backend/);
   });
 });
 

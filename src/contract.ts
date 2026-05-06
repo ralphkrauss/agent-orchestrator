@@ -241,16 +241,25 @@ export const ServiceTierSchema = z.enum([
 ]);
 export type ServiceTier = z.infer<typeof ServiceTierSchema>;
 
+export const CodexNetworkSchema = z.enum([
+  'isolated',
+  'workspace',
+  'user-config',
+]);
+export type CodexNetwork = z.infer<typeof CodexNetworkSchema>;
+
 const defaultRunModelSettings = {
   reasoning_effort: null,
   service_tier: null,
   mode: null,
+  codex_network: null,
 };
 
 export const RunModelSettingsSchema = z.object({
   reasoning_effort: ReasoningEffortSchema.nullable().optional().default(null),
   service_tier: ServiceTierSchema.nullable().optional().default(null),
   mode: z.string().nullable().optional().default(null),
+  codex_network: CodexNetworkSchema.nullable().optional().default(null),
 }).default(defaultRunModelSettings);
 export type RunModelSettings = z.infer<typeof RunModelSettingsSchema>;
 
@@ -343,6 +352,7 @@ export const StartRunInputSchema = z.object({
   model: z.string().trim().min(1).optional(),
   reasoning_effort: ReasoningEffortSchema.optional(),
   service_tier: ServiceTierSchema.optional(),
+  codex_network: CodexNetworkSchema.optional(),
   metadata: z.record(z.unknown()).optional().default({}),
   idle_timeout_seconds: z.number().int().positive().optional(),
   execution_timeout_seconds: z.number().int().positive().optional(),
@@ -355,10 +365,10 @@ export const StartRunInputSchema = z.object({
     });
   }
 
-  if (input.profile && (input.backend || input.model || input.reasoning_effort || input.service_tier)) {
+  if (input.profile && (input.backend || input.model || input.reasoning_effort || input.service_tier || input.codex_network)) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
-      message: 'Profile mode cannot be mixed with direct backend/model/reasoning_effort/service_tier settings',
+      message: 'Profile mode cannot be mixed with direct backend/model/reasoning_effort/service_tier/codex_network settings',
       path: ['profile'],
     });
   }
@@ -382,6 +392,7 @@ export const UpsertWorkerProfileInputSchema = z.object({
   variant: z.string().trim().min(1).optional(),
   reasoning_effort: ReasoningEffortSchema.optional(),
   service_tier: ServiceTierSchema.optional(),
+  codex_network: CodexNetworkSchema.optional(),
   description: z.string().trim().min(1).optional(),
   metadata: z.record(z.unknown()).optional(),
   create_if_missing: z.boolean().optional().default(true),
@@ -395,6 +406,7 @@ export const SendFollowupInputSchema = z.object({
   model: z.string().trim().min(1).optional(),
   reasoning_effort: ReasoningEffortSchema.optional(),
   service_tier: ServiceTierSchema.optional(),
+  codex_network: CodexNetworkSchema.optional(),
   metadata: z.record(z.unknown()).optional().default({}),
   idle_timeout_seconds: z.number().int().positive().optional(),
   execution_timeout_seconds: z.number().int().positive().optional(),

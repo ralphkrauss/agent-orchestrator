@@ -46,7 +46,7 @@ describe('observability snapshot builder', () => {
       observed_session_id: 'session-2',
       model: 'gpt-5.2',
       model_source: 'inherited',
-      model_settings: { reasoning_effort: 'xhigh', service_tier: 'fast', mode: null },
+      model_settings: { reasoning_effort: 'xhigh', service_tier: 'fast', mode: null, codex_network: null },
       display: {
         session_title: 'Observability work',
         session_summary: 'Build dashboard visibility',
@@ -84,7 +84,7 @@ describe('observability snapshot builder', () => {
     const childRun = snapshot.runs.find((run) => run.run.run_id === child.run_id);
     assert.equal(childRun?.prompt.title, 'Add details');
     assert.equal(childRun?.prompt.text, 'Add an interactive detail view.');
-    assert.deepStrictEqual(childRun?.settings, { reasoning_effort: 'xhigh', service_tier: 'fast', mode: null });
+    assert.deepStrictEqual(childRun?.settings, { reasoning_effort: 'xhigh', service_tier: 'fast', mode: null, codex_network: null });
     assert.equal(childRun?.session.status, 'mismatch');
     assert.ok(childRun?.session.warnings[0]?.includes('session-1'));
     assert.equal(childRun?.activity.event_count, 26);
@@ -112,8 +112,8 @@ describe('observability snapshot builder', () => {
     assert.equal(parentSession?.workspace.repository_root, null);
 
     const childSession = snapshot.sessions.find((session) => session.session_id === 'session-2');
-    assert.deepStrictEqual(childSession?.settings, [{ reasoning_effort: 'xhigh', service_tier: 'fast', mode: null }]);
-    assert.deepStrictEqual(childSession?.prompts[0]?.settings, { reasoning_effort: 'xhigh', service_tier: 'fast', mode: null });
+    assert.deepStrictEqual(childSession?.settings, [{ reasoning_effort: 'xhigh', service_tier: 'fast', mode: null, codex_network: null }]);
+    assert.deepStrictEqual(childSession?.prompts[0]?.settings, { reasoning_effort: 'xhigh', service_tier: 'fast', mode: null, codex_network: null });
     assert.equal(childSession?.updated_at, latestChildEventAt);
     assert.equal(childSession?.prompts[0]?.last_activity_at, latestChildEventAt);
   });
@@ -160,7 +160,7 @@ describe('observability snapshot builder', () => {
     assert.equal(snapshot.runs[0]?.prompt.text, null);
     assert.equal(snapshot.runs[0]?.prompt.preview, 'Summarize this session for a human operator.');
     assert.equal(snapshot.runs[0]?.prompt.title, 'Summarize this session for a human operator.');
-    assert.deepStrictEqual(snapshot.runs[0]?.settings, { reasoning_effort: null, service_tier: null, mode: null });
+    assert.deepStrictEqual(snapshot.runs[0]?.settings, { reasoning_effort: null, service_tier: null, mode: null, codex_network: null });
   });
 
   it('counts full session history even when detailed runs are limited', async () => {

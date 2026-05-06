@@ -6,6 +6,7 @@ import {
   AckRunNotificationInputSchema,
   BackendSchema,
   CancelRunInputSchema,
+  CodexNetworkSchema,
   GetObservabilitySnapshotInputSchema,
   GetRunEventsInputSchema,
   GetRunProgressInputSchema,
@@ -26,7 +27,9 @@ import {
   wrapErr,
   wrapOk,
   type Backend,
+  type CodexNetwork,
   type RunDisplayMetadata,
+  type RunMeta,
   type RunNotification,
   type RunNotificationKind,
   type ReasoningEffort,
@@ -98,7 +101,9 @@ interface ResolvedStartRunTarget {
   model: string | null;
   reasoningEffort: ReasoningEffort | undefined;
   serviceTier: ServiceTier | undefined;
+  codexNetwork: CodexNetwork | undefined;
   metadata: Record<string, unknown>;
+  profileId: string | null;
 }
 
 export class OrchestratorService {
@@ -177,12 +182,12 @@ export class OrchestratorService {
     const input = parsed.data;
     const resolved = await this.resolveStartRunTarget(input);
     if (!resolved.ok) return wrapErr(resolved.error);
-    const { backendName, runtime, model, reasoningEffort, serviceTier, metadata } = resolved.value;
+    const { backendName, runtime, model, reasoningEffort, serviceTier, codexNetwork, metadata, profileId } = resolved.value;
     const idleTimeout = this.resolveIdleTimeout(input.idle_timeout_seconds);
     if (!idleTimeout.ok) return wrapErr(idleTimeout.error);
     const executionTimeout = this.resolveExecutionTimeout(input.execution_timeout_seconds);
     if (!executionTimeout.ok) return wrapErr(executionTimeout.error);
-    const settings = modelSettingsForBackend(backendName, model, reasoningEffort, serviceTier);
+    const settings = modelSettingsForBackend(backendName, model, reasoningEffort, serviceTier, codexNetwork);
     if (!settings.ok) return wrapErr(settings.error);
 
     const meta = await this.store.createRun({
@@ -198,15 +203,50 @@ export class OrchestratorService {
       execution_timeout_seconds: executionTimeout.value,
     });
     await this.captureAndPersistGitSnapshot(meta.run_id, input.cwd);
+    await this.maybeEmitCodexNetworkDefaultWarning(meta.run_id, backendName, codexNetwork, profileId);
 
     await this.startManagedRun(meta.run_id, runtime, input.prompt, input.cwd, idleTimeout.value, executionTimeout.value, settings.value, model, undefined);
     return wrapOk({ run_id: meta.run_id });
+  }
+
+  // C12 / T11: emit a single non-blocking lifecycle warning event when a codex
+  // run resolved its codex_network from the OD1=B default ('isolated') because
+  // neither the profile nor the direct-mode argument set it explicitly. The
+  // warning never blocks the run; it surfaces in the run's event log alongside
+  // failing tool calls so users hitting the breaking change can correlate.
+  private async maybeEmitCodexNetworkDefaultWarning(
+    runId: string,
+    backendName: Backend,
+    explicitCodexNetwork: CodexNetwork | undefined,
+    profileId: string | null,
+  ): Promise<void> {
+    if (backendName !== 'codex' || explicitCodexNetwork !== undefined) return;
+    const profilePart = profileId ? `profile ${profileId}` : 'direct-mode run';
+    const message = `agent-orchestrator codex_network not set on ${profilePart}; defaulting to 'isolated' (no network access). Set codex_network explicitly to silence this warning. See docs/development/codex-backend.md for migration.`;
+    try {
+      await this.store.appendEvent(runId, {
+        type: 'lifecycle',
+        payload: {
+          state: 'codex_network_defaulted',
+          warning: message,
+          profile: profileId,
+          resolved_codex_network: 'isolated',
+          migration_doc: 'docs/development/codex-backend.md',
+          issue: 31,
+        },
+      });
+    } catch (error) {
+      this.logger(`failed to emit codex_network default warning for run ${runId}: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   private async resolveStartRunTarget(input: StartRun): Promise<{ ok: true; value: ResolvedStartRunTarget } | { ok: false; error: OrchestratorError }> {
     if (!input.profile) {
       if (!input.backend) {
         return { ok: false, error: orchestratorError('INVALID_INPUT', 'Direct worker starts require backend') };
+      }
+      if (input.codex_network !== undefined && input.backend !== 'codex') {
+        return { ok: false, error: orchestratorError('INVALID_INPUT', `codex_network is only supported on the codex backend; got backend ${input.backend}`) };
       }
       const runtime = this.runtimes.get(input.backend);
       if (!runtime) return { ok: false, error: orchestratorError('BACKEND_NOT_FOUND', `Backend not found: ${input.backend}`) };
@@ -218,7 +258,9 @@ export class OrchestratorService {
           model: input.model ?? null,
           reasoningEffort: input.reasoning_effort,
           serviceTier: input.service_tier,
+          codexNetwork: input.codex_network,
           metadata: input.metadata,
+          profileId: null,
         },
       };
     }
@@ -287,6 +329,7 @@ export class OrchestratorService {
         model: profile.model ?? null,
         reasoningEffort: profileSettings.reasoningEffort,
         serviceTier: profileSettings.serviceTier,
+        codexNetwork: profileSettings.codexNetwork,
         metadata: {
           ...input.metadata,
           worker_profile: {
@@ -295,6 +338,7 @@ export class OrchestratorService {
             profiles_file: profilesFile,
           },
         },
+        profileId: profile.id,
       },
     };
   }
@@ -407,6 +451,40 @@ export class OrchestratorService {
     return loadInspectedWorkerProfilesFromFile(profilesFile, createWorkerCapabilityCatalog(status));
   }
 
+  // Walk parent_run_id back to the chain root and report whether the root
+  // run's metadata records a profile-mode origin. Bounded by a generous
+  // depth limit so a corrupt chain cannot loop forever. Used by send_followup
+  // to enforce OD2=B against chained follow-ups (issue #31 B1).
+  //
+  // Security tradeoff: this function fails OPEN on max-depth exhaustion,
+  // ancestry cycles, or a missing/unreadable parent meta — it returns false,
+  // which lets the codex_network override through. The alternative (fail
+  // closed) would reject legitimate direct-mode follow-ups whenever the
+  // run-store had transient I/O issues. The closed-by-default OD1=B posture
+  // (codex_network defaults to 'isolated' on every codex run) limits the
+  // blast radius of a fail-open false negative; the worst case is that a
+  // user with a corrupt run-store can still issue a one-off network override
+  // that the chain check would otherwise have rejected.
+  private async chainOriginatedFromProfileMode(start: RunMeta): Promise<boolean> {
+    let current: RunMeta | null = start;
+    const seen = new Set<string>();
+    const maxDepth = 1000;
+    let depth = 0;
+    while (current && depth < maxDepth) {
+      if (isProfileModeMetadata(current.metadata)) return true;
+      if (!current.parent_run_id) return false;
+      if (seen.has(current.parent_run_id)) return false;
+      seen.add(current.parent_run_id);
+      try {
+        current = await this.store.loadMeta(current.parent_run_id);
+      } catch {
+        return false;
+      }
+      depth += 1;
+    }
+    return false;
+  }
+
   async sendFollowup(params: unknown): Promise<ToolResult> {
     const parsed = SendFollowupInputSchema.safeParse(params);
     if (!parsed.success) return invalidInput(parsed.error.message);
@@ -423,6 +501,22 @@ export class OrchestratorService {
     const backendName = BackendSchema.parse(parent.meta.backend);
     const runtime = this.runtimes.get(backendName);
     if (!runtime) return wrapErr(orchestratorError('BACKEND_NOT_FOUND', `Backend not found: ${backendName}`));
+    // OD2 = B (locked 2026-05-05): direct-mode-only override. send_followup
+    // must reject codex_network whenever the *originating* start_run was a
+    // profile-mode call, not just when the immediate parent was. metadata
+    // strips worker_profile on every follow-up step (intentionally — child
+    // runs are not themselves profile aliases), so checking only
+    // parent.meta.metadata would miss `start_run(profile) -> send_followup
+    // -> send_followup(codex_network)` chains. Walk back through
+    // parent_run_id until we hit the chain root and check the root's
+    // metadata.worker_profile flag.
+    const chainOriginIsProfileMode = await this.chainOriginatedFromProfileMode(parent.meta);
+    if (parsed.data.codex_network !== undefined && chainOriginIsProfileMode) {
+      return wrapErr(orchestratorError('INVALID_INPUT', 'Profile-mode follow-ups cannot override codex_network; edit the profile or run a direct-mode follow-up instead'));
+    }
+    if (parsed.data.codex_network !== undefined && backendName !== 'codex') {
+      return wrapErr(orchestratorError('INVALID_INPUT', `codex_network is only supported on the codex backend; got backend ${backendName}`));
+    }
     const idleTimeout = this.resolveIdleTimeout(parsed.data.idle_timeout_seconds);
     if (!idleTimeout.ok) return wrapErr(idleTimeout.error);
     const executionTimeout = this.resolveExecutionTimeout(parsed.data.execution_timeout_seconds);
@@ -430,12 +524,31 @@ export class OrchestratorService {
     const model = parsed.data.model ?? parent.meta.model;
     const metadata = metadataForFollowup(parent.meta.metadata, parsed.data.metadata);
     const modelSource: ModelSource = parsed.data.model ? 'explicit' : parent.meta.model ? 'inherited' : 'backend_default';
+    // S3 / R8 / T10 (issue #31): inherit codex_network from the parent unless
+    // the follow-up sets it explicitly. The parent's resolved value is
+    // recorded on parent.meta.model_settings.codex_network; an unset
+    // follow-up argument must not silently flip the new run back to the C4
+    // default.
+    const inheritedCodexNetwork = parsed.data.codex_network !== undefined
+      ? parsed.data.codex_network
+      : (parent.meta.model_settings.codex_network ?? undefined);
     const settings = hasModelSettingsInput(parsed.data)
-      ? modelSettingsForBackend(backendName, model, parsed.data.reasoning_effort, parsed.data.service_tier)
-      : parsed.data.model || backendName === 'cursor'
-        ? validateInheritedModelSettingsForBackend(backendName, model, parent.meta.model_settings)
-        : { ok: true as const, value: parent.meta.model_settings };
+      ? modelSettingsForBackend(backendName, model, parsed.data.reasoning_effort, parsed.data.service_tier, inheritedCodexNetwork)
+      : parsed.data.codex_network !== undefined
+        ? patchCodexNetwork(parent.meta.model_settings, parsed.data.codex_network)
+        : parsed.data.model || backendName === 'cursor'
+          ? validateInheritedModelSettingsForBackend(backendName, model, parent.meta.model_settings)
+          : { ok: true as const, value: parent.meta.model_settings };
     if (!settings.ok) return wrapErr(settings.error);
+    // B2 (issue #31): normalize legacy parent records before persisting the
+    // child. A legacy codex parent has model_settings.codex_network === null;
+    // sandboxArgs() defensively treats that as 'isolated', but the child run
+    // record must reflect the *effective* posture (plan invariant: "effective
+    // codex_network lands in run_summary.model_settings"). Only normalize for
+    // the codex backend; non-codex follow-ups must keep codex_network: null.
+    const persistedSettings = backendName === 'codex' && settings.value.codex_network === null
+      ? { ...settings.value, codex_network: 'isolated' as CodexNetwork, mode: 'normal' as const }
+      : settings.value;
 
     const meta = await this.store.createRun({
       backend: backendName,
@@ -446,7 +559,7 @@ export class OrchestratorService {
       requested_session_id: resumeSessionId,
       model,
       model_source: modelSource,
-      model_settings: settings.value,
+      model_settings: persistedSettings,
       display: displayMetadata(parsed.data.metadata, parsed.data.prompt, parent.meta.display),
       metadata,
       idle_timeout_seconds: idleTimeout.value,
@@ -454,7 +567,7 @@ export class OrchestratorService {
     });
     await this.captureAndPersistGitSnapshot(meta.run_id, parent.meta.cwd);
 
-    await this.startManagedRun(meta.run_id, runtime, parsed.data.prompt, parent.meta.cwd, idleTimeout.value, executionTimeout.value, settings.value, model, resumeSessionId);
+    await this.startManagedRun(meta.run_id, runtime, parsed.data.prompt, parent.meta.cwd, idleTimeout.value, executionTimeout.value, persistedSettings, model, resumeSessionId);
     return wrapOk({ run_id: meta.run_id });
   }
 
@@ -1092,6 +1205,7 @@ function workerProfileFromUpsert(input: UpsertWorkerProfile): WorkerProfile {
   if (input.variant !== undefined) profile.variant = input.variant;
   if (input.reasoning_effort !== undefined) profile.reasoning_effort = input.reasoning_effort;
   if (input.service_tier !== undefined) profile.service_tier = input.service_tier;
+  if (input.codex_network !== undefined) profile.codex_network = input.codex_network;
   if (input.description !== undefined) profile.description = input.description;
   if (input.metadata !== undefined) profile.metadata = input.metadata;
   return profile;
@@ -1105,6 +1219,7 @@ function formatValidProfile(profile: ValidatedWorkerProfile): Record<string, unk
     variant: profile.variant ?? null,
     reasoning_effort: profile.reasoning_effort ?? null,
     service_tier: profile.service_tier ?? null,
+    codex_network: profile.codex_network ?? null,
     description: profile.description ?? null,
     metadata: profile.metadata ?? {},
     capability: {
@@ -1121,14 +1236,38 @@ function invalidProfileList(profiles: InspectedWorkerProfiles): InvalidWorkerPro
   return Object.values(profiles.invalid_profiles).sort((a, b) => a.id.localeCompare(b.id));
 }
 
+// Only reasoning_effort/service_tier trigger the "rebuild settings from
+// scratch" path on send_followup. codex_network is a separable concern
+// (network egress posture) and should not reset reasoning_effort or
+// service_tier on a one-off network override; it is patched onto the
+// inherited settings instead. See T10 / S3 / R8.
 function hasModelSettingsInput(input: { reasoning_effort?: ReasoningEffort; service_tier?: ServiceTier }): boolean {
   return input.reasoning_effort !== undefined || input.service_tier !== undefined;
+}
+
+function patchCodexNetwork(settings: RunModelSettings, codexNetwork: CodexNetwork): { ok: true; value: RunModelSettings } {
+  // Preserve reasoning_effort/service_tier from the parent; only patch
+  // codex_network (and re-derive the mode breadcrumb).
+  return {
+    ok: true,
+    value: {
+      ...settings,
+      mode: codexNetwork === 'isolated' ? 'normal' : null,
+      codex_network: codexNetwork,
+    },
+  };
+}
+
+function isProfileModeMetadata(metadata: Record<string, unknown>): boolean {
+  const workerProfile = metadata.worker_profile;
+  if (!workerProfile || typeof workerProfile !== 'object' || Array.isArray(workerProfile)) return false;
+  return (workerProfile as { mode?: unknown }).mode === 'profile';
 }
 
 function parseProfileModelSettings(
   profile: ValidatedWorkerProfile,
   profilesFile: string,
-): { ok: true; reasoningEffort: ReasoningEffort | undefined; serviceTier: ServiceTier | undefined } | { ok: false; error: OrchestratorError } {
+): { ok: true; reasoningEffort: ReasoningEffort | undefined; serviceTier: ServiceTier | undefined; codexNetwork: CodexNetwork | undefined } | { ok: false; error: OrchestratorError } {
   const reasoningEffort = profile.reasoning_effort
     ? ReasoningEffortSchema.safeParse(profile.reasoning_effort)
     : null;
@@ -1155,10 +1294,24 @@ function parseProfileModelSettings(
     };
   }
 
+  const codexNetwork = profile.codex_network
+    ? CodexNetworkSchema.safeParse(profile.codex_network)
+    : null;
+  if (codexNetwork && !codexNetwork.success) {
+    return {
+      ok: false,
+      error: orchestratorError('INVALID_INPUT', `Profile ${profile.id} has invalid codex_network ${profile.codex_network}`, {
+        profile: profile.id,
+        profiles_file: profilesFile,
+      }),
+    };
+  }
+
   return {
     ok: true,
     reasoningEffort: reasoningEffort?.data,
     serviceTier: serviceTier?.data,
+    codexNetwork: codexNetwork?.data,
   };
 }
 
@@ -1175,19 +1328,37 @@ function modelSettingsForBackend(
   model: string | null | undefined,
   reasoningEffort: ReasoningEffort | undefined,
   serviceTier: ServiceTier | undefined,
+  codexNetwork: CodexNetwork | undefined,
 ): { ok: true; value: RunModelSettings } | { ok: false; error: OrchestratorError } {
   if (backend === 'codex') {
     if (reasoningEffort === 'max') {
       return { ok: false, error: orchestratorError('INVALID_INPUT', 'Codex reasoning_effort must be one of none, minimal, low, medium, high, or xhigh') };
     }
+    // Per OD1 = B (issue #31, locked 2026-05-05): the codex backend's network
+    // posture is now driven exclusively by codex_network. service_tier no
+    // longer derives mode='normal' (and therefore no longer derives
+    // --ignore-user-config). When codex_network is unset we default to
+    // 'isolated', matching the locked OD1 = B uniform default. The internal
+    // `mode` field is retained as a derived breadcrumb (now derived from
+    // codex_network rather than service_tier) so observability and
+    // run-record back-compat keep working. service_tier='normal' continues
+    // to be suppressed in serialization because codex's CLI default is
+    // 'normal'; explicit re-emission of the default would add no behavior
+    // and would churn the codex argv shape.
+    const resolvedCodexNetwork: CodexNetwork = codexNetwork ?? 'isolated';
     return {
       ok: true,
       value: {
         reasoning_effort: reasoningEffort ?? null,
         service_tier: serviceTier && serviceTier !== 'normal' ? serviceTier : null,
-        mode: serviceTier === 'normal' ? 'normal' : null,
+        mode: resolvedCodexNetwork === 'isolated' ? 'normal' : null,
+        codex_network: resolvedCodexNetwork,
       },
     };
+  }
+
+  if (codexNetwork !== undefined) {
+    return { ok: false, error: orchestratorError('INVALID_INPUT', `codex_network is only supported on the codex backend; got backend ${backend}`) };
   }
 
   if (backend === 'cursor') {
@@ -1206,6 +1377,7 @@ function modelSettingsForBackend(
         reasoning_effort: null,
         service_tier: null,
         mode: null,
+        codex_network: null,
       },
     };
   }
@@ -1221,6 +1393,7 @@ function modelSettingsForBackend(
       reasoning_effort: reasoningEffort ?? null,
       service_tier: null,
       mode: null,
+      codex_network: null,
     },
   };
 }

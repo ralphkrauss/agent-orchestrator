@@ -26,6 +26,12 @@ describe('MCP tool registration', () => {
     assert.equal(Object.hasOwn(start.properties, 'profiles_file'), true);
     assert.equal(Object.hasOwn(start.properties, 'reasoning_effort'), true);
     assert.equal(Object.hasOwn(start.properties, 'service_tier'), true);
+    // Issue #31 / T9 (OD2=B): start_run advertises codex_network for direct-mode overrides.
+    assert.equal(Object.hasOwn(start.properties, 'codex_network'), true);
+    assert.deepStrictEqual(
+      (start.properties.codex_network as { enum: string[] }).enum,
+      ['isolated', 'workspace', 'user-config'],
+    );
     assert.equal(Object.hasOwn(start.properties, 'idle_timeout_seconds'), true);
     assert.equal(Object.hasOwn(start.properties, 'execution_timeout_seconds'), true);
     assert.deepStrictEqual(start.required, ['prompt', 'cwd']);
@@ -40,12 +46,24 @@ describe('MCP tool registration', () => {
     assert.equal(Object.hasOwn(upsertProfile.properties, 'model'), true);
     assert.equal(Object.hasOwn(upsertProfile.properties, 'reasoning_effort'), true);
     assert.equal(Object.hasOwn(upsertProfile.properties, 'service_tier'), true);
+    // Issue #31 / T4: codex_network is round-tripped through upsert_worker_profile.
+    assert.equal(Object.hasOwn(upsertProfile.properties, 'codex_network'), true);
+    assert.deepStrictEqual(
+      (upsertProfile.properties.codex_network as { enum: string[] }).enum,
+      ['isolated', 'workspace', 'user-config'],
+    );
     assert.equal(Object.hasOwn(upsertProfile.properties, 'create_if_missing'), true);
 
     const followup = schemaFor('send_followup');
     assert.equal(Object.hasOwn(followup.properties, 'metadata'), true);
     assert.equal(Object.hasOwn(followup.properties, 'reasoning_effort'), true);
     assert.equal(Object.hasOwn(followup.properties, 'service_tier'), true);
+    // Issue #31 / T9 (OD2=B): send_followup advertises codex_network for direct-mode overrides.
+    assert.equal(Object.hasOwn(followup.properties, 'codex_network'), true);
+    assert.deepStrictEqual(
+      (followup.properties.codex_network as { enum: string[] }).enum,
+      ['isolated', 'workspace', 'user-config'],
+    );
     assert.equal(Object.hasOwn(followup.properties, 'idle_timeout_seconds'), true);
     assert.equal(Object.hasOwn(followup.properties, 'execution_timeout_seconds'), true);
     assert.deepStrictEqual(followup.required, ['run_id', 'prompt']);
