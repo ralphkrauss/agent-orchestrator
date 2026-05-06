@@ -1,8 +1,17 @@
 import { createHash } from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { hostname } from 'node:os';
 import { cp, mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ulid } from 'ulid';
+import { IpcClient, IpcRequestError } from '../ipc/client.js';
+import { daemonPaths } from '../daemon/paths.js';
+import {
+  removeOrchestratorSidecar,
+  writeOrchestratorSidecar,
+} from '../daemon/orchestratorSidecar.js';
+import { OrchestratorRecordSchema, type OrchestratorDisplay, type OrchestratorRecord } from '../contract.js';
 import { resolveBinary } from '../backend/common.js';
 import { getBackendStatus } from '../diagnostics.js';
 import { ensureSecureRoot, resolveStoreRoot } from '../runStore.js';
@@ -37,6 +46,9 @@ export interface ParsedClaudeLauncherArgs {
   printDiscovery: boolean;
   help: boolean;
   claudeArgs: string[];
+  remoteControl: boolean;
+  remoteControlSessionNamePrefix: string | null;
+  orchestratorLabel: string | null;
 }
 
 export function parseClaudeLauncherArgs(
@@ -62,6 +74,9 @@ export function parseClaudeLauncherArgs(
   let printConfig = false;
   let printDiscovery = false;
   let help = false;
+  let remoteControl = false;
+  let remoteControlSessionNamePrefix: string | null = null;
+  let orchestratorLabel: string | null = null;
 
   try {
     for (let index = 0; index < ownArgs.length; index += 1) {
@@ -85,6 +100,12 @@ export function parseClaudeLauncherArgs(
         stateDir = readOptionValue(ownArgs, ++index, arg);
       } else if (arg === '--claude-binary') {
         claudeBinary = readOptionValue(ownArgs, ++index, arg);
+      } else if (arg === '--remote-control') {
+        remoteControl = true;
+      } else if (arg === '--remote-control-session-name-prefix') {
+        remoteControlSessionNamePrefix = readOptionValue(ownArgs, ++index, arg);
+      } else if (arg === '--orchestrator-label') {
+        orchestratorLabel = readOptionValue(ownArgs, ++index, arg);
       } else {
         return { ok: false, error: `Unknown option: ${arg}. Pass Claude arguments after --.` };
       }
@@ -113,6 +134,9 @@ export function parseClaudeLauncherArgs(
       printDiscovery,
       help,
       claudeArgs,
+      remoteControl,
+      remoteControlSessionNamePrefix,
+      orchestratorLabel,
     },
   };
 }
@@ -190,9 +214,23 @@ export async function runClaudeLauncher(
     return 1;
   }
 
-  const built = await buildClaudeEnvelope({ options, env, catalog, profilesResult });
+  // Generate orchestrator identity before spawning Claude (Decision 2).
+  // The launcher pins it into the supervisor's MCP server entry env so the
+  // model never authors `metadata.orchestrator_id`.
+  const orchestratorId = ulid();
+  const display = captureSupervisorDisplay(env, options);
+
+  const built = await buildClaudeEnvelope({
+    options,
+    env,
+    catalog,
+    profilesResult,
+    orchestratorId,
+    remoteControl: options.remoteControl,
+    display,
+  });
   if (options.printConfig) {
-    io.stdout.write(`# system prompt\n${built.systemPrompt}\n\n# settings.json\n${built.settingsContent}\n# mcp.json\n${built.mcpConfigContent}\n# launch cwd\n${built.launchCwd}\n# runtime skills root\n${built.userSkillsRoot}\n# runtime skills\n${built.userSkillNames.join(', ') || 'none'}\n# spawn args\n${JSON.stringify(built.spawnArgs)}\n`);
+    io.stdout.write(`# system prompt\n${built.systemPrompt}\n\n# settings.json\n${built.settingsContent}\n# mcp.json\n${built.mcpConfigContent}\n# launch cwd\n${built.launchCwd}\n# runtime skills root\n${built.userSkillsRoot}\n# runtime skills\n${built.userSkillNames.join(', ') || 'none'}\n# spawn args\n${JSON.stringify(built.spawnArgs)}\n# orchestrator id\n${orchestratorId}\n# orchestrator label\n${orchestratorLabelFor(options)}\n# remote control\n${options.remoteControl ? 'enabled' : 'disabled'}\n# display\n${JSON.stringify(display)}\n`);
     await built.cleanup();
     return 0;
   }
@@ -204,10 +242,127 @@ export async function runClaudeLauncher(
     return 1;
   }
 
+  // Write a registration sidecar at <store_root>/orchestrators/<id>.json so
+  // the supervisor's signal CLI can transparently re-register if the daemon
+  // restarts mid-session (issue #40, F5 / Assumption A7). Best effort;
+  // failures only log a warning.
+  const storeRoot = env.AGENT_ORCHESTRATOR_HOME || resolveStoreRoot();
+  const registrationRecord: OrchestratorRecord = OrchestratorRecordSchema.parse({
+    id: orchestratorId,
+    client: 'claude',
+    label: orchestratorLabelFor(options),
+    cwd: options.cwd,
+    display,
+    registered_at: new Date().toISOString(),
+    last_supervisor_event_at: null,
+  });
+  try {
+    await writeOrchestratorSidecar(storeRoot, registrationRecord);
+  } catch (error) {
+    io.stderr.write(`agent-orchestrator: failed to write orchestrator sidecar: ${error instanceof Error ? error.message : String(error)}\n`);
+  }
+
+  // Best-effort registration with the local daemon. Failures must not block
+  // the launch; the supervisor's first hook signal will trigger a transparent
+  // re-register from the sidecar if the daemon is later available.
+  await registerOrchestrator({
+    orchestratorId,
+    label: orchestratorLabelFor(options),
+    cwd: options.cwd,
+    display,
+    log: (message) => io.stderr.write(`${message}\n`),
+  });
+
   try {
     return await spawnClaude(binary, options, built);
   } finally {
+    await unregisterOrchestrator(orchestratorId, (message) => io.stderr.write(`${message}\n`));
+    try {
+      await removeOrchestratorSidecar(storeRoot, orchestratorId);
+    } catch (error) {
+      io.stderr.write(`agent-orchestrator: failed to remove orchestrator sidecar: ${error instanceof Error ? error.message : String(error)}\n`);
+    }
     await built.cleanup();
+  }
+}
+
+export function orchestratorLabelFor(options: ParsedClaudeLauncherArgs): string {
+  if (options.orchestratorLabel && options.orchestratorLabel.trim()) return options.orchestratorLabel.trim();
+  return basename(options.cwd) || 'orchestrator';
+}
+
+/**
+ * Capture display metadata at supervisor launch (Decision 11). Best effort:
+ * failures leave fields `null`. Tmux window id is queried via
+ * `tmux display-message` only when `TMUX` is set; spawnSync uses `shell:false`
+ * with a 500ms timeout.
+ */
+export function captureSupervisorDisplay(
+  env: NodeJS.ProcessEnv,
+  options: ParsedClaudeLauncherArgs,
+): OrchestratorDisplay {
+  const tmuxPane = stringOrNull(env.TMUX_PANE);
+  const tmux = stringOrNull(env.TMUX);
+  let tmuxWindowId: string | null = null;
+  if (tmux) {
+    try {
+      const result = spawnSync('tmux', ['display-message', '-p', '-F', '#{window_id}'], {
+        encoding: 'utf8',
+        timeout: 500,
+        shell: false,
+      });
+      if (result.status === 0 && typeof result.stdout === 'string') {
+        const value = result.stdout.trim();
+        if (value) tmuxWindowId = value;
+      }
+    } catch {
+      // best effort
+    }
+  }
+  return {
+    tmux_pane: tmuxPane,
+    tmux_window_id: tmuxWindowId,
+    base_title: orchestratorLabelFor(options),
+    host: hostname() || null,
+  };
+}
+
+function stringOrNull(value: string | undefined): string | null {
+  return typeof value === 'string' && value.trim() ? value : null;
+}
+
+async function registerOrchestrator(input: {
+  orchestratorId: string;
+  label: string;
+  cwd: string;
+  display: OrchestratorDisplay;
+  log: (message: string) => void;
+}): Promise<void> {
+  try {
+    const client = new IpcClient(daemonPaths().ipc.path);
+    await client.request('register_supervisor', {
+      orchestrator_id: input.orchestratorId,
+      label: input.label,
+      cwd: input.cwd,
+      client: 'claude',
+      display: input.display,
+    }, 5_000);
+  } catch (error) {
+    if (error instanceof IpcRequestError && error.orchestratorError.code === 'DAEMON_UNAVAILABLE') {
+      input.log('agent-orchestrator: daemon unavailable; skipping orchestrator registration (will register on first signal)');
+      return;
+    }
+    input.log(`agent-orchestrator: orchestrator register failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+async function unregisterOrchestrator(orchestratorId: string, log: (message: string) => void): Promise<void> {
+  try {
+    const client = new IpcClient(daemonPaths().ipc.path);
+    await client.request('unregister_supervisor', { orchestrator_id: orchestratorId }, 2_000);
+  } catch (error) {
+    if (error instanceof IpcRequestError && error.orchestratorError.code === 'DAEMON_UNAVAILABLE') return;
+    log(`agent-orchestrator: orchestrator unregister failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -226,6 +381,13 @@ Options:
   --skills <path>                    Source skill root. Defaults to .agents/skills (orchestrate-* only is exposed).
   --state-dir <path>                 Durable Claude supervisor state (auth + stable workspace envelopes). Defaults to \${AGENT_ORCHESTRATOR_HOME:-~/.agent-orchestrator}/claude-supervisor.
   --claude-binary <path>             Defaults to claude on PATH.
+  --remote-control                   Opt in to Claude Remote Control (issue #40). Embeds the documented
+                                     remoteControlAtStartup / agentPushNotifEnabled keys in the generated
+                                     supervisor settings. Default: off.
+  --remote-control-session-name-prefix <prefix>
+                                     Forwarded to Claude as --remote-control-session-name-prefix.
+  --orchestrator-label <name>        Label written to the orchestrator record's display.base_title and
+                                     surfaced to user status hooks. Defaults to basename(cwd).
   --print-discovery                  Print the Claude binary compatibility report and exit.
   --print-config                     Print the generated supervisor envelope (system prompt, settings, mcp, runtime skills) and exit.
   --help
@@ -233,7 +395,8 @@ Options:
 Passthrough after --:
   Allowed Claude flags: --print, -p, --output-format, --input-format, --include-partial-messages,
   --include-hook-events, --verbose, --debug, -d, --name, -n,
-  --exclude-dynamic-system-prompt-sections, --no-session-persistence.
+  --exclude-dynamic-system-prompt-sections, --no-session-persistence,
+  --remote-control-session-name-prefix.
   Forbidden flags (the harness owns these or they would break isolation):
   --dangerously-skip-permissions, --mcp-config, --strict-mcp-config, --tools,
   --allowed-tools, --disallowed-tools, --add-dir, --settings, --setting-sources,
@@ -259,6 +422,9 @@ export async function buildClaudeEnvelope(input: {
   catalog: ReturnType<typeof createWorkerCapabilityCatalog>;
   profilesResult: { profiles: ValidatedWorkerProfiles | undefined; diagnostics: string[] };
   discovery?: ClaudeSurfaceReport;
+  orchestratorId?: string;
+  remoteControl?: boolean;
+  display?: OrchestratorDisplay;
 }): Promise<BuiltClaudeEnvelope> {
   const { options, env, catalog, profilesResult } = input;
   await ensureSecureRoot(options.stateDir);
@@ -314,6 +480,8 @@ export async function buildClaudeEnvelope(input: {
     profileDiagnostics: profilesResult.diagnostics,
     mcpCliPath: packageCliPath(),
     monitorPin,
+    orchestratorId: input.orchestratorId,
+    remoteControl: input.remoteControl,
   });
   const settingsPath = join(envelopeDir, 'settings.json');
   const userSettingsPath = join(stateClaudeConfigDir, 'settings.json');
@@ -336,6 +504,7 @@ export async function buildClaudeEnvelope(input: {
       monitorBashAllowPatterns: monitorPin.monitor_bash_allow_patterns,
     }),
     passthrough: options.claudeArgs,
+    remoteControlSessionNamePrefix: options.remoteControlSessionNamePrefix ?? null,
   });
   const spawnEnv: NodeJS.ProcessEnv = {
     ...env,
@@ -344,6 +513,9 @@ export async function buildClaudeEnvelope(input: {
     XDG_CONFIG_HOME: stateXdgConfigHome,
     CLAUDE_CONFIG_DIR: stateClaudeConfigDir,
   };
+  if (input.orchestratorId) {
+    spawnEnv.AGENT_ORCHESTRATOR_ORCH_ID = input.orchestratorId;
+  }
   const cleanup = async () => undefined;
   return {
     envelopeDir,
@@ -375,6 +547,7 @@ export function buildClaudeSpawnArgs(input: {
   allowedTools: readonly string[];
   passthrough: readonly string[];
   permissionMode?: 'dontAsk';
+  remoteControlSessionNamePrefix?: string | null;
 }): string[] {
   // Isolation envelope (see buildClaudeEnvelope):
   // - Spawn cwd is the target workspace so Claude Code slash commands and
@@ -405,8 +578,11 @@ export function buildClaudeSpawnArgs(input: {
     '--tools', input.builtinTools.join(','),
     '--allowed-tools', input.allowedTools.join(','),
     '--permission-mode', input.permissionMode ?? 'dontAsk',
-    ...input.passthrough,
   ];
+  if (input.remoteControlSessionNamePrefix) {
+    args.push('--remote-control-session-name-prefix', input.remoteControlSessionNamePrefix);
+  }
+  args.push(...input.passthrough);
   return args;
 }
 

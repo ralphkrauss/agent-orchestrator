@@ -128,7 +128,7 @@ describe('contract schemas and envelopes', () => {
     });
     assert.equal(parsed.model, null);
     assert.equal(parsed.model_source, 'legacy_unknown');
-    assert.deepStrictEqual(parsed.model_settings, { reasoning_effort: null, service_tier: null, mode: null });
+    assert.deepStrictEqual(parsed.model_settings, { reasoning_effort: null, service_tier: null, mode: null, codex_network: null });
     assert.equal(parsed.worker_invocation, null);
     assert.equal(parsed.requested_session_id, null);
     assert.equal(parsed.observed_session_id, null);

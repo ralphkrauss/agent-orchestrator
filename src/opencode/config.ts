@@ -171,7 +171,7 @@ function orchestrationPrompt(input: OpenCodeHarnessConfigInput): string {
     '',
     'Profiles manifest guidance:',
     '- You may create or update only the writable profiles manifest path when the user asks you to configure profiles.',
-    '- Keep profiles provider-agnostic: profile ids map to backend, model, variant, reasoning effort, service tier, description, and metadata.',
+    '- Keep profiles provider-agnostic: profile ids map to backend, model, variant, reasoning effort, service tier, codex_network (codex-only network egress posture; defaults to isolated when unset), description, and metadata.',
     '- Use list_worker_profiles with profiles_file to inspect the live profile manifest before choosing workers.',
     '- For normal worker starts, call start_run with profile and profiles_file using the writable profiles manifest path.',
     '- Use direct backend/model/reasoning_effort/service_tier in start_run only when the user explicitly requests a one-off direct model or when live profile resolution is broken.',
@@ -239,17 +239,34 @@ function formatProfiles(profiles: ValidatedWorkerProfiles | undefined): string {
         profile.variant ? `variant=${profile.variant}` : null,
         profile.reasoning_effort ? `reasoning_effort=${profile.reasoning_effort}` : null,
         profile.service_tier ? `service_tier=${profile.service_tier}` : null,
+        codexNetworkLine(profile),
       ].filter(Boolean).join(', ');
       return `- ${profile.id}: ${settings}${profile.description ? `; ${profile.description}` : ''}`;
     })
     .join('\n');
 }
 
+// Issue #31 / B1: render the *effective* codex_network on codex profiles so
+// the supervisor sees the resolved posture (and the OD1=B default of
+// 'isolated') in the prompt, even when the manifest does not set it. Non-codex
+// profiles continue to render identically to today (no codex_network line).
+function codexNetworkLine(profile: { backend: string; codex_network?: string }): string | null {
+  if (profile.backend !== 'codex') return null;
+  if (profile.codex_network) return `codex_network=${profile.codex_network}`;
+  return 'codex_network=isolated (default)';
+}
+
 function formatCatalog(catalog: WorkerCapabilityCatalog): string {
-  return catalog.backends.map((backend) => [
-    `- ${backend.backend} (${backend.display_name}): status=${backend.availability_status}, start=${backend.supports_start}, resume=${backend.supports_resume}`,
-    `  reasoning_efforts=${backend.settings.reasoning_efforts.join(', ') || 'none'}`,
-    `  service_tiers=${backend.settings.service_tiers.join(', ') || 'none'}`,
-    `  variants=${backend.settings.variants.join(', ') || 'none'}`,
-  ].join('\n')).join('\n');
+  return catalog.backends.map((backend) => {
+    const lines = [
+      `- ${backend.backend} (${backend.display_name}): status=${backend.availability_status}, start=${backend.supports_start}, resume=${backend.supports_resume}`,
+      `  reasoning_efforts=${backend.settings.reasoning_efforts.join(', ') || 'none'}`,
+      `  service_tiers=${backend.settings.service_tiers.join(', ') || 'none'}`,
+      `  variants=${backend.settings.variants.join(', ') || 'none'}`,
+    ];
+    if (backend.settings.network_modes.length > 0) {
+      lines.push(`  network_modes=${backend.settings.network_modes.join(', ')}`);
+    }
+    return lines.join('\n');
+  }).join('\n');
 }

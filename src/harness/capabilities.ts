@@ -15,6 +15,7 @@ export interface WorkerBackendCapability {
     reasoning_efforts: string[];
     service_tiers: string[];
     variants: string[];
+    network_modes: string[];
   };
   notes: string[];
 }
@@ -44,6 +45,7 @@ export const WorkerProfileSchema = z.object({
   variant: z.string().trim().min(1).optional(),
   reasoning_effort: z.string().trim().min(1).optional(),
   service_tier: z.string().trim().min(1).optional(),
+  codex_network: z.string().trim().min(1).optional(),
   description: z.string().trim().min(1).optional(),
   metadata: z.record(z.unknown()).optional(),
   claude_account: ClaudeAccountNameSchema.optional(),
@@ -102,8 +104,12 @@ export function createWorkerCapabilityCatalog(statusReport?: BackendStatusReport
           reasoning_efforts: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'],
           service_tiers: ['fast', 'flex', 'normal'],
           variants: [],
+          network_modes: ['isolated', 'workspace', 'user-config'],
         },
-        notes: ['Models are user-defined; the backend validates CLI availability and supported settings.'],
+        notes: [
+          'Models are user-defined; the backend validates CLI availability and supported settings.',
+          'codex_network controls network egress: isolated (default; --ignore-user-config, no network), workspace (network on, codex skips $CODEX_HOME/config.toml), user-config (codex reads $CODEX_HOME/config.toml verbatim).',
+        ],
       },
       {
         backend: 'claude',
@@ -116,6 +122,7 @@ export function createWorkerCapabilityCatalog(statusReport?: BackendStatusReport
           reasoning_efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
           service_tiers: [],
           variants: [],
+          network_modes: [],
         },
         notes: [
           'Use direct Claude model ids; aliases such as opus or sonnet can drift.',
@@ -133,6 +140,7 @@ export function createWorkerCapabilityCatalog(statusReport?: BackendStatusReport
           reasoning_efforts: [],
           service_tiers: [],
           variants: [],
+          network_modes: [],
         },
         notes: [
           'Uses the @cursor/sdk module in-process (local runtime only); cloud and self-hosted runtimes are out of scope for this release.',
@@ -260,6 +268,8 @@ function validateProfile(
   return errors;
 }
 
+const CODEX_NETWORK_VALUES = ['isolated', 'workspace', 'user-config'] as const;
+
 function validateBackendSpecificProfile(profileId: string, profile: WorkerProfile): string[] {
   if (profile.backend === 'codex') return [
     ...validateCodexProfile(profileId, profile),
@@ -272,6 +282,9 @@ function validateBackendSpecificProfile(profileId: string, profile: WorkerProfil
   if (profile.backend !== 'claude') return rejectClaudeAccountFields(profileId, profile);
 
   const errors: string[] = [];
+  if (profile.codex_network) {
+    errors.push(`profile ${profileId} sets codex_network which is only supported on the codex backend`);
+  }
   const error = validateClaudeModelAndEffort(profile.model, profile.reasoning_effort);
   if (error) errors.push(`profile ${profileId}: ${error}`);
   if (
@@ -306,14 +319,21 @@ function validateCursorProfile(profileId: string, profile: WorkerProfile): strin
   if (profile.service_tier) {
     errors.push(`profile ${profileId} sets service_tier which the cursor backend rejects`);
   }
+  if (profile.codex_network) {
+    errors.push(`profile ${profileId} sets codex_network which is only supported on the codex backend`);
+  }
   return errors;
 }
 
 function validateCodexProfile(profileId: string, profile: WorkerProfile): string[] {
+  const errors: string[] = [];
   if (profile.model?.includes('/')) {
-    return [`profile ${profileId} must use a Codex CLI model id, not provider-prefixed model ${profile.model}`];
+    errors.push(`profile ${profileId} must use a Codex CLI model id, not provider-prefixed model ${profile.model}`);
   }
-  return [];
+  if (profile.codex_network && !(CODEX_NETWORK_VALUES as readonly string[]).includes(profile.codex_network)) {
+    errors.push(`profile ${profileId} uses unsupported codex_network ${profile.codex_network}; expected one of ${CODEX_NETWORK_VALUES.join(', ')}`);
+  }
+  return errors;
 }
 
 function invalidProfile(profileId: string, profile: WorkerProfile, errors: string[]): InvalidWorkerProfile {

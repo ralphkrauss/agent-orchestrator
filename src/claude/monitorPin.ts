@@ -1,4 +1,4 @@
-import { dirname, isAbsolute, join } from 'node:path';
+import { dirname, join, posix as posixPath, win32 as win32Path } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ulidPattern = /^[0-9A-HJKMNP-TV-Z]{26}$/;
@@ -35,12 +35,43 @@ export interface ResolvedMonitorPin {
   monitor_bash_allow_patterns: string[];
 }
 
-export function resolveMonitorPin(env: NodeJS.ProcessEnv = process.env): ResolvedMonitorPin {
+export interface ResolveMonitorPinOptions {
+  /**
+   * Override `process.platform`. Used by tests so a Linux runner can exercise
+   * the `win32` branch deterministically. Production callers omit it.
+   */
+  platform?: NodeJS.Platform;
+  /**
+   * Override `process.execPath`. Used by tests to drive Windows-shaped node
+   * locations (e.g. `C:\\Program Files\\nodejs\\node.exe`) from a Linux runner.
+   * Production callers omit it.
+   */
+  nodePath?: string;
+}
+
+export function resolveMonitorPin(
+  env: NodeJS.ProcessEnv = process.env,
+  options: ResolveMonitorPinOptions = {},
+): ResolvedMonitorPin {
+  const platform = options.platform ?? process.platform;
+  const isWindows = platform === 'win32';
+  const isAbsoluteForPlatform = isWindows ? win32Path.isAbsolute : posixPath.isAbsolute;
   const explicit = env.AGENT_ORCHESTRATOR_BIN;
-  const bin = explicit && isAbsolute(explicit) ? explicit : packageCliPath();
-  const nodePath = process.execPath;
-  assertMonitorPathIsSupported('AGENT_ORCHESTRATOR_BIN', bin);
-  assertMonitorPathIsSupported('process.execPath', nodePath);
+  const rawBin = explicit && isAbsoluteForPlatform(explicit) ? explicit : packageCliPath();
+  const rawNodePath = options.nodePath ?? process.execPath;
+  const bin = isWindows ? rawBin.replaceAll('\\', '/') : rawBin;
+  const nodePath = isWindows ? rawNodePath.replaceAll('\\', '/') : rawNodePath;
+  if (isWindows) {
+    // Run UNC rejection after slash normalization so mixed-separator UNC
+    // inputs (e.g. `\/server/share/...` or `/\server/share/...`) are caught
+    // alongside the canonical `\\server\share\...` and `//server/share/...`
+    // forms. Per plan decision #5 these all map to the dedicated UNC error,
+    // not the forbidden-character error.
+    assertMonitorPathIsNotUnc('AGENT_ORCHESTRATOR_BIN', bin);
+    assertMonitorPathIsNotUnc('process.execPath', nodePath);
+  }
+  assertMonitorPathIsSupported('AGENT_ORCHESTRATOR_BIN', bin, { platform });
+  assertMonitorPathIsSupported('process.execPath', nodePath, { platform });
   const command_prefix = [nodePath, bin];
   const command_prefix_string = quoteCommandTokens(command_prefix);
   const monitor_command_patterns = [
@@ -108,14 +139,42 @@ function quoteToken(token: string): string {
  */
 const FORBIDDEN_MONITOR_PATH_CHARACTERS = /[;&|<>$`\\\r\n']/;
 
-export function assertMonitorPathIsSupported(role: string, value: string): void {
+export interface AssertMonitorPathOptions {
+  platform?: NodeJS.Platform;
+}
+
+export function assertMonitorPathIsSupported(
+  role: string,
+  value: string,
+  options: AssertMonitorPathOptions = {},
+): void {
   if (!FORBIDDEN_MONITOR_PATH_CHARACTERS.test(value)) return;
+  const platform = options.platform ?? process.platform;
+  if (platform === 'win32') {
+    throw new Error(
+      `${role} contains a character that the Claude supervisor's Bash deny list ` +
+        `would shadow even after POSIX quoting (forbidden: single quote, ;, &, |, <, >, $, \`, \\, CR, LF). ` +
+        `On Windows, backslashes in this path are auto-normalized to forward slashes before this check; the remaining forbidden characters still apply. ` +
+        `Reinstall agent-orchestrator (and node, if needed) at a path that uses only spaces, ` +
+        `parentheses, or other shell-safe characters. Got: ${JSON.stringify(value)}`,
+    );
+  }
   throw new Error(
     `${role} contains a character that the Claude supervisor's Bash deny list ` +
       `would shadow even after POSIX quoting (forbidden: single quote, ;, &, |, <, >, $, \`, \\, CR, LF). ` +
       `Reinstall agent-orchestrator (and node, if needed) at a path that uses only spaces, ` +
       `parentheses, or other shell-safe characters. Got: ${JSON.stringify(value)}`,
   );
+}
+
+function assertMonitorPathIsNotUnc(role: string, value: string): void {
+  if (value.startsWith('\\\\') || value.startsWith('//')) {
+    throw new Error(
+      `${role} is a UNC path, which is not supported by the Claude supervisor monitor pin. ` +
+        `Reinstall agent-orchestrator (and node, if needed) on a local drive (for example C:\\) ` +
+        `or via a mapped drive letter. Got: ${JSON.stringify(value)}`,
+    );
+  }
 }
 
 function packageCliPath(): string {

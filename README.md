@@ -66,6 +66,20 @@ Linux and macOS use Unix sockets and POSIX process groups. Windows uses a
 per-store named pipe for daemon IPC and `taskkill` for worker process-tree
 cancellation.
 
+On Windows, `agent-orchestrator claude` requires Git Bash (the MSYS-flavored
+`bash` that Claude Code uses for its `Bash` tool); PowerShell-only Claude Code
+installs are not supported. The Claude supervisor's pinned monitor command and
+`Bash(...)` permission entries are emitted with forward-slash paths on Windows
+(for example `C:/Users/<name>/AppData/Roaming/npm/...`) so they do not collide
+with the supervisor's Bash deny list.
+
+On Windows, `just` recipes run under PowerShell Desktop and through `node`
+directly for parameter-taking recipes (via `just`'s `[script]` attribute, which
+requires `just >= 1.44`); no Git Bash or `sh.exe` is required for the dev
+workflow. The Git Bash requirement for `agent-orchestrator claude` itself
+(described above) is unchanged because Claude Code uses Bash for its `Bash`
+tool.
+
 The MCP package never installs or bundles worker CLIs. Missing workers are reported by diagnostics and by failed run results, but one missing backend does not prevent the MCP server from starting.
 
 ## Diagnostics
@@ -289,8 +303,11 @@ The current package supports Codex, Claude, and Cursor worker backends.
 Cursor uses the `@cursor/sdk` module in-process (local runtime only) and
 requires `CURSOR_API_KEY`; cursor profiles must declare `model` and must omit
 `reasoning_effort` and `service_tier` (see
-`docs/development/cursor-backend.md`). Claude profiles can opt into native
-multi-account rotation via `claude_account_priority` and the
+`docs/development/cursor-backend.md`). **BREAKING (codex):** codex profiles
+gain a new optional `codex_network` field (`isolated` / `workspace` /
+`user-config`) that defaults to `'isolated'` when unset. See
+`docs/development/codex-backend.md` for the migration. Claude profiles can opt
+into native multi-account rotation via `claude_account_priority` and the
 `agent-orchestrator auth login claude --account <name>` /
 `auth set claude --account <name>` commands; details in
 `docs/development/claude-multi-account.md`. The profiles manifest stays
@@ -382,6 +399,29 @@ The spawn passes:
 - A regenerated `HOME/.claude/skills` mirror copied from the target workspace
   `.claude/skills`, so `/skills` can find the same project skills without
   enabling project `settings.json`, hooks, or project MCP configuration.
+
+### Status hooks (issue #40)
+
+The launcher accepts two opt-in flags that drive the daemon-owned orchestrator
+status surface:
+
+- `--remote-control` embeds the documented `remoteControlAtStartup` and
+  `agentPushNotifEnabled` keys in the generated supervisor `settings.json`
+  (off by default). `--remote-control-session-name-prefix <prefix>` is forwarded
+  to Claude as a CLI flag.
+- `--orchestrator-label <name>` sets the orchestrator's display label
+  surfaced to user-level status hooks. Defaults to `basename(cwd)`.
+
+User-level hooks live in `~/.config/agent-orchestrator/hooks.json` and follow
+the Claude-parity shell-string shape used by `~/.claude/settings.json` hooks.
+The daemon emits a v1 `orchestrator_status_changed` payload to each entry
+and never blocks orchestration on hook execution. See
+[`docs/development/orchestrator-status-hooks.md`](docs/development/orchestrator-status-hooks.md)
+and the example tmux hook at [`examples/hooks/tmux-status.sh`](examples/hooks/tmux-status.sh).
+
+Read the current orchestrator status from a shell with
+`agent-orchestrator supervisor status`. The top-level
+`agent-orchestrator status` subcommand stays reserved for daemon status.
 
 The harness intentionally does **not** pass:
 
@@ -626,8 +666,8 @@ Expected operational failures use `{ ok: false, error }`. MCP `isError: true` is
 | `get_backend_status` | `{}` | `{ status: BackendStatusReport }` |
 | `get_observability_snapshot` | `{ limit?: number, include_prompts?: boolean, recent_event_limit?: number, diagnostics?: boolean }` | `{ snapshot: ObservabilitySnapshot }` |
 | `list_worker_profiles` | `{ profiles_file?: string, cwd?: string }` | `{ profiles_file: string, profiles: WorkerProfile[], invalid_profiles: InvalidWorkerProfile[], diagnostics: string[] }` |
-| `upsert_worker_profile` | `{ profiles_file?: string, cwd?: string, profile: string, backend: "codex" \| "claude" \| "cursor", model?: string, variant?: string, reasoning_effort?: string, service_tier?: string, description?: string, metadata?: object, create_if_missing?: boolean }` | `{ profiles_file: string, profile: WorkerProfile, previous_profile: object \| null, created: boolean, invalid_profiles: InvalidWorkerProfile[], diagnostics: string[] }` |
-| `start_run` | Profile mode: `{ profile: string, profiles_file?: string, prompt: string, cwd: string, metadata?: object, idle_timeout_seconds?: number, execution_timeout_seconds?: number }`; direct mode: `{ backend: "codex" \| "claude" \| "cursor", prompt: string, cwd: string, model?: string, reasoning_effort?: string, service_tier?: string, metadata?: object, idle_timeout_seconds?: number, execution_timeout_seconds?: number }` | `{ run_id: string }` |
+| `upsert_worker_profile` | `{ profiles_file?: string, cwd?: string, profile: string, backend: "codex" \| "claude" \| "cursor", model?: string, variant?: string, reasoning_effort?: string, service_tier?: string, codex_network?: "isolated" \| "workspace" \| "user-config", description?: string, metadata?: object, create_if_missing?: boolean }` | `{ profiles_file: string, profile: WorkerProfile, previous_profile: object \| null, created: boolean, invalid_profiles: InvalidWorkerProfile[], diagnostics: string[] }` |
+| `start_run` | Profile mode: `{ profile: string, profiles_file?: string, prompt: string, cwd: string, metadata?: object, idle_timeout_seconds?: number, execution_timeout_seconds?: number }`; direct mode: `{ backend: "codex" \| "claude" \| "cursor", prompt: string, cwd: string, model?: string, reasoning_effort?: string, service_tier?: string, codex_network?: "isolated" \| "workspace" \| "user-config", metadata?: object, idle_timeout_seconds?: number, execution_timeout_seconds?: number }` | `{ run_id: string }` |
 | `list_runs` | `{}` | `{ runs: RunSummary[] }` |
 | `get_run_status` | `{ run_id: string }` | `{ run_summary: RunSummary }` |
 | `get_run_events` | `{ run_id: string, after_sequence?: number, limit?: number }` | `{ events: WorkerEvent[], next_sequence: number, has_more: boolean }` |
@@ -637,7 +677,7 @@ Expected operational failures use `{ ok: false, error }`. MCP `isError: true` is
 | `list_run_notifications` | `{ run_ids?: string[], since_notification_id?: string, kinds?: ("terminal" \| "fatal_error")[], include_acked?: boolean, limit?: number }` | `{ notifications: RunNotification[] }` |
 | `ack_run_notification` | `{ notification_id: string }` | `{ acked: boolean, notification_id: string }` |
 | `get_run_result` | `{ run_id: string }` | `{ run_summary: RunSummary, result: WorkerResult \| null }` |
-| `send_followup` | `{ run_id: string, prompt: string, model?: string, reasoning_effort?: string, service_tier?: string, metadata?: object, idle_timeout_seconds?: number, execution_timeout_seconds?: number }` | `{ run_id: string }` for a new child run |
+| `send_followup` | `{ run_id: string, prompt: string, model?: string, reasoning_effort?: string, service_tier?: string, codex_network?: "isolated" \| "workspace" \| "user-config", metadata?: object, idle_timeout_seconds?: number, execution_timeout_seconds?: number }` (codex_network is direct-mode-only and rejected when the parent run is profile-mode) | `{ run_id: string }` for a new child run |
 | `cancel_run` | `{ run_id: string }` | `{ accepted: true, status: RunStatus }` |
 
 `wait_for_any_run` blocks against the local daemon until any of the supplied
@@ -683,8 +723,15 @@ Follow-up runs inherit the parent run model unless a new `model` is supplied.
 `xhigh`. Claude accepts `low`, `medium`, `high`, `xhigh`, and `max` on supported
 direct model ids; `xhigh` is accepted only for Opus 4.7 to avoid Claude Code's
 documented fallback to `high` on older models. `service_tier` is Codex-only:
-`fast` and `flex` are passed through, while `normal` runs Codex without loading
-the user's config so a global fast setting is not inherited.
+`fast` and `flex` are passed through; `normal` is suppressed in the codex argv
+because it is the codex CLI default. **BREAKING (codex):** as of this release
+the codex backend's network egress posture is controlled by a separate
+`codex_network` profile field (`isolated`, `workspace`, `user-config`) rather
+than by `service_tier`. Codex profiles that omit `codex_network` default to
+`'isolated'` (closed network egress, `--ignore-user-config` passed to
+`codex exec`). See `docs/development/codex-backend.md` for the migration
+table, the three migration options, and the per-run warning copy emitted in
+the run event log.
 
 The observability snapshot includes additive fields for model source, display
 metadata, raw prompt artifacts, activity summaries, artifact sizes, and

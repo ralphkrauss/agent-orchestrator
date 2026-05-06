@@ -1,4 +1,6 @@
+import type { SupervisorEvent } from '../contract.js';
 import { tools as mcpTools } from '../mcpTools.js';
+import { quoteCommandTokens, type ResolvedMonitorPin } from './monitorPin.js';
 
 export const CLAUDE_MCP_SERVER_NAME = 'agent-orchestrator';
 
@@ -10,6 +12,35 @@ export const CLAUDE_MCP_SERVER_NAME = 'agent-orchestrator';
  */
 export const CLAUDE_SUPERVISOR_BUILTIN_TOOLS = ['Read', 'Glob', 'Grep', 'Bash', 'Skill'] as const;
 
+export interface ClaudeSupervisorHookEntry {
+  type: 'command';
+  command: string;
+}
+
+export interface ClaudeSupervisorHookGroup {
+  hooks: ClaudeSupervisorHookEntry[];
+}
+
+/**
+ * Harness-generated supervisor hooks. Uses Claude Code's documented nested
+ * `hooks.<EventName>[].hooks[]` shape. Five Claude lifecycle events are
+ * mapped to internal SupervisorEvents (Decision 3b). The composed command
+ * string is statically built from the pinned absolute supervisor-CLI path
+ * plus a static event identifier — no untrusted interpolation.
+ */
+export interface ClaudeSupervisorHooks {
+  UserPromptSubmit: ClaudeSupervisorHookGroup[];
+  Notification: ClaudeSupervisorHookGroup[];
+  Stop: ClaudeSupervisorHookGroup[];
+  SessionStart: ClaudeSupervisorHookGroup[];
+  SessionEnd: ClaudeSupervisorHookGroup[];
+}
+
+export interface ClaudeSupervisorRemoteControlSettings {
+  remoteControlAtStartup: true;
+  agentPushNotifEnabled: true;
+}
+
 export interface ClaudeSupervisorSettings {
   permissions: {
     defaultMode: 'dontAsk';
@@ -17,8 +48,10 @@ export interface ClaudeSupervisorSettings {
     deny: string[];
   };
   enableAllProjectMcpServers: false;
-  hooks: Record<string, never>;
+  hooks: ClaudeSupervisorHooks;
   enabledPlugins: Record<string, never>;
+  remoteControlAtStartup?: true;
+  agentPushNotifEnabled?: true;
 }
 
 export interface ClaudeSupervisorPermissionInput {
@@ -29,6 +62,86 @@ export interface ClaudeSupervisorPermissionInput {
    * invocations.
    */
   monitorBashAllowPatterns: readonly string[];
+  /**
+   * Pinned absolute supervisor-CLI invocation. Used to compose harness-owned
+   * Claude lifecycle hook command strings (Decisions 3 / 21). Must be
+   * provided when generating supervisor settings; the print-config / launcher
+   * paths always supply it.
+   */
+  monitorPin: ResolvedMonitorPin;
+  /**
+   * When true, embed the documented Remote Control settings keys
+   * (`remoteControlAtStartup`, `agentPushNotifEnabled`) in the generated
+   * supervisor settings. Default off; opt-in per Decision 12.
+   */
+  remoteControl?: boolean;
+}
+
+/**
+ * Claude Code lifecycle event names used by the harness-generated supervisor
+ * hooks (Decision 3 / 3b). Statically enumerated so `composeSupervisorHookCommand`
+ * cannot be called with arbitrary, possibly user-supplied input.
+ */
+export const CLAUDE_SUPERVISOR_HOOK_EVENT_NAMES = [
+  'UserPromptSubmit',
+  'Notification',
+  'Stop',
+  'SessionStart',
+  'SessionEnd',
+] as const;
+export type ClaudeSupervisorHookEventName = typeof CLAUDE_SUPERVISOR_HOOK_EVENT_NAMES[number];
+
+const CLAUDE_HOOK_EVENT_TO_SUPERVISOR_EVENT: Record<ClaudeSupervisorHookEventName, SupervisorEvent> = {
+  UserPromptSubmit: 'turn_started',
+  Notification: 'waiting_for_user',
+  Stop: 'turn_stopped',
+  SessionStart: 'session_active',
+  SessionEnd: 'session_ended',
+};
+
+export function supervisorEventForClaudeHookEvent(event: ClaudeSupervisorHookEventName): SupervisorEvent {
+  return CLAUDE_HOOK_EVENT_TO_SUPERVISOR_EVENT[event];
+}
+
+export function isClaudeSupervisorHookEventName(value: string): value is ClaudeSupervisorHookEventName {
+  return (CLAUDE_SUPERVISOR_HOOK_EVENT_NAMES as readonly string[]).includes(value);
+}
+
+/**
+ * Compose the harness-owned Claude `type: "command"` hook string for one
+ * lifecycle event. The output has the fixed shape
+ * `<pinned-cli-prefix> supervisor signal <Event>` with each repo-controlled
+ * token statically shell-quoted by `quoteCommandTokens` (Decisions 3 / 21).
+ *
+ * The function rejects any non-enumerated event name. By construction the
+ * returned string contains no shell metacharacters because each input token is
+ * either a path validated by `assertMonitorPathIsSupported` or a static
+ * identifier from the closed enum above. The unit-test injection fixture in
+ * `claudeHarness.test.ts` exercises this rejection path.
+ */
+export function composeSupervisorHookCommand(
+  monitorPin: ResolvedMonitorPin,
+  eventName: string,
+): string {
+  if (!isClaudeSupervisorHookEventName(eventName)) {
+    throw new Error(
+      `composeSupervisorHookCommand received an unsupported event name: ${JSON.stringify(eventName)}`,
+    );
+  }
+  return quoteCommandTokens([...monitorPin.command_prefix, 'supervisor', 'signal', eventName]);
+}
+
+export function buildClaudeSupervisorHooks(monitorPin: ResolvedMonitorPin): ClaudeSupervisorHooks {
+  const groupFor = (event: ClaudeSupervisorHookEventName): ClaudeSupervisorHookGroup[] => [{
+    hooks: [{ type: 'command', command: composeSupervisorHookCommand(monitorPin, event) }],
+  }];
+  return {
+    UserPromptSubmit: groupFor('UserPromptSubmit'),
+    Notification: groupFor('Notification'),
+    Stop: groupFor('Stop'),
+    SessionStart: groupFor('SessionStart'),
+    SessionEnd: groupFor('SessionEnd'),
+  };
 }
 
 export interface ClaudeBashPermissionDecision {
@@ -195,7 +308,7 @@ export function claudeOrchestratorMcpToolDenyList(): string[] {
     .sort();
 }
 
-export function buildClaudeAllowedToolsList(input: ClaudeSupervisorPermissionInput): string[] {
+export function buildClaudeAllowedToolsList(input: { monitorBashAllowPatterns: readonly string[] }): string[] {
   return [
     'Read',
     'Glob',
@@ -212,7 +325,7 @@ export function claudeSupervisorBashInspectionAllowlist(): readonly string[] {
 }
 
 export function buildClaudeSupervisorSettings(input: ClaudeSupervisorPermissionInput): ClaudeSupervisorSettings {
-  const allow = buildClaudeAllowedToolsList(input);
+  const allow = buildClaudeAllowedToolsList({ monitorBashAllowPatterns: input.monitorBashAllowPatterns });
   const deny = [
     'Edit',
     'Write',
@@ -224,16 +337,21 @@ export function buildClaudeSupervisorSettings(input: ClaudeSupervisorPermissionI
     ...CLAUDE_SUPERVISOR_DENIED_BASH_PATTERNS,
     ...claudeOrchestratorMcpToolDenyList(),
   ];
-  return {
+  const settings: ClaudeSupervisorSettings = {
     permissions: {
       defaultMode: 'dontAsk',
       allow,
       deny,
     },
     enableAllProjectMcpServers: false,
-    hooks: {},
+    hooks: buildClaudeSupervisorHooks(input.monitorPin),
     enabledPlugins: {},
   };
+  if (input.remoteControl) {
+    settings.remoteControlAtStartup = true;
+    settings.agentPushNotifEnabled = true;
+  }
+  return settings;
 }
 
 export function stringifyClaudeSupervisorSettings(settings: ClaudeSupervisorSettings): string {

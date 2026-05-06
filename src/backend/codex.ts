@@ -10,7 +10,7 @@ export class CodexBackend extends BaseBackend {
       'exec',
       '--json',
       '--skip-git-repo-check',
-      ...userConfigArgs(input.modelSettings),
+      ...sandboxArgs(input.modelSettings),
       '--cd',
       input.cwd,
       ...modelArgs(input.model),
@@ -25,7 +25,7 @@ export class CodexBackend extends BaseBackend {
       'resume',
       '--json',
       '--skip-git-repo-check',
-      ...userConfigArgs(input.modelSettings),
+      ...sandboxArgs(input.modelSettings),
       ...modelArgs(input.model),
       ...modelSettingsArgs(input.modelSettings),
       sessionId,
@@ -141,8 +141,22 @@ function modelArgs(model: string | null | undefined): string[] {
   return model ? ['--model', model] : [];
 }
 
-function userConfigArgs(settings: BackendStartInput['modelSettings']): string[] {
-  return settings.mode === 'normal' ? ['--ignore-user-config'] : [];
+function sandboxArgs(settings: BackendStartInput['modelSettings']): string[] {
+  // Per docs/development/codex-backend.md (issue #31):
+  // - 'isolated'    => --ignore-user-config (codex skips $CODEX_HOME/config.toml)
+  // - 'workspace'   => --ignore-user-config + -c sandbox_workspace_write.network_access=true
+  // - 'user-config' => no flags (codex reads $CODEX_HOME/config.toml verbatim)
+  // The legacy `mode === 'normal'` path is retired; the orchestrator service
+  // resolves codex_network and the codex backend reads only that field.
+  if (settings.codex_network === 'workspace') {
+    return ['--ignore-user-config', '-c', 'sandbox_workspace_write.network_access=true'];
+  }
+  if (settings.codex_network === 'user-config') return [];
+  if (settings.codex_network === 'isolated') return ['--ignore-user-config'];
+  // Defensive: settings should always carry an explicit codex_network for codex
+  // runs after orchestratorService resolution. Fall back to the safer closed
+  // posture if a legacy run record is replayed without the field.
+  return ['--ignore-user-config'];
 }
 
 function modelSettingsArgs(settings: BackendStartInput['modelSettings']): string[] {

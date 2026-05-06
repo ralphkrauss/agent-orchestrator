@@ -20,7 +20,7 @@ export function createBackendRegistry(
   const processManager = new ProcessManager(store);
   const cliBackends: WorkerBackend[] = [
     new CodexBackend(),
-    new ClaudeBackend(),
+    new ClaudeBackend(store),
   ];
   const runtimes = new Map<Backend, WorkerRuntime>(
     cliBackends.map((backend) => [backend.name, new CliRuntime(backend, processManager)]),

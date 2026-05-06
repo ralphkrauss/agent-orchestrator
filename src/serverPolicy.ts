@@ -23,10 +23,18 @@ export function harnessPolicyContext(
   env: NodeJS.ProcessEnv = process.env,
   cwd: string = process.cwd(),
 ): RpcPolicyContext | undefined {
-  if (toolName !== 'upsert_worker_profile') return undefined;
-  const pinned = env.AGENT_ORCHESTRATOR_WRITABLE_PROFILES_FILE;
-  if (!pinned) return undefined;
-  return { writable_profiles_file: resolveWorkerProfilesFile(pinned, cwd, env) };
+  const policy: { writable_profiles_file?: string; orchestrator_id?: string } = {};
+  if (toolName === 'upsert_worker_profile') {
+    const pinnedProfiles = env.AGENT_ORCHESTRATOR_WRITABLE_PROFILES_FILE;
+    if (pinnedProfiles) policy.writable_profiles_file = resolveWorkerProfilesFile(pinnedProfiles, cwd, env);
+  }
+  if (toolName === 'start_run' || toolName === 'send_followup') {
+    // Forward the harness-pinned orchestrator id so the daemon stamps
+    // metadata.orchestrator_id without trusting the model (issue #40, D10).
+    const orchestratorId = env.AGENT_ORCHESTRATOR_ORCH_ID;
+    if (orchestratorId && orchestratorId.trim()) policy.orchestrator_id = orchestratorId.trim();
+  }
+  return Object.keys(policy).length > 0 ? policy : undefined;
 }
 
 export function enforceWritableProfilesPolicy(

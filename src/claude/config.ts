@@ -28,6 +28,14 @@ export interface ClaudeHarnessConfigInput {
   profileDiagnostics: string[];
   mcpCliPath: string;
   monitorPin: ResolvedMonitorPin;
+  /**
+   * Pinned orchestrator id supplied by the launcher (issue #40, Decision 10).
+   * Forwarded to the harness-owned MCP server entry's env so the MCP frontend
+   * can stamp `RpcPolicyContext.orchestrator_id` on every IPC call.
+   */
+  orchestratorId?: string;
+  /** Embed Remote Control settings keys when true (Decision 12). */
+  remoteControl?: boolean;
 }
 
 export interface ClaudeMcpConfig {
@@ -52,21 +60,26 @@ export interface ClaudeHarnessConfig {
 export function buildClaudeHarnessConfig(input: ClaudeHarnessConfigInput): ClaudeHarnessConfig {
   const settings = buildClaudeSupervisorSettings({
     monitorBashAllowPatterns: input.monitorPin.monitor_bash_allow_patterns,
+    monitorPin: input.monitorPin,
+    remoteControl: input.remoteControl,
   });
   assertMonitorPermissionInvariant(settings, input.monitorPin);
+  const mcpEnv: Record<string, string> = {
+    AGENT_ORCHESTRATOR_WRITABLE_PROFILES_FILE: input.manifestPath,
+  };
+  if (input.orchestratorId) {
+    // Pin the orchestrator id into the MCP server entry env so the MCP
+    // frontend can attach it to every IPC call's policy_context. The model
+    // never authors this value (Decision 10).
+    mcpEnv.AGENT_ORCHESTRATOR_ORCH_ID = input.orchestratorId;
+  }
   const mcpConfig: ClaudeMcpConfig = {
     mcpServers: {
       [CLAUDE_MCP_SERVER_NAME]: {
         type: 'stdio',
         command: process.execPath,
         args: [input.mcpCliPath],
-        // Pin the writable profiles manifest path. The MCP frontend rejects
-        // upsert_worker_profile calls whose resolved profiles_file does not
-        // match this value, so the supervisor cannot use the tool as a write
-        // primitive against arbitrary paths in the target workspace.
-        env: {
-          AGENT_ORCHESTRATOR_WRITABLE_PROFILES_FILE: input.manifestPath,
-        },
+        env: mcpEnv,
       },
     },
   };
@@ -121,6 +134,9 @@ function buildSupervisorSystemPrompt(input: ClaudeHarnessConfigInput): string {
     '',
     'Allowed agent-orchestrator MCP tools:',
     allowedMcpTools.map((name) => `- ${name}`).join('\n'),
+    '',
+    'Orchestrator status hooks:',
+    '- Supervisor turn signaling is automatic. The harness installs Claude Code lifecycle hooks (UserPromptSubmit / Notification / Stop / SessionStart / SessionEnd) that report turn boundaries to the daemon; the daemon emits aggregate-status events to the user\'s ~/.config/agent-orchestrator/hooks.json scripts. Do not invoke any "supervisor signal" CLI yourself — the harness handles it. A user tmux or desktop hook will see the daemon-owned aggregate state, not whichever Claude/worker process last fired a local hook.',
     '',
     'Daemon-owned run lifecycle:',
     '- The persistent agent-orchestrator daemon owns worker subprocesses, durable run state, event logs, results, and notification records. The supervisor is only an orchestration client.',
@@ -207,10 +223,21 @@ function formatProfiles(profiles: ValidatedWorkerProfiles | undefined): string {
         profile.variant ? `variant=${profile.variant}` : null,
         profile.reasoning_effort ? `reasoning_effort=${profile.reasoning_effort}` : null,
         profile.service_tier ? `service_tier=${profile.service_tier}` : null,
+        codexNetworkLine(profile),
       ].filter(Boolean).join(', ');
       return `- ${profile.id}: ${settings}${profile.description ? `; ${profile.description}` : ''}`;
     })
     .join('\n');
+}
+
+// Issue #31 / B1: render the *effective* codex_network on codex profiles so
+// the supervisor sees the resolved posture (and the OD1=B default of
+// 'isolated') in the prompt, even when the manifest does not set it. Non-codex
+// profiles continue to render identically to today.
+function codexNetworkLine(profile: { backend: string; codex_network?: string }): string | null {
+  if (profile.backend !== 'codex') return null;
+  if (profile.codex_network) return `codex_network=${profile.codex_network}`;
+  return 'codex_network=isolated (default)';
 }
 
 function formatEmbeddedOrchestrationSkills(skills: readonly ResolvedClaudeSkill[]): string {
@@ -226,10 +253,16 @@ function formatEmbeddedOrchestrationSkills(skills: readonly ResolvedClaudeSkill[
 }
 
 function formatCatalog(catalog: WorkerCapabilityCatalog): string {
-  return catalog.backends.map((backend) => [
-    `- ${backend.backend} (${backend.display_name}): status=${backend.availability_status}, start=${backend.supports_start}, resume=${backend.supports_resume}`,
-    `  reasoning_efforts=${backend.settings.reasoning_efforts.join(', ') || 'none'}`,
-    `  service_tiers=${backend.settings.service_tiers.join(', ') || 'none'}`,
-    `  variants=${backend.settings.variants.join(', ') || 'none'}`,
-  ].join('\n')).join('\n');
+  return catalog.backends.map((backend) => {
+    const lines = [
+      `- ${backend.backend} (${backend.display_name}): status=${backend.availability_status}, start=${backend.supports_start}, resume=${backend.supports_resume}`,
+      `  reasoning_efforts=${backend.settings.reasoning_efforts.join(', ') || 'none'}`,
+      `  service_tiers=${backend.settings.service_tiers.join(', ') || 'none'}`,
+      `  variants=${backend.settings.variants.join(', ') || 'none'}`,
+    ];
+    if (backend.settings.network_modes.length > 0) {
+      lines.push(`  network_modes=${backend.settings.network_modes.join(', ')}`);
+    }
+    return lines.join('\n');
+  }).join('\n');
 }

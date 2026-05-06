@@ -243,16 +243,25 @@ export const ServiceTierSchema = z.enum([
 ]);
 export type ServiceTier = z.infer<typeof ServiceTierSchema>;
 
+export const CodexNetworkSchema = z.enum([
+  'isolated',
+  'workspace',
+  'user-config',
+]);
+export type CodexNetwork = z.infer<typeof CodexNetworkSchema>;
+
 const defaultRunModelSettings = {
   reasoning_effort: null,
   service_tier: null,
   mode: null,
+  codex_network: null,
 };
 
 export const RunModelSettingsSchema = z.object({
   reasoning_effort: ReasoningEffortSchema.nullable().optional().default(null),
   service_tier: ServiceTierSchema.nullable().optional().default(null),
   mode: z.string().nullable().optional().default(null),
+  codex_network: CodexNetworkSchema.nullable().optional().default(null),
 }).default(defaultRunModelSettings);
 export type RunModelSettings = z.infer<typeof RunModelSettingsSchema>;
 
@@ -358,6 +367,7 @@ export const StartRunInputSchema = z.object({
   model: z.string().trim().min(1).optional(),
   reasoning_effort: ReasoningEffortSchema.optional(),
   service_tier: ServiceTierSchema.optional(),
+  codex_network: CodexNetworkSchema.optional(),
   metadata: z.record(z.unknown()).optional().default({}),
   idle_timeout_seconds: z.number().int().positive().optional(),
   execution_timeout_seconds: z.number().int().positive().optional(),
@@ -372,10 +382,10 @@ export const StartRunInputSchema = z.object({
     });
   }
 
-  if (input.profile && (input.backend || input.model || input.reasoning_effort || input.service_tier)) {
+  if (input.profile && (input.backend || input.model || input.reasoning_effort || input.service_tier || input.codex_network)) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
-      message: 'Profile mode cannot be mixed with direct backend/model/reasoning_effort/service_tier settings',
+      message: 'Profile mode cannot be mixed with direct backend/model/reasoning_effort/service_tier/codex_network settings',
       path: ['profile'],
     });
   }
@@ -435,6 +445,7 @@ export const UpsertWorkerProfileInputSchema = z.object({
   variant: z.string().trim().min(1).optional(),
   reasoning_effort: ReasoningEffortSchema.optional(),
   service_tier: ServiceTierSchema.optional(),
+  codex_network: CodexNetworkSchema.optional(),
   description: z.string().trim().min(1).optional(),
   metadata: z.record(z.unknown()).optional(),
   create_if_missing: z.boolean().optional().default(true),
@@ -480,6 +491,7 @@ export const SendFollowupInputSchema = z.object({
   model: z.string().trim().min(1).optional(),
   reasoning_effort: ReasoningEffortSchema.optional(),
   service_tier: ServiceTierSchema.optional(),
+  codex_network: CodexNetworkSchema.optional(),
   metadata: z.record(z.unknown()).optional().default({}),
   idle_timeout_seconds: z.number().int().positive().optional(),
   execution_timeout_seconds: z.number().int().positive().optional(),
@@ -763,6 +775,13 @@ export const RpcMethodSchema = z.enum([
   'cancel_run',
   'get_backend_status',
   'get_observability_snapshot',
+  // Orchestrator status (issue #40). Internal-only IPC; not exposed as MCP
+  // tools so the model cannot forge supervisor turn signals or orchestrator
+  // identity.
+  'register_supervisor',
+  'signal_supervisor_event',
+  'unregister_supervisor',
+  'get_orchestrator_status',
 ]);
 export type RpcMethod = z.infer<typeof RpcMethodSchema>;
 
@@ -774,8 +793,133 @@ export const RpcPolicyContextSchema = z.object({
    * this field keep current behavior.
    */
   writable_profiles_file: z.string().min(1).optional(),
+  /**
+   * Per-request orchestrator identity, set by the harness-owned MCP server
+   * entry from `AGENT_ORCHESTRATOR_ORCH_ID`. The daemon stamps this onto
+   * `metadata.orchestrator_id` for `start_run` and `send_followup` so the
+   * aggregate-status engine can correlate owned runs. The model never authors
+   * this field.
+   */
+  orchestrator_id: z.string().min(1).optional(),
 }).optional();
 export type RpcPolicyContext = z.infer<typeof RpcPolicyContextSchema>;
+
+// Orchestrator status hooks (issue #40). The daemon owns aggregate
+// orchestrator status; supervisors signal turn events; user-level hooks render
+// the result. Tmux is a documented hook example, not built-in product.
+
+export const OrchestratorClientSchema = z.enum(['claude']);
+export type OrchestratorClient = z.infer<typeof OrchestratorClientSchema>;
+
+export const OrchestratorDisplaySchema = z.object({
+  tmux_pane: z.string().nullable().optional().default(null),
+  tmux_window_id: z.string().nullable().optional().default(null),
+  base_title: z.string().nullable().optional().default(null),
+  host: z.string().nullable().optional().default(null),
+});
+export type OrchestratorDisplay = z.infer<typeof OrchestratorDisplaySchema>;
+
+export const OrchestratorRecordSchema = z.object({
+  id: z.string().min(1),
+  client: OrchestratorClientSchema,
+  label: z.string().min(1),
+  cwd: z.string().min(1),
+  display: OrchestratorDisplaySchema,
+  registered_at: z.string(),
+  last_supervisor_event_at: z.string().nullable().optional().default(null),
+});
+export type OrchestratorRecord = z.infer<typeof OrchestratorRecordSchema>;
+
+export const OrchestratorStatusStateSchema = z.enum([
+  'in_progress',
+  'waiting_for_user',
+  'idle',
+  'attention',
+  'stale',
+]);
+export type OrchestratorStatusState = z.infer<typeof OrchestratorStatusStateSchema>;
+
+export const OrchestratorStatusSnapshotSchema = z.object({
+  state: OrchestratorStatusStateSchema,
+  supervisor_turn_active: z.boolean(),
+  waiting_for_user: z.boolean(),
+  running_child_count: z.number().int().nonnegative(),
+  failed_unacked_count: z.number().int().nonnegative(),
+});
+export type OrchestratorStatusSnapshot = z.infer<typeof OrchestratorStatusSnapshotSchema>;
+
+export const OrchestratorStatusPayloadSchema = z.object({
+  version: z.literal(1),
+  event: z.literal('orchestrator_status_changed'),
+  event_id: z.string().min(1),
+  previous_status: OrchestratorStatusStateSchema.nullable(),
+  emitted_at: z.string(),
+  orchestrator: z.object({
+    id: z.string().min(1),
+    client: OrchestratorClientSchema,
+    label: z.string().min(1),
+    cwd: z.string().min(1),
+  }),
+  status: OrchestratorStatusSnapshotSchema,
+  display: OrchestratorDisplaySchema,
+});
+export type OrchestratorStatusPayload = z.infer<typeof OrchestratorStatusPayloadSchema>;
+
+export const SupervisorEventSchema = z.enum([
+  'turn_started',
+  'turn_stopped',
+  'waiting_for_user',
+  'session_active',
+  'session_ended',
+]);
+export type SupervisorEvent = z.infer<typeof SupervisorEventSchema>;
+
+// hooks.json v1 (Claude-parity shell-string form, Decisions 6 / 25).
+// `.strict()` at every level: any unknown key is rejected so v2 can add
+// fields additively. `args` and `filter` in particular are rejected here.
+export const OrchestratorHookCommandEntrySchema = z.object({
+  type: z.literal('command'),
+  command: z.string().min(1),
+  env: z.record(z.string()).optional(),
+  timeout_ms: z.number().int().positive().max(5_000).optional(),
+}).strict();
+export type OrchestratorHookCommandEntry = z.infer<typeof OrchestratorHookCommandEntrySchema>;
+
+export const OrchestratorHooksMapSchema = z.object({
+  orchestrator_status_changed: z.array(OrchestratorHookCommandEntrySchema).optional(),
+}).strict();
+export type OrchestratorHooksMap = z.infer<typeof OrchestratorHooksMapSchema>;
+
+export const OrchestratorHooksFileSchema = z.object({
+  version: z.literal(1),
+  hooks: OrchestratorHooksMapSchema,
+}).strict();
+export type OrchestratorHooksFile = z.infer<typeof OrchestratorHooksFileSchema>;
+
+export const RegisterSupervisorInputSchema = z.object({
+  client: OrchestratorClientSchema.optional().default('claude'),
+  label: z.string().min(1),
+  cwd: z.string().min(1),
+  display: OrchestratorDisplaySchema.optional(),
+  orchestrator_id: z.string().min(1).optional(),
+});
+export type RegisterSupervisorInput = z.input<typeof RegisterSupervisorInputSchema>;
+
+export const SignalSupervisorEventInputSchema = z.object({
+  orchestrator_id: z.string().min(1),
+  event: SupervisorEventSchema,
+});
+export type SignalSupervisorEventInput = z.infer<typeof SignalSupervisorEventInputSchema>;
+
+export const UnregisterSupervisorInputSchema = z.object({
+  orchestrator_id: z.string().min(1),
+});
+export type UnregisterSupervisorInput = z.infer<typeof UnregisterSupervisorInputSchema>;
+
+export const GetOrchestratorStatusInputSchema = z.object({
+  orchestrator_id: z.string().min(1),
+});
+export type GetOrchestratorStatusInput = z.infer<typeof GetOrchestratorStatusInputSchema>;
 
 export const RpcRequestSchema = z.object({
   protocol_version: z.literal(PROTOCOL_VERSION),

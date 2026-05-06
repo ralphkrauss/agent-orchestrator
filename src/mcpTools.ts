@@ -34,6 +34,11 @@ export const tools = [
           enum: ['fast', 'flex', 'normal'],
           description: 'Backend-applied speed tier for Codex. Claude and Cursor do not support this field.',
         },
+        codex_network: {
+          type: 'string',
+          enum: ['isolated', 'workspace', 'user-config'],
+          description: 'Codex-only network egress posture. isolated (default): --ignore-user-config; codex skips $CODEX_HOME/config.toml; no network. workspace: --ignore-user-config plus -c sandbox_workspace_write.network_access=true; network on. user-config: codex reads $CODEX_HOME/config.toml verbatim. Direct mode only; profile mode rejects this field.',
+        },
         metadata: { type: 'object', additionalProperties: true },
         idle_timeout_seconds: {
           type: 'number',
@@ -107,6 +112,11 @@ export const tools = [
         service_tier: {
           type: 'string',
           enum: ['fast', 'flex', 'normal'],
+        },
+        codex_network: {
+          type: 'string',
+          enum: ['isolated', 'workspace', 'user-config'],
+          description: 'Codex-only profile field. Controls codex network egress: isolated (default; --ignore-user-config; no network), workspace (network on; codex skips $CODEX_HOME/config.toml), user-config (codex reads $CODEX_HOME/config.toml verbatim). When omitted, codex profiles default to isolated (issue #31, BREAKING).',
         },
         description: { type: 'string' },
         metadata: { type: 'object', additionalProperties: true },
@@ -273,6 +283,11 @@ export const tools = [
           type: 'string',
           enum: ['fast', 'flex', 'normal'],
           description: 'Backend-applied speed tier for Codex. Omit to inherit the parent run setting. Claude and Cursor do not support this field.',
+        },
+        codex_network: {
+          type: 'string',
+          enum: ['isolated', 'workspace', 'user-config'],
+          description: 'Codex-only network egress posture override for this follow-up. Omit to inherit the parent run setting. Direct-mode follow-ups only; profile-mode parents reject this field.',
         },
         metadata: { type: 'object', additionalProperties: true },
         idle_timeout_seconds: {

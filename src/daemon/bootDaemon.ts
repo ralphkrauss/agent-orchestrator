@@ -7,6 +7,8 @@ import { RunStore, ensureSecureRoot } from '../runStore.js';
 import { loadUserSecretsIntoEnv, type LoadIntoEnvSummary } from '../auth/userSecrets.js';
 import { AUTH_PROVIDERS } from '../auth/providers.js';
 import type { DaemonPaths } from './paths.js';
+import { OrchestratorHookExecutor } from './orchestratorHooks.js';
+import { OrchestratorStatusEngine } from './orchestratorStatus.js';
 
 export interface BootDaemonOptions {
   paths: DaemonPaths;
@@ -60,7 +62,42 @@ export async function bootDaemon(options: BootDaemonOptions): Promise<BootedDaem
   const service = new OrchestratorService(store, createBackendRegistry(store, options.registryOptions ?? {}), log);
   await service.initialize();
 
-  const ipcServer = new IpcServer(paths.ipc.path, async (method, params, context) => service.dispatch(method, params, context));
+  // Orchestrator status hooks (issue #40, T6b/T8/T9). Hook executor reads
+  // user-level config and is fire-and-forget; the engine subscribes to the
+  // service's run lifecycle observer and recomputes aggregate status with a
+  // 250 ms debounce.
+  const hookExecutor = new OrchestratorHookExecutor({ storeRoot: paths.home, log });
+  const statusEngine = new OrchestratorStatusEngine({
+    getOrchestratorState: (id) => service.orchestratorRegistry.get(id),
+    getOwnedRunSnapshot: (id) => service.collectOwnedRunSnapshot(id),
+    emitHook: (payload) => hookExecutor.emit(payload),
+    log,
+  });
+  service.onRunLifecycle((event) => {
+    if (event.orchestrator_id) statusEngine.scheduleRecompute(event.orchestrator_id);
+  });
+
+  const ipcServer = new IpcServer(paths.ipc.path, async (method, params, context) => {
+    const result = await service.dispatch(method, params, context);
+    // Recompute aggregate status whenever a supervisor signals or registers,
+    // so user hooks fire even before any owned run exists.
+    if (
+      method === 'register_supervisor'
+      || method === 'signal_supervisor_event'
+    ) {
+      const id = (params as { orchestrator_id?: unknown } | null | undefined)?.orchestrator_id;
+      if (typeof id === 'string' && id.trim()) statusEngine.scheduleRecompute(id);
+      else if (method === 'register_supervisor' && result && typeof result === 'object') {
+        const orch = (result as { orchestrator?: { id?: string } }).orchestrator;
+        if (orch && typeof orch.id === 'string') statusEngine.scheduleRecompute(orch.id);
+      }
+    }
+    if (method === 'unregister_supervisor') {
+      const id = (params as { orchestrator_id?: unknown } | null | undefined)?.orchestrator_id;
+      if (typeof id === 'string' && id.trim()) statusEngine.forget(id);
+    }
+    return result;
+  });
   if (paths.ipc.transport === 'unix_socket') {
     const oldUmask = process.umask(0o177);
     try {
