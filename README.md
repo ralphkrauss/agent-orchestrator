@@ -289,7 +289,11 @@ The current package supports Codex, Claude, and Cursor worker backends.
 Cursor uses the `@cursor/sdk` module in-process (local runtime only) and
 requires `CURSOR_API_KEY`; cursor profiles must declare `model` and must omit
 `reasoning_effort` and `service_tier` (see
-`docs/development/cursor-backend.md`). The profiles manifest stays
+`docs/development/cursor-backend.md`). Claude profiles can opt into native
+multi-account rotation via `claude_account_priority` and the
+`agent-orchestrator auth login claude --account <name>` /
+`auth set claude --account <name>` commands; details in
+`docs/development/claude-multi-account.md`. The profiles manifest stays
 provider-agnostic so future backends can add capability descriptors without
 changing the supervisor workflow.
 

@@ -1,5 +1,6 @@
 import { IpcClient } from '../ipc/client.js';
 import { daemonPaths } from '../daemon/paths.js';
+import { runClaudeAuthCommand, type ClaudeAuthCliOptions } from './claudeCli.js';
 import {
   AUTH_PROVIDERS,
   getProvider,
@@ -26,6 +27,12 @@ export interface AuthCliOptions {
   stdout?: NodeJS.WritableStream;
   stderr?: NodeJS.WritableStream;
   stdin?: NodeJS.ReadableStream;
+  /** Override daemon home for tests (used by `auth login/set/list/remove claude`). */
+  home?: string;
+  /** Override the `claude /login` spawn for tests. */
+  spawnLogin?: ClaudeAuthCliOptions['spawnLogin'];
+  /** Override `Date.now()` for tests. */
+  now?: () => number;
 }
 
 export interface AuthStatusJsonProvider {
@@ -67,6 +74,11 @@ export async function runAuthCli(
       return runStatus(argv.slice(1), { ...options, stdout, stderr });
     case 'unset':
       return runUnset(argv.slice(1), { ...options, stdout, stderr });
+    case 'login':
+    case 'set':
+    case 'list':
+    case 'remove':
+      return runClaudeSubcommand(command, argv.slice(1), { ...options, stdout, stderr });
     default:
       return runProviderCommand(command, argv.slice(1), { ...options, stdout, stderr });
   }
@@ -78,11 +90,40 @@ function authHelp(): string {
     '  agent-orchestrator auth status [--json]',
     '  agent-orchestrator auth <provider> [--from-env [VAR] | --from-stdin]',
     '  agent-orchestrator auth unset <provider>',
+    '  agent-orchestrator auth login claude --account <name> [--refresh]',
+    '  agent-orchestrator auth set claude --account <name> [--from-env [VAR] | --from-stdin]',
+    '  agent-orchestrator auth list claude [--json]',
+    '  agent-orchestrator auth remove claude --account <name> [--delete-config-dir]',
     '',
-    'Providers: cursor (wired), claude (reserved), codex (reserved).',
+    'Providers: cursor (wired), claude (wired, multi-account), codex (reserved).',
     'Interactive form requires a TTY. Use --from-env / --from-stdin in scripts.',
+    'Value-bearing flags (e.g. --api-key sk-...) are rejected to keep secrets out of shell history.',
     '',
   ].join('\n');
+}
+
+async function runClaudeSubcommand(
+  verb: 'login' | 'set' | 'list' | 'remove',
+  argv: readonly string[],
+  options: AuthCliOptions,
+): Promise<number> {
+  const stderr = options.stderr ?? process.stderr;
+  const provider = argv[0];
+  if (provider !== 'claude') {
+    stderr.write(`auth ${verb}: only 'claude' is supported in this release\n`);
+    return 1;
+  }
+  return runClaudeAuthCommand(verb, argv.slice(1), {
+    home: options.home,
+    env: options.env,
+    secretsPath: options.secretsPath,
+    stdout: options.stdout,
+    stderr: options.stderr,
+    stdin: options.stdin,
+    spawnLogin: options.spawnLogin,
+    now: options.now,
+    promptSecret: options.promptSecret,
+  });
 }
 
 async function runStatus(

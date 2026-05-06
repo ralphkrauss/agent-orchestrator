@@ -1,9 +1,13 @@
 # Daemon Auth Setup
 
 The orchestrator daemon needs provider credentials to launch backend workers.
-Today the only worker that pulls auth from a daemon-managed file is **Cursor**
-(`CURSOR_API_KEY`). Codex and Claude continue to use their own CLI auth flows
-and are surfaced here only so `auth status` can report their effective state.
+Cursor pulls a single API key from the daemon-managed secrets file
+(`CURSOR_API_KEY`). Claude has both a single-key fallback (`ANTHROPIC_API_KEY`)
+and a per-account registry that supports config_dir-mode Pro/Max plans plus
+api_env-mode keys with rotation on rate-limit; see
+[`claude-multi-account.md`](claude-multi-account.md) for the full registry
+model. Codex continues to use its own CLI auth flow and is surfaced here only
+so `auth status` can report its effective state.
 
 ## Where the file lives
 
@@ -38,7 +42,7 @@ expansion, sourcing, or interpolation.
 
 | Process    | Behavior                                                                  |
 |------------|---------------------------------------------------------------------------|
-| Daemon     | Loaded once at startup (`bootDaemon`) into `process.env`, restricted to **wired-provider env vars only** (currently `CURSOR_API_KEY`). Other keys in the file are parsed but never injected into the daemon environment. Restart to refresh. |
+| Daemon     | Loaded once at startup (`bootDaemon`) into `process.env`, restricted to **wired-provider env vars only** (currently `CURSOR_API_KEY` and `ANTHROPIC_API_KEY` — the latter only used for unbound `backend: "claude"` runs). Other keys in the file (including per-account `ANTHROPIC_API_KEY__<slug>__<hash>` entries used by the claude registry) are read on-demand by `resolveAccountSpawn` when binding a Claude account to a run, never injected into the daemon environment. Restart to refresh. |
 | `doctor`   | Skips the file entirely when `CURSOR_API_KEY` is already set in the env (env wins, the file is irrelevant). When env is unset, reads the file in-process; read failures degrade to a hint instead of crashing. |
 | Worker run | Inherits the daemon's `process.env` at spawn — no per-run reload.         |
 
@@ -92,9 +96,14 @@ The interactive form requires both `stdin` and `stdout` to be a TTY; piped
 input is rejected to avoid leaking the secret into shell history or process
 listings. Use `--from-env` or `--from-stdin` from scripts.
 
-`claude` and `codex` are listed in `auth status` for parity but are reserved:
-running `agent-orchestrator auth claude` or `auth codex` exits with a clear
-message pointing at the respective CLI's own auth flow.
+`claude` and `codex` are listed in `auth status` for parity. Claude is now
+**wired** with a per-account registry (config_dir-mode Pro/Max plans plus
+api_env-mode keys with rotation on rate-limit); see
+[`claude-multi-account.md`](claude-multi-account.md) for the
+`auth login claude --account` / `auth set claude --account` /
+`auth list claude` / `auth remove claude --account` commands. Codex remains
+reserved — running `agent-orchestrator auth codex` exits with a clear message
+pointing at the Codex CLI's own auth flow.
 
 ## Local checkout
 

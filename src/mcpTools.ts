@@ -43,6 +43,15 @@ export const tools = [
           type: 'number',
           description: 'Optional hard wall-clock cap. Omit to use idle-progress supervision without a hard elapsed-time limit.',
         },
+        claude_account: {
+          type: 'string',
+          description: 'Optional name of a registered Claude account (config_dir or api_env mode). Only valid when backend=claude and profile is omitted. Names match /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.',
+        },
+        claude_accounts: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional priority list of registered Claude accounts. Only valid when backend=claude and profile is omitted. When supplied, the daemon picks the first non-cooled-down account, freezes the priority array on the run, and rotates on send_followup when the run terminates with a rate_limit/quota error.',
+        },
       },
       required: ['prompt', 'cwd'],
     },
@@ -104,6 +113,19 @@ export const tools = [
         create_if_missing: {
           type: 'boolean',
           description: 'When false, fail if the profile alias does not already exist. Defaults to true.',
+        },
+        claude_account: {
+          type: 'string',
+          description: 'Optional default Claude account for runs that resolve this profile. Only valid when backend=claude. Must match /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/ and reference an account registered via `agent-orchestrator auth login claude` or `auth set claude`.',
+        },
+        claude_account_priority: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional priority list of registered Claude accounts. Only valid when backend=claude. When supplied, runs from this profile rotate to the next healthy account on send_followup if the parent terminated with a rate_limit/quota error. claude_account, when also set, must appear in this array.',
+        },
+        claude_cooldown_seconds: {
+          type: 'number',
+          description: 'Optional per-account cooldown TTL in seconds. Only valid when backend=claude. Positive integer ≤ 86400 (24h); defaults to 900 (15m) when omitted.',
         },
       },
       required: ['profile', 'backend'],

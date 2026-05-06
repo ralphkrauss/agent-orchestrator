@@ -70,7 +70,7 @@ export const AUTH_PROVIDERS: readonly AuthProvider[] = [
     envVars: ['ANTHROPIC_API_KEY'],
     primaryEnvVar: 'ANTHROPIC_API_KEY',
     helpUrl: 'https://console.anthropic.com/',
-    status: 'reserved',
+    status: 'wired',
     validate: validateNonEmpty,
   },
   {

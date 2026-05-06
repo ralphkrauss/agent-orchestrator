@@ -1202,28 +1202,192 @@ execution log post-implementation.
 (to be filled in during implementation)
 
 ### T-COR1 — Session-copy helper
-- **Status:** not started
+- **Status:** done
+- **Code:**
+  - `src/claude/sessionCopy.ts` — exports `encodeProjectCwd`,
+    `computeSessionJsonlPath`, `copySessionJsonlForRotation` (D-COR-PathHard
+    order: regex sessionId / `isValidAccountName` checks → mkdir target
+    parent (recursive, mode 0o700) → lstat source → realpath +
+    `path.relative` containment on both sides → cycle handling (byte-equal
+    no-op / byte-different `session_jsonl_collision`) → atomic copy
+    (`copyFile` → `chmod tmp 0o600` → `rename`) with `safeRm(tmp)` on every
+    failure path).
+  - `src/__tests__/claudeSessionCopy.test.ts` — 12 unit tests covering
+    encoder edge cases, happy-path copy + 0o600 mode + bytes/duration,
+    unsafe session id, unsafe account name, source missing, symlink source
+    refusal, byte-equal cycle no-op, byte-different cycle collision,
+    EACCES copy_failed, no temp leak on failure, path-escape via symlinked
+    encoded-cwd subdir.
+- **Verification:** `pnpm build` clean. Focused tests 12/12 pass. Full
+  suite 407 / 0 fail / 1 skip / 89 suites.
 
 ### T-COR-Classifier — Stream-error classifier extension
-- **Status:** not started
+- **Status:** done
+- **Code:**
+  - `src/backend/common.ts` — `errorFromEvent` reads `subtype` from both
+    nested-error and top-level event records onto `context.subtype`;
+    `classifyErrorCategory` now structured-first
+    (`subtype/code === "session_not_found"`) then stderr-source-only fallback
+    `/session\s+not\s+found/i` and `/no\s+(?:such\s+)?session/i`.
+  - `src/contract.ts:74` — `RunErrorCategorySchema` widened with
+    `"session_not_found"` (HAT-COR3).
+  - `src/processManager.ts` — new `buildTerminalErrorList`: when
+    `dedupeErrors(observedErrors)` already contains a non-`process_exit`
+    error and exit code is non-zero, the synthetic `process_exit` error is
+    suppressed.
+  - `src/__tests__/claudeSessionNotFoundClassifier.test.ts` — 7 hermetic
+    tests covering subtype/code, stderr fallback, backend_event prompt-
+    content negative, rate_limit subtype regression, schema parse.
+- **Verification:** `node --test
+  dist/__tests__/claudeSessionNotFoundClassifier.test.js` → 7/7 pass.
+  Full suite (388 tests, 81 suites, 0 fail, 1 skip).
 
 ### T-COR-Race — Per-parent rotation lock + claimed-destinations set
-- **Status:** not started
+- **Status:** done (Test 6 fake-clock variant deferred with TODO).
+- **Code:**
+  - `src/orchestratorService.ts` — `rotationTrackers: Map<string, { lock; claimed; reconstructed }>` field, `reconstructClaimedDestinations(parentRunId)` (filters by `RunMeta.parent_run_id` since `ClaudeRotationState` carries no `parent_run_id` — design deviation noted), `evaluateRotation` returns a `releaseLock` callback now, `sendFollowup` calls `releaseLock()` in a finally after cooldown write + createRun + updateMeta + tracker.claimed.add. Priority-exhausted error split: `details.reason === "priority_exhausted_for_parent"` for the new D-COR-Lock path; legacy "all cooled-down" message preserved for the today's path.
+  - `src/__tests__/claudeRotationRace.test.ts` — 8 tests (Test 6 skipped).
+- **Verification:** Full suite 415 / 0 fail / 2 skip. Race tests 7/7 pass.
 
 ### T-COR2 — Rotation flow integration
-- **Status:** not started
+- **Status:** done (paired with T-COR-Resume-Layer Step 2).
+- **Code:**
+  - `src/orchestratorService.ts` — `sendFollowup` rotation branch now: (a) reads `priorMode`/`newMode` from registry, (b) api_env-source-or-target gate → `copy_skip_reason: "api_env_in_rotation_path"`, (c) `observedSessionId` gate → `copy_skip_reason: "no_observed_session_id"`, (d) calls `copySessionJsonlForRotation(...)` and on `{ ok: false, reason }` falls through to fresh-chat with the structured reason+details, (e) on `{ ok: true }` builds `terminal_context.kind = "resumed_after_rotation"` with payload (resumed_session_id, source_path, target_path, copied_bytes, copy_duration_ms, optional collision_resolution) and chooses `runtime.resume(observedSessionId)`. `requested_session_id` is set on the rotated child only when resume is chosen. `applyRotationMetadata(base, rotation, parentRunId, resumed)` threads `resumed` into the appended history entry.
+  - `src/backend/runtime.ts` — new `WorkerRuntime.buildStartInvocation(input)` returns a pre-baked start-shape WorkerInvocation (binary resolved, accountSpawn merged, no interceptor). Used by orchestrator to construct the retry invocation.
+  - `src/backend/cursor/runtime.ts` — stub returning `SPAWN_FAILED` (cursor isn't WorkerInvocation-driven).
+- **Verification:** Full suite 415 / 0 fail / 2 skip.
 
 ### T-COR-Resume-Layer — Runtime interceptor contract + OrchestratorService integration
-- **Status:** not started
+- **Status:** Step 1 (`processManager.ts` interceptor mechanics) done. Step 2
+  (OrchestratorService integration) lands as part of T-COR2.
+- **Code (Step 1):**
+  - `src/backend/WorkerBackend.ts` — `EarlyEventInterceptor` type and
+    `WorkerInvocation.earlyEventInterceptor?` field (already in place).
+  - `src/backend/runtime.ts` — `RuntimeStartInput.earlyEventInterceptor?`
+    threaded into `WorkerInvocation` (already in place).
+  - `src/processManager.ts` — refactor: `start()` is a thin wrapper around
+    new private `executeAttempt()`; on `retry_with_start` the close path
+    resolves with `{ kind: 'retry', retryInvocation, killedPid, durationMs,
+    observedEvents }`, then `start()` appends the structured
+    `lifecycle / session_not_found_in_run_retry` event and re-enters
+    `executeAttempt` once with `earlyEventInterceptor` stripped from the
+    retry invocation. `appendEventBuffered` helper buffers stream events
+    while interceptor is engaged-and-not-disengaged; on retry the buffer is
+    dropped, on disengage the buffer is flushed in arrival order.
+    `handleJsonLine` runs the classifier BEFORE meta updates / sink calls /
+    appendEvent so a `retry_with_start` short-circuits the line entirely
+    (no `recordObservedError` → `cancel('failed')` path). `cancel` and
+    `lastActivityMs` reach the active attempt via a small mutable
+    `SharedManagedHandle`. `ManagedRun.child` continues to point at the
+    first attempt's child (no caller reads it; verified by grep).
+  - `src/__tests__/claudeResumeInterceptor.test.ts` — 7 hermetic tests
+    covering: early `session_not_found` interception (kill + lifecycle
+    marker + retry succeeds), event-count threshold expiry, time-based
+    threshold expiry, single-shot enforcement (retry worker also fails),
+    `continue` on non-matching error, backward compatibility (no
+    interceptor = byte-identical behaviour), cancelled-attempt's events
+    not appended.
+- **Verification:** `pnpm build` clean. `node --test
+  dist/__tests__/claudeResumeInterceptor.test.js` → 7/7 pass. Full suite
+  395 tests, 82 suites, 0 fail, 1 skip.
 
 ### T-COR3 — Rotation history `resumed` flag
-- **Status:** not started
+- **Status:** done.
+- **Code:**
+  - `src/claude/accountBinding.ts` — `ClaudeRotationHistoryEntry.resumed?: boolean` field; `readRotationHistory` now propagates the field on round-trip (so prior entries' resumed flag survives subsequent rotations).
+  - `src/orchestratorService.ts:applyRotationMetadata` — new mandatory `resumed` parameter, threaded into the appended entry.
+  - `src/__tests__/claudeAccountValidation.test.ts` — truncation regression mixes `resumed: true / false / undefined` across the 100-append loop.
+- **Verification:** Existing truncation tests stay green; race tests verify resumed=false on api_env path.
 
 ### T-COR4 — Hermetic tests
-- **Status:** not started
+- **Status:** done.
+- **Code:**
+  - Unit-level: `src/__tests__/claudeSessionCopy.test.ts` (12 tests).
+  - Process-manager-level (interceptor cases 11/11b/11c): `src/__tests__/claudeResumeInterceptor.test.ts` (7 tests).
+  - Race / concurrency cases: `src/__tests__/claudeRotationRace.test.ts` (8 tests, 1 skipped TODO).
+  - Classifier: `src/__tests__/claudeSessionNotFoundClassifier.test.ts` (7 tests).
+  - End-to-end (cases 1, 2, 3, 4, 13, 22): added 4 new tests under T-COR4 describe block in `src/__tests__/claudeRotation.test.ts`. Fake-claude binary extended to be `CLAUDE_CONFIG_DIR`-aware: writes a session JSONL to the encoded-cwd subdir on every spawn, asserts the JSONL exists at the new account's tree on `--resume`. Helpers `registerConfigDirAccount` and `registerApiEnvAccount` for fixture composability.
+- **Verification:** Full suite 419 / 0 fail / 2 skip / 91 suites.
 
 ### T-COR5 — Docs
-- **Status:** not started
+- **Status:** done.
+- **Code:**
+  - `docs/development/claude-multi-account.md` — Rotation behaviour rewritten: copy-on-rotate is the default for two `config_dir` accounts; structured `terminal_context` payload reference (table of every `copy_skip_reason` value); transparent in-run retry on `session_not_found` (single-shot, threshold-bounded); rotation shape table by source/target mode; rotation history `resumed` flag.
+  - `plans/17-add-coding-backend-for-ccs/plans/17-claude-multi-account.md` Issue Comment Draft — caveat updated to point at the copy-on-rotate sub-plan and explain the corrected understanding (no opaque session DB; JSONL is plain file; resume works cross-account given the JSONL is reachable).
+  - README.md — already concise (points at `claude-multi-account.md`); no copy-on-rotate-specific update needed.
+- **Verification:** Pending `node scripts/sync-ai-workspace.mjs --check` (T-COR6).
 
 ### T-COR6 — Verification gate
-- **Status:** not started
+- **Status:** done (gated quality checks; `pnpm verify` deferred per OHD-IMPL-1 — pre-existing audit failure on this branch).
+- **Evidence:**
+  - `pnpm build` clean (no TS errors).
+  - `pnpm test` — 428 tests / 426 pass / 0 fail / 2 skip / 91 suites.
+  - `node scripts/sync-ai-workspace.mjs --check` — clean.
+  - `pnpm verify` — NOT run; OHD-IMPL-1 (pre-existing audit failure
+    on this branch deferred per parent plan).
+
+### Reviewer pass — three blocking findings + e2e gaps + 1 robustness fix
+- **Status:** done.
+- **Code:**
+  - `src/processManager.ts` — Fix #1: when the interceptor was engaged but
+    the worker closed cleanly within the threshold (no retry, no threshold
+    expiry), the close handler now flushes `eventBuffer` to
+    `store.appendEvent` in arrival order BEFORE finalizeRun runs, so a
+    quick clean resume's `started`, assistant, and `result_event`
+    lifecycle entries land in `events.jsonl`. Robustness: the
+    interceptor's kill path now arms a 5s SIGKILL fallback (mirrors the
+    `cancel` path) so a worker that ignores SIGTERM cannot hang the retry.
+    Also extends `AttemptOutcome.retry` and `retryDetails` to carry the
+    interceptor's `onRetryFired` callback through to `start()`'s retry
+    loop.
+  - `src/backend/WorkerBackend.ts` — `EarlyEventInterceptor.onRetryFired?:
+    () => Promise<void>` field added.
+  - `src/orchestratorService.ts` — Fix #2a: `failPreSpawn` now takes
+    `rotationTerminalContext` and, when set, merges it into the failure
+    `terminal.context` so the rotation `kind` survives `markTerminal`
+    overwriting. When unset, `failPreSpawn` reads `current.terminal_context`
+    off the run's meta and merges it as a fallback. Both
+    `startManagedRun` callsites of `failPreSpawn` pass through the
+    rotation context. Fix #2b: the `earlyEventInterceptor` constructed for
+    rotation-resume runs now carries an `onRetryFired` async callback
+    that updates the run's meta with the post-retry downgrade
+    (`kind: "fresh_chat_after_rotation"`, `resume_attempted: true`,
+    `resume_failure_reason: "session_not_found"`). `ProcessManager.start`'s
+    retry loop awaits this hook AFTER the lifecycle marker append and
+    BEFORE the retry attempt's spawn, so a reader between
+    `markTerminal` and the post-completion re-merge cannot observe stale
+    `kind: "resumed_after_rotation"`.
+  - `src/claude/sessionCopy.ts` — Fix #3: containment now anchors at
+    `realpath(<accountsRoot>/<account>/)` (the account root) and requires
+    the relative path starts with `projects/` + sep. The pre-fix
+    anchoring at `realpath(<account>/projects/)` allowed the
+    `<account>/projects` symlink-replacement attack because both root and
+    candidate would resolve to the symlink target.
+  - `src/__tests__/claudeResumeInterceptor.test.ts` — 2 new tests:
+    "Reviewer fix #1 — buffered events flushed on clean close" and
+    "Reviewer fix #2b — onRetryFired hook invoked between marker and
+    retry spawn" (verifies the lifecycle marker is on disk at hook-fire
+    time AND the retry's started event is not yet there).
+  - `src/__tests__/claudeSessionCopy.test.ts` — 2 new tests for the
+    projects-symlink and source-projects-symlink attack vectors.
+  - `src/__tests__/claudeRotation.test.ts` — 5 new e2e tests:
+    A→B→A byte-equal cycle (collision_resolution: "noop"), A→B
+    byte-different cycle (`session_jsonl_collision`), auth-files byte-
+    identity assertion, pre-spawn failure preserves rotation `kind`,
+    early session_not_found through `sendFollowup` (drives interceptor
+    + retry end-to-end via a `FORCE_SESSION_NOT_FOUND_EARLY` prompt
+    token in the fake-claude resume path).
+- **Verification:** `pnpm build` clean. `pnpm test` — 428 / 426 pass / 0
+  fail / 2 skip. `node scripts/sync-ai-workspace.mjs --check` clean.
+
+### Residual risks
+- The interceptor's forced-kill SIGKILL fallback is a 5s timeout (matching
+  the `cancel` path). On a worker that hangs and ignores both SIGTERM and
+  SIGKILL (uninterruptible state), the retry would still stall. This is the
+  same risk surface as the existing `cancel` path; documented as parity
+  rather than a new risk.
+- E2e `ENOSPC` and helper-internal `ENOENT-mid-copy` are covered at the
+  helper level in `claudeSessionCopy.test.ts` but not e2e through
+  `sendFollowup` — driving them e2e requires global stubs of `fs.copyFile`
+  that would couple the test to internals. The state-diagram outcomes are
+  still covered through other `copy_skip_reason` paths.

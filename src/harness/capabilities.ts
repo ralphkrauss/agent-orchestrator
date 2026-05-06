@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { validateClaudeModelAndEffort } from '../backend/claudeValidation.js';
+import { ACCOUNT_NAME_PATTERN, MAX_COOLDOWN_SECONDS } from '../claude/accountValidation.js';
 import type { BackendStatusReport } from '../contract.js';
 
 export interface WorkerBackendCapability {
@@ -23,6 +24,20 @@ export interface WorkerCapabilityCatalog {
   backends: WorkerBackendCapability[];
 }
 
+const ClaudeAccountNameSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .refine(
+    (value) => ACCOUNT_NAME_PATTERN.test(value) && value !== '.' && value !== '..' && !value.includes('..'),
+    { message: 'invalid claude account name (must match /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/, no leading dot/dash, no \"..\"\)' },
+  );
+
+const ClaudeAccountPriorityArraySchema = z
+  .array(ClaudeAccountNameSchema)
+  .min(1, { message: 'claude_account_priority must be non-empty' })
+  .refine((values) => new Set(values).size === values.length, { message: 'claude_account_priority must be unique' });
+
 export const WorkerProfileSchema = z.object({
   backend: z.string().trim().min(1),
   model: z.string().trim().min(1).optional(),
@@ -31,6 +46,14 @@ export const WorkerProfileSchema = z.object({
   service_tier: z.string().trim().min(1).optional(),
   description: z.string().trim().min(1).optional(),
   metadata: z.record(z.unknown()).optional(),
+  claude_account: ClaudeAccountNameSchema.optional(),
+  claude_account_priority: ClaudeAccountPriorityArraySchema.optional(),
+  claude_cooldown_seconds: z
+    .number()
+    .int()
+    .positive()
+    .max(MAX_COOLDOWN_SECONDS, { message: `claude_cooldown_seconds must be ≤ ${MAX_COOLDOWN_SECONDS} (24h)` })
+    .optional(),
 }).strict();
 export type WorkerProfile = z.infer<typeof WorkerProfileSchema>;
 
@@ -94,7 +117,10 @@ export function createWorkerCapabilityCatalog(statusReport?: BackendStatusReport
           service_tiers: [],
           variants: [],
         },
-        notes: ['Use direct Claude model ids; aliases such as opus or sonnet can drift.'],
+        notes: [
+          'Use direct Claude model ids; aliases such as opus or sonnet can drift.',
+          'Optional fields: claude_account, claude_account_priority (priority list of registered accounts; rotates on rate_limit/quota), claude_cooldown_seconds (positive integer ≤ 86400 / 24h, default 900). Account names match /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/ and must reference accounts registered via `agent-orchestrator auth login claude --account <name>` or `auth set claude --account <name>`.',
+        ],
       },
       {
         backend: 'cursor',
@@ -127,11 +153,22 @@ export function parseWorkerProfileManifest(value: unknown): { ok: true; value: W
   return { ok: true, value: parsed.data };
 }
 
+export interface InspectWorkerProfilesOptions {
+  /**
+   * Names of every claude account currently in the registry. When provided,
+   * profiles referencing an unknown account name fail validation up-front
+   * (BI9 / T4). When `null`, the account-existence check is skipped (used by
+   * tests and the harness ahead of registry availability).
+   */
+  knownClaudeAccounts?: ReadonlySet<string> | null;
+}
+
 export function validateWorkerProfiles(
   manifest: WorkerProfileManifest,
   catalog: WorkerCapabilityCatalog,
+  options: InspectWorkerProfilesOptions = {},
 ): { ok: true; value: ValidatedWorkerProfiles } | { ok: false; errors: string[] } {
-  const inspected = inspectWorkerProfiles(manifest, catalog);
+  const inspected = inspectWorkerProfiles(manifest, catalog, options);
   return inspected.errors.length > 0
     ? { ok: false, errors: inspected.errors }
     : { ok: true, value: { manifest: inspected.manifest, profiles: inspected.profiles } };
@@ -140,6 +177,7 @@ export function validateWorkerProfiles(
 export function inspectWorkerProfiles(
   manifest: WorkerProfileManifest,
   catalog: WorkerCapabilityCatalog,
+  options: InspectWorkerProfilesOptions = {},
 ): InspectedWorkerProfiles {
   const errors: string[] = [];
   const capabilities = new Map(catalog.backends.map((capability) => [capability.backend, capability]));
@@ -164,7 +202,7 @@ export function inspectWorkerProfiles(
       invalid_profiles[profileId] = invalidProfile(profileId, profile, [message]);
       continue;
     }
-    const profileErrors = validateProfile(profileId, profile, capability);
+    const profileErrors = validateProfile(profileId, profile, capability, options.knownClaudeAccounts ?? null);
     errors.push(...profileErrors);
     if (profileErrors.length === 0) {
       profiles[profileId] = { id: profileId, ...profile, capability };
@@ -184,7 +222,12 @@ function availabilityFor(backend: string, status: string | undefined): Pick<Work
   };
 }
 
-function validateProfile(profileId: string, profile: WorkerProfile, capability: WorkerBackendCapability): string[] {
+function validateProfile(
+  profileId: string,
+  profile: WorkerProfile,
+  capability: WorkerBackendCapability,
+  knownClaudeAccounts: ReadonlySet<string> | null,
+): string[] {
   const errors: string[] = [];
   if (!capability.available) {
     errors.push(`profile ${profileId} uses unavailable backend ${profile.backend} (${capability.availability_status})`);
@@ -202,16 +245,57 @@ function validateProfile(profileId: string, profile: WorkerProfile, capability: 
     errors.push(`profile ${profileId} uses unsupported variant ${profile.variant} for backend ${profile.backend}`);
   }
   errors.push(...validateBackendSpecificProfile(profileId, profile));
+  if (profile.backend === 'claude' && knownClaudeAccounts) {
+    if (profile.claude_account && !knownClaudeAccounts.has(profile.claude_account)) {
+      errors.push(`profile ${profileId} references unknown claude account ${profile.claude_account}`);
+    }
+    if (profile.claude_account_priority) {
+      for (const name of profile.claude_account_priority) {
+        if (!knownClaudeAccounts.has(name)) {
+          errors.push(`profile ${profileId} references unknown claude account ${name} in claude_account_priority`);
+        }
+      }
+    }
+  }
   return errors;
 }
 
 function validateBackendSpecificProfile(profileId: string, profile: WorkerProfile): string[] {
-  if (profile.backend === 'codex') return validateCodexProfile(profileId, profile);
-  if (profile.backend === 'cursor') return validateCursorProfile(profileId, profile);
-  if (profile.backend !== 'claude') return [];
+  if (profile.backend === 'codex') return [
+    ...validateCodexProfile(profileId, profile),
+    ...rejectClaudeAccountFields(profileId, profile),
+  ];
+  if (profile.backend === 'cursor') return [
+    ...validateCursorProfile(profileId, profile),
+    ...rejectClaudeAccountFields(profileId, profile),
+  ];
+  if (profile.backend !== 'claude') return rejectClaudeAccountFields(profileId, profile);
 
+  const errors: string[] = [];
   const error = validateClaudeModelAndEffort(profile.model, profile.reasoning_effort);
-  return error ? [`profile ${profileId}: ${error}`] : [];
+  if (error) errors.push(`profile ${profileId}: ${error}`);
+  if (
+    profile.claude_account !== undefined &&
+    profile.claude_account_priority !== undefined &&
+    !profile.claude_account_priority.includes(profile.claude_account)
+  ) {
+    errors.push(`profile ${profileId} sets claude_account ${profile.claude_account} but it is not in claude_account_priority`);
+  }
+  return errors;
+}
+
+function rejectClaudeAccountFields(profileId: string, profile: WorkerProfile): string[] {
+  const errors: string[] = [];
+  if (profile.claude_account !== undefined) {
+    errors.push(`profile ${profileId} sets claude_account, which is only valid on backend=claude`);
+  }
+  if (profile.claude_account_priority !== undefined) {
+    errors.push(`profile ${profileId} sets claude_account_priority, which is only valid on backend=claude`);
+  }
+  if (profile.claude_cooldown_seconds !== undefined) {
+    errors.push(`profile ${profileId} sets claude_cooldown_seconds, which is only valid on backend=claude`);
+  }
+  return errors;
 }
 
 function validateCursorProfile(profileId: string, profile: WorkerProfile): string[] {

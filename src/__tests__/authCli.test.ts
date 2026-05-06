@@ -49,7 +49,9 @@ describe('authCli status', () => {
     assert.equal(cursor!.file_set, true);
     assert.equal(cursor!.env_set, false);
     const claude = parsed.providers.find((p) => p.id === 'claude');
-    assert.equal(claude!.status, 'reserved');
+    assert.equal(claude!.status, 'wired');
+    const codex = parsed.providers.find((p) => p.id === 'codex');
+    assert.equal(codex!.status, 'reserved');
   });
 
   it('reports env precedence over file when both are set', async () => {
@@ -72,7 +74,7 @@ describe('authCli status', () => {
 
   it('reports reserved-provider file entries as drift only (file_set true, but not effective)', async () => {
     const path = await withTempPath();
-    await writeFile(path, 'CURSOR_API_KEY=' + VALID_KEY + '\nANTHROPIC_API_KEY=should-not-look-effective\n', { mode: 0o600 });
+    await writeFile(path, 'CURSOR_API_KEY=' + VALID_KEY + '\nOPENAI_API_KEY=should-not-look-effective\n', { mode: 0o600 });
     const stdout = new CaptureWritable();
     const code = await runAuthCli(['status', '--json'], {
       stdout,
@@ -83,12 +85,12 @@ describe('authCli status', () => {
     });
     assert.equal(code, 0);
     const parsed = JSON.parse(stdout.text()) as AuthStatusJson;
-    const claude = parsed.providers.find((p) => p.id === 'claude')!;
-    assert.equal(claude.status, 'reserved');
-    assert.equal(claude.file_set, true, 'file_set should still surface drift');
-    assert.equal(claude.env_set, false);
-    assert.equal(claude.effective_status, 'unknown', 'reserved providers must not be reported as effective via file');
-    assert.equal(claude.effective_source, null);
+    const codex = parsed.providers.find((p) => p.id === 'codex')!;
+    assert.equal(codex.status, 'reserved');
+    assert.equal(codex.file_set, true, 'file_set should still surface drift');
+    assert.equal(codex.env_set, false);
+    assert.equal(codex.effective_status, 'unknown', 'reserved providers must not be reported as effective via file');
+    assert.equal(codex.effective_source, null);
     const cursor = parsed.providers.find((p) => p.id === 'cursor')!;
     assert.equal(cursor.effective_source, 'file', 'wired providers stay effective via file');
     assert.equal(cursor.effective_status, 'ready');
@@ -101,14 +103,14 @@ describe('authCli status', () => {
       stdout,
       stderr: new CaptureWritable(),
       secretsPath: path,
-      env: { ANTHROPIC_API_KEY: 'set-by-user' },
+      env: { OPENAI_API_KEY: 'set-by-user' },
       isDaemonRunning: async () => false,
     });
     assert.equal(code, 0);
     const parsed = JSON.parse(stdout.text()) as AuthStatusJson;
-    const claude = parsed.providers.find((p) => p.id === 'claude')!;
-    assert.equal(claude.effective_source, 'env');
-    assert.equal(claude.effective_status, 'ready');
+    const codex = parsed.providers.find((p) => p.id === 'codex')!;
+    assert.equal(codex.effective_source, 'env');
+    assert.equal(codex.effective_status, 'ready');
   });
 
   it('renders human-readable output without --json', async () => {
@@ -227,19 +229,6 @@ describe('authCli cursor save', () => {
 });
 
 describe('authCli reserved providers', () => {
-  it('exits 2 with a clear message for claude', async () => {
-    const stderr = new CaptureWritable();
-    const code = await runAuthCli(['claude', '--from-env'], {
-      stdout: new CaptureWritable(),
-      stderr,
-      secretsPath: await withTempPath(),
-      env: { ANTHROPIC_API_KEY: 'value' },
-      isDaemonRunning: async () => false,
-    });
-    assert.equal(code, 2);
-    assert.match(stderr.text(), /not yet supported/);
-  });
-
   it('exits 2 with a clear message for codex', async () => {
     const stderr = new CaptureWritable();
     const code = await runAuthCli(['codex', '--from-env'], {

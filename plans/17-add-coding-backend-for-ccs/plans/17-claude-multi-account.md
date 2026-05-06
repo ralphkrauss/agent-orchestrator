@@ -4,7 +4,7 @@ Branch: `17-add-coding-backend-for-ccs`
 Plan Slug: `claude-multi-account`
 Parent Issue: #17
 Created: 2026-05-05 (pivot from earlier `17-ccs-backend.md`, deleted)
-Status: planning
+Status: implemented (2026-05-06)
 
 ## Context
 
@@ -555,59 +555,71 @@ Decisions D19, D20, and D21:
 ## Execution Log
 
 ### T1-Contract: Widen schemas
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done
+- **Evidence:** `src/contract.ts` (StartRunInputSchema + UpsertWorkerProfileInputSchema with `claude_account*` refinements), `src/harness/capabilities.ts` (`WorkerProfileSchema` extended), `src/backend/WorkerBackend.ts` (`WorkerInvocation.envPolicy`), `src/mcpTools.ts` schema descriptions, `src/__tests__/claudeAccountContract.test.ts` (regex/duplicate/cross-field/non-claude rejection cases). `pnpm build` clean, `pnpm test` covers each refinement.
+- **Notes:** Account-name regex shared via `src/claude/accountValidation.ts` so contract / capability catalog / registry use the same rule. `WorkerInvocationEnvPolicy` defaults to `"default"` to preserve today's behaviour.
 
 ### T2-Backend: Account-bound spawn
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done
+- **Evidence:** `src/processManager.ts` honours `WorkerInvocation.envPolicy` via new `applyEnvPolicy(...)` helper before the `process.env` merge; `src/backend/runtime.ts` extends `RuntimeStartInput` with `accountSpawn` and `CliRuntime` merges it into `WorkerInvocation.env` / `envPolicy`. `src/__tests__/processManager.test.ts` env-policy unit tests assert (i) default policy is byte-identical to today, (ii) deny-list keys/globs are stripped, (iii) unrelated keys (HOME/PATH/EDITOR/LANG/GH_TOKEN) survive.
+- **Notes:** Argv pipeline unchanged; account-specific env (`CLAUDE_CONFIG_DIR=...` or `ANTHROPIC_API_KEY=...`) is the only thing injected.
 
 ### T3-Diagnostics
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done
+- **Evidence:** `src/diagnostics.ts` `augmentClaudeDiagnostic(...)` adds one `checks[]` entry per registered account (cap 16) and a `hints[]` line for overflow / no-accounts states; `BackendDiagnosticSchema` is unchanged. Account inspection routes through `describeAccounts` so the diagnostic output and `auth list claude --json` agree. `src/__tests__/claudeAccountRegistry.test.ts` covers `describeAccounts` for the empty / incomplete cases.
+- **Notes:** No reading of `~/.ccs/`. The 16-cap is tested implicitly by the registry helper; the larger-than-16 hint path is straight-line code.
 
 ### T4-CapabilityCatalog
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done (post-review polish applied)
+- **Evidence:** `src/harness/capabilities.ts` `claude` entry advertises the new optional fields in its `notes`; `inspectWorkerProfiles` accepts an optional `knownClaudeAccounts` set and rejects manifests referencing unknown accounts (BI9). `src/orchestratorService.ts.loadLiveWorkerProfiles` and `upsertWorkerProfileLocked` pre-load the registry into a name set. `src/workerRouting.ts` and `src/opencode/capabilities.ts` re-export the new options shape. `src/__tests__/claudeAccountContract.test.ts` covers accept / reject / non-claude rejection.
+- **Post-review polish (non-blocking suggestion 3):** `loadClaudeAccountNames` now distinguishes "registry version mismatch" from "valid registry, no matching name" — the former surfaces as `INVALID_STATE` (or its profile-inspection equivalent) at `start_run` / `upsert_worker_profile` time rather than silently passing an empty set down to the inspector and producing a misleading "unknown claude account" error.
+- **Notes:** Knowledge of registry membership is optional so existing tests / harness paths that have not yet wired the registry continue to validate.
 
 ### T5-Service-Resolution
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done
+- **Evidence:** `src/orchestratorService.ts` `resolveStartRunTarget` resolves a Claude binding from direct or profile mode via the new `src/claude/accountBinding.ts` helper. The binding selects the first non-cooled-down account when a priority array is set, freezes `metadata.claude_rotation_state` on the run, and records `metadata.claude_account_used`. `api_env` accounts with a missing secret produce `INVALID_STATE` with `details.reason = "missing_account_secret"` (no fallback to ambient env). All-cooled-down produces `INVALID_STATE` with `details.cooldown_summary`. `src/__tests__/claudeRotation.test.ts` exercises both error paths against the fake `claude` binary.
+- **Notes:** Single-account direct runs ignore the cooldown registry per BI5.
 
 ### T6-Service-Registry
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done (post-review fix applied)
+- **Evidence:** `src/claude/accountRegistry.ts` provides atomic upsert / load / remove / cooldown helpers, version mismatch surfacing, corrupt-JSON recovery, per-file lock, and the locked deny-list constants. `src/__tests__/claudeAccountRegistry.test.ts` covers CRUD, schema-version mismatch, corrupt recovery, concurrent writes, cooldown TTL semantics, and the env-scrub deny-list constants. `src/__tests__/claudeAccountValidation.test.ts` covers name regex, resolved-path containment, and slug-and-hash round-trip (`alt-key` vs `alt_key`).
+- **Post-review fix (Reviewer finding 3):** `resolveAccountSpawn` now recomputes the expected daemon-owned path via `resolveAccountPath(paths.accountsRoot, account.name)` for every `config_dir`-mode bind and refuses to spawn (`tampered_account_config_dir`, surfaced as `INVALID_STATE`) if the registry's stored `config_dir_path` no longer matches. New regression test "refuses to spawn a config_dir account whose stored config_dir_path no longer matches accountsRoot" in `src/__tests__/claudeRotation.test.ts` mutates `accounts.json` to point at `/tmp/tampered-…` and asserts `start_run` is rejected with `details.reason === "tampered_account_config_dir"`.
+- **Notes:** Registry stores only references (`config_dir_path`, `secret_key`); raw secrets never persisted there. The containment check applies on every spawn, not only at registration, so a swapped registry file is caught before any spawn.
 
 ### T7-Auth
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done (post-smoke UX fix applied)
+- **Evidence:** `src/auth/providers.ts` flips claude `status` to `wired`. `src/auth/claudeCli.ts` implements `auth login claude --account <name> [--refresh]`, `auth set claude --account <name> [--from-env VAR | --from-stdin]`, `auth list claude [--json]`, `auth remove claude --account <name> [--delete-config-dir]`. Value-bearing flags (`--api-key`, `--token`, `--secret`, `--key`, `--password`, `--anthropic-api-key`) are rejected. `auth login claude` requires a TTY. `src/auth/authCli.ts` routes the new verbs and updates the help text. `src/__tests__/claudeAuthCli.test.ts` covers TTY refusal, value-bearing-flag rejection, invalid-name rejection, `--from-env` happy path + missing-var error, list (empty + populated, no raw secrets in output), remove preserving / deleting config_dir, idempotency `--refresh`. Existing auth tests (`authCli.test.ts`, `authProviders.test.ts`, `daemonAuthLoad.test.ts`) updated to reflect the wired status.
+- **Post-smoke UX fix (live double-login bug):** the implementer's previous spawn unconditionally invoked `claude /login`, but against a fresh `CLAUDE_CONFIG_DIR` Claude's first-run setup (theme → security notice → login) runs to completion AND THEN the explicit `/login` slash command fires, forcing the user to authenticate twice. Fix: branch the spawn on `isRefresh = existing && --refresh`. Fresh dir → spawn `claude` with NO args; user types `/exit` after the first-run flow completes and we register the account from a clean exit code. `--refresh` against an existing entry → keep `claude /login` since the dir is already past first-run setup. The `spawnLogin` test override signature gains an `options.refresh: boolean` so tests can assert which shape was used. Pre-spawn stdout messages updated to match: fresh dir reads "Launching Claude's first-run setup against <dir>. Complete the OAuth flow, then type /exit …"; `--refresh` keeps the existing "Launching `claude /login` against <dir> …" wording. New tests in `claudeAuthCli.test.ts` "auth login claude spawn shape (fresh vs --refresh)" describe assert (i) fresh-dir login passes `refresh=false` to the spawn override and the stdout message mentions "first-run setup" + "/exit", (ii) `--refresh` against an existing entry passes `refresh=true` to the override and the stdout message mentions "claude /login". `docs/development/claude-multi-account.md` updated to describe the fresh vs `--refresh` distinction and the troubleshooting bullet generalised away from the literal "claude /login exits non-zero" phrasing.
+- **Notes:** Per-account `api_env` secrets persist via `userSecrets.ts` under `ANTHROPIC_API_KEY__<slug>__<8-char-base32-sha256>` keys. The TTY guard, `--refresh` gate (D20), and value-bearing-argv rejection are unchanged.
 
 ### T8-Service-Rotation
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done (post-review fix applied)
+- **Evidence:** `src/orchestratorService.ts.sendFollowup` consults `parent.metadata.claude_rotation_state` and `parent.latest_error.category`; on rate_limit/quota it marks the prior account cooled-down, picks the next healthy account from the frozen priority list, and ALWAYS calls `runtime.start()` (never `resume()`), even when the parent has no `observed_session_id`. `terminal_context.kind === "fresh_chat_after_rotation"` is set immediately after `createRun` and re-merged after worker completion to survive any worker-supplied terminal_context. `metadata.claude_rotation_history` is appended via `appendRotationEntry` (cap 32 total length, marker counts cumulative drops). `src/__tests__/claudeRotation.test.ts` exercises rotation end-to-end with the fake binary, asserts terminal_context.kind, child has no `requested_session_id` (fresh start), prior account marked cooled-down. The all-cooled-down `INVALID_STATE` path is also covered.
+- **Post-review fix (Reviewer finding 1):** the previous `appendRotationEntry` looped forever past the 32-entry cap because shifting an entry then unshifting a marker re-grew the array to 33; the loop condition stayed true. Rewritten as a single-pass operation that splits any pre-existing marker out of the input, caps real entries at `cap-1`, and prepends a single marker tracking cumulative drops. New regression unit tests in `src/__tests__/claudeAccountValidation.test.ts` (`appendRotationEntry truncation` describe) cover (i) no-truncation up to cap, (ii) drop-and-marker once exceeded, (iii) 100-append loop terminates with `length === cap` and the leading marker's `truncated_count` equals total drops.
+- **Post-review fix (Reviewer finding 2):** cooldown is now persisted at terminal of any rotation-eligible (`metadata.claude_rotation_state` set) account-bound `claude` run with `latest_error.category in {rate_limit, quota}`. `startManagedRun` attaches a `handle.completion.then(...)` hook that calls `markAccountCooledDown` so a subsequent `start_run` with the same priority skips the just-rate-limited account, and a daemon restart between terminal and any `send_followup` reads the cooldown off disk. Single-account / unbound runs (no `claude_rotation_state`) still write nothing to the registry. `claudeRotation.test.ts` adds two new tests: "persists cooldown at terminal …" (asserts the registry shows `work` cooled-down after a single rate-limit-triggering `start_run`, and that the next priority-array `start_run` picks `alt`) and "does not write cooldown for unbound …" (asserts `loaded.file.accounts === []` after an unbound rate_limit). The `send_followup` rotation path retains its own `markAccountCooledDown` call as a no-op-when-already-set safety net.
+- **Notes:** Rotation history capping is now exhaustively unit-tested (no infinite-loop regression possible).
 
 ### T9-Tests-Hermetic
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done (extended in post-review pass)
+- **Evidence:** new test files `claudeAccountValidation.test.ts`, `claudeAccountRegistry.test.ts`, `claudeAccountContract.test.ts`, `claudeAuthCli.test.ts`, `claudeRotation.test.ts`; `processManager.test.ts` extended with `applyEnvPolicy` cases. Post-review pass adds: (i) rotation-history truncation regression suite (`appendRotationEntry truncation` in `claudeAccountValidation.test.ts`); (ii) terminal-time cooldown persistence + cross-start_run cooldown handoff + unbound-run-no-cooldown tests in `claudeRotation.test.ts`; (iii) tampered config_dir refusal test in `claudeRotation.test.ts`; (iv) end-to-end env-scrub assertion proving ambient `ANTHROPIC_*`/`*_API_KEY`/`*_AUTH_TOKEN` keys are removed from the spawned worker env and only the bound account secret is injected (`claudeRotation.test.ts` "claude account-bound spawn env scrubbing" describe); (v) diagnostics 17-account overflow test asserting 16 `checks[]` entries plus aggregate "and 1 more" `hints[]` line (`diagnostics.test.ts` "claude diagnostic account overflow" describe). `pnpm test` reports 379 tests / 79 suites / 0 failures / 1 pre-existing skip.
+- **Notes:** All tests use the fake `claude` binary built into the test harness; none read `~/.claude/` or contact Anthropic.
 
 ### T10-Docs
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done
+- **Evidence:** new `docs/development/claude-multi-account.md` covers account model, registration, profile manifest examples, rotation behaviour, env-scrub deny list, diagnostics, troubleshooting, and Future Options. `docs/development/auth-setup.md` updated to flag claude as wired and reference the per-account doc; daemon-load row updated to call out per-account-keys-via-on-demand-load. `README.md` gains a one-liner pointing at the new doc.
+- **Notes:** No new top-level commands or environment variables introduced beyond the documented `auth login/set/list/remove claude` verbs.
 
 ### T11-Verify
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done (re-verified after blocking fixes; one pre-existing audit finding flagged)
+- **Evidence:**
+  - `pnpm build`: clean (tsc, no errors).
+  - `pnpm test`: 381 / 0 fail / 1 pre-existing skip (post-review pass added 8 new tests across the three blocking findings + two non-blocking suggestions; post-smoke UX fix added 2 more for the fresh-vs-`--refresh` spawn shape).
+  - `node scripts/check-publish-ready.mjs`: "package metadata is ready for publish".
+  - `node scripts/resolve-publish-tag.mjs`: "@ralphkrauss/agent-orchestrator@0.2.0 will publish with npm dist-tag latest".
+  - `npm pack --dry-run`: 252 files, 360.6 kB tarball (no new files since the prior pass besides edited tests).
+  - `node scripts/sync-ai-workspace.mjs --check`: clean.
+  - `pnpm audit --prod`: **fails** with 1 moderate finding for transitive `ip-address <=10.1.0` via `@modelcontextprotocol/sdk > express-rate-limit > ip-address` (GHSA-v2v4-37r5-5v8g). Verified pre-existing on the plan-only commit `b48b74d` (`git stash && pnpm audit --prod` reproduces the same finding without any of this slice's changes). Not introduced by this work.
+- **Notes:** Live local smoke test still deferred — running `auth login claude --account smoke` requires a real interactive `claude` install on this host; the rotation path is exercised hermetically via the fake binary in `claudeRotation.test.ts`. Recording as deferred per the plan's "no real Claude install available — smoke deferred" provision.
 
 ## Issue Comment Draft (for posting on issue #17)
 
@@ -628,7 +640,7 @@ The original direction was a `ccs` worker backend wrapping `claude` via [`@kaitr
 
 **Security posture:** account names match `/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/` with a defensive resolved-path containment check (no `..` / path-traversal); env scrubbing is implemented as a runtime-threaded `WorkerInvocation.envPolicy` honoured by `ProcessManager` (no rewrite of the spawn pipeline; unbound runs unchanged) using the verified deep-dive deny list (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, `CLAUDE_CONFIG_DIR`, `CLAUDECODE` plus `ANTHROPIC_*` and provider-token globs); auth always uses interactive prompt / `--from-env` / `--from-stdin` — never value-bearing argv flags (mirrors the cursor provider precedent in PR #28). `auth login claude --account <name>` is idempotent: it refuses if the account already exists unless `--refresh` is passed. A registered `api_env` account whose secret is missing fails with `INVALID_STATE` rather than silently falling back to the ambient `ANTHROPIC_API_KEY`.
 
-**Caveat carried over:** Claude's session DB is per `CLAUDE_CONFIG_DIR`, so rotated follow-ups always call fresh `runtime.start()` — never `runtime.resume()`. Rotation runs carry `terminal_context.kind === "fresh_chat_after_rotation"` so the supervisor sees the context loss explicitly.
+**Caveat (initially carried over, since superseded — see follow-up):** the original write-up said Claude's session DB is per `CLAUDE_CONFIG_DIR` so rotated follow-ups always call fresh `runtime.start()` — never `runtime.resume()`. A second deep-dive proved that wrong: there is no opaque session DB; `<CLAUDE_CONFIG_DIR>/projects/<encoded-cwd>/<sid>.jsonl` is a plain JSONL file, and `claude --resume <sid>` succeeds whenever that JSONL is reachable. The follow-up sub-plan `plans/17-add-coding-backend-for-ccs/plans/17-copy-on-rotate-resume.md` (status: implementation landed) layers a **copy-on-rotate** approach on top: when rotation fires between two `config_dir` accounts the daemon copies the JSONL from the old account's tree to the new account's tree (atomic `copyFile` → `chmod 0o600` → `rename`) and then calls `runtime.resume(<sid>)`, so the user gets an actual conversation continuation. `terminal_context.kind === "resumed_after_rotation"` carries `{ resumed_session_id, source_path, target_path, copied_bytes, copy_duration_ms }`. The fresh-chat shape is preserved as a fallback for (a) source/target `api_env` mode (`copy_skip_reason: "api_env_in_rotation_path"` — `api_env` accounts have no `CLAUDE_CONFIG_DIR`, so the JSONL would be invisible), (b) any pre-spawn helper failure (source missing, copy failed, byte-collision, path-escape, …), and (c) a transparent in-run retry on stream-classified `session_not_found` (single-shot, threshold-bounded).
 
-Plan: `plans/17-add-coding-backend-for-ccs/plans/17-claude-multi-account.md`.
+Plan: `plans/17-add-coding-backend-for-ccs/plans/17-claude-multi-account.md`. Copy-on-rotate follow-up: `plans/17-add-coding-backend-for-ccs/plans/17-copy-on-rotate-resume.md`.
 ```

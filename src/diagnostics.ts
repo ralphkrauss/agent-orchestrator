@@ -9,6 +9,13 @@ import { daemonPaths } from './daemon/paths.js';
 import { prepareWorkerSpawn } from './processManager.js';
 import { getPackageVersion } from './packageMetadata.js';
 import { loadUserSecrets, type LoadedSecrets } from './auth/userSecrets.js';
+import {
+  accountRegistryPaths,
+  describeAccounts,
+  type AccountStatusEntry,
+} from './claude/accountRegistry.js';
+
+const CLAUDE_ACCOUNT_CHECK_LIMIT = 16;
 
 const execFileAsync = promisify(execFile);
 const commandTimeoutMs = 2_000;
@@ -81,6 +88,7 @@ export async function getBackendStatus(options: BackendStatusOptions = {}): Prom
   // crash `doctor`.
   const secrets = process.env.CURSOR_API_KEY ? null : loadUserSecrets({ platform });
   const cliBackends = await Promise.all(definitions.map((definition) => diagnoseBackend(definition, platform)));
+  await augmentClaudeDiagnostic(cliBackends, paths.home);
   const cursorAdapter = options.cursorSdkAdapter ?? defaultCursorSdkAdapter();
   const cursorBackend = await diagnoseCursorBackend(cursorAdapter, secrets);
   const backends = [...cliBackends, cursorBackend];
@@ -298,6 +306,37 @@ async function diagnoseCursorBackend(adapter: CursorSdkAdapter, secrets: LoadedS
     checks,
     hints: authHints,
   };
+}
+
+async function augmentClaudeDiagnostic(diagnostics: BackendDiagnostic[], home: string): Promise<void> {
+  const claude = diagnostics.find((entry) => entry.name === 'claude');
+  if (!claude) return;
+  let entries: AccountStatusEntry[];
+  try {
+    entries = await describeAccounts(accountRegistryPaths(home));
+  } catch {
+    return;
+  }
+  if (entries.length === 0) {
+    claude.hints.push(
+      'No claude accounts registered. Run `agent-orchestrator auth login claude --account <name>` (config_dir mode) or `agent-orchestrator auth set claude --account <name>` (api_env mode).',
+    );
+    return;
+  }
+  const visible = entries.slice(0, CLAUDE_ACCOUNT_CHECK_LIMIT);
+  for (const entry of visible) {
+    claude.checks.push({
+      name: `claude account: ${entry.account.name} (${entry.account.mode})`,
+      ok: entry.status === 'ready',
+      message: entry.message || entry.status,
+    });
+  }
+  const overflow = entries.length - visible.length;
+  if (overflow > 0) {
+    claude.hints.push(
+      `and ${overflow} more registered claude accounts; run \`agent-orchestrator auth list claude --json\` for the full list`,
+    );
+  }
 }
 
 async function checkRunStore(path: string): Promise<BackendStatusReport['run_store']> {

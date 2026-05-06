@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { ACCOUNT_NAME_PATTERN, MAX_COOLDOWN_SECONDS } from './claude/accountValidation.js';
 
 export const PROTOCOL_VERSION = 1 as const;
 
@@ -73,6 +74,7 @@ export const RunErrorCategorySchema = z.enum([
   'backend_unavailable',
   'worker_binary_missing',
   'process_exit',
+  'session_not_found',
   'timeout',
   'unknown',
 ]);
@@ -334,6 +336,19 @@ export function wrapErr<TPayload extends object = Record<string, never>>(
 
 const WorkerProfileAliasSchema = z.string().trim().min(1);
 
+const ClaudeAccountNameSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .refine((value) => ACCOUNT_NAME_PATTERN.test(value) && value !== '.' && value !== '..' && !value.includes('..'), {
+    message: 'invalid claude account name (must match /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/, no leading dot/dash, no \"..\"\)',
+  });
+
+const ClaudeAccountsArraySchema = z
+  .array(ClaudeAccountNameSchema)
+  .min(1, { message: 'claude_accounts must be non-empty' })
+  .refine((values) => new Set(values).size === values.length, { message: 'claude_accounts must be unique' });
+
 export const StartRunInputSchema = z.object({
   backend: BackendSchema.optional(),
   profile: WorkerProfileAliasSchema.optional(),
@@ -346,6 +361,8 @@ export const StartRunInputSchema = z.object({
   metadata: z.record(z.unknown()).optional().default({}),
   idle_timeout_seconds: z.number().int().positive().optional(),
   execution_timeout_seconds: z.number().int().positive().optional(),
+  claude_account: ClaudeAccountNameSchema.optional(),
+  claude_accounts: ClaudeAccountsArraySchema.optional(),
 }).superRefine((input, context) => {
   if (!input.backend && !input.profile) {
     context.addIssue({
@@ -360,6 +377,42 @@ export const StartRunInputSchema = z.object({
       code: z.ZodIssueCode.custom,
       message: 'Profile mode cannot be mixed with direct backend/model/reasoning_effort/service_tier settings',
       path: ['profile'],
+    });
+  }
+
+  if (input.profile && (input.claude_account !== undefined || input.claude_accounts !== undefined)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Direct claude_account / claude_accounts cannot be combined with profile mode; declare them on the profile instead',
+      path: ['claude_account'],
+    });
+  }
+
+  const usingClaude = input.backend === 'claude';
+  if (!usingClaude && input.claude_account !== undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'claude_account is only valid when backend is claude',
+      path: ['claude_account'],
+    });
+  }
+  if (!usingClaude && input.claude_accounts !== undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'claude_accounts is only valid when backend is claude',
+      path: ['claude_accounts'],
+    });
+  }
+
+  if (
+    input.claude_account !== undefined &&
+    input.claude_accounts !== undefined &&
+    !input.claude_accounts.includes(input.claude_account)
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'claude_account must be a member of claude_accounts when both are supplied',
+      path: ['claude_account'],
     });
   }
 });
@@ -385,6 +438,38 @@ export const UpsertWorkerProfileInputSchema = z.object({
   description: z.string().trim().min(1).optional(),
   metadata: z.record(z.unknown()).optional(),
   create_if_missing: z.boolean().optional().default(true),
+  claude_account: ClaudeAccountNameSchema.optional(),
+  claude_account_priority: ClaudeAccountsArraySchema.optional(),
+  claude_cooldown_seconds: z
+    .number()
+    .int()
+    .positive()
+    .max(MAX_COOLDOWN_SECONDS, { message: `claude_cooldown_seconds must be ≤ ${MAX_COOLDOWN_SECONDS} (24h)` })
+    .optional(),
+}).superRefine((input, context) => {
+  const usingClaude = input.backend === 'claude';
+  if (!usingClaude) {
+    for (const field of ['claude_account', 'claude_account_priority', 'claude_cooldown_seconds'] as const) {
+      if (input[field] !== undefined) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `${field} is only valid when backend is claude`,
+          path: [field],
+        });
+      }
+    }
+  }
+  if (
+    input.claude_account !== undefined &&
+    input.claude_account_priority !== undefined &&
+    !input.claude_account_priority.includes(input.claude_account)
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'claude_account must be a member of claude_account_priority when both are supplied',
+      path: ['claude_account'],
+    });
+  }
 });
 export type UpsertWorkerProfileInput = z.input<typeof UpsertWorkerProfileInputSchema>;
 export type UpsertWorkerProfile = z.output<typeof UpsertWorkerProfileInputSchema>;
