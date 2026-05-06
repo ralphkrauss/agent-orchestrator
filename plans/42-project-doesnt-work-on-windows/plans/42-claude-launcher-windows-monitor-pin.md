@@ -5,7 +5,7 @@ Plan Slug: `42-claude-launcher-windows-monitor-pin`
 Parent Issue: #42
 Created: 2026-05-06
 Updated: 2026-05-06 (after plan review)
-Status: ready-for-implementation
+Status: implemented (T1–T4, T6, T7 — T5 manual Windows smoke pending operator)
 
 ## Context
 
@@ -308,3 +308,39 @@ implementation correctness (handled by the task list) and verification
 | # | Candidate | Scope | Create After |
 |---|---|---|---|
 | 1 | Cross-platform path generation that flows into shell-pattern allowlists must be normalized at the producer (e.g. forward slashes on Windows) rather than at the consumer (allowlist regex), and any platform override accepted for tests must drive both `isAbsolute` selection and slash normalization. | Future supervisor / launcher / harness path-generation work. | Only if a second instance of the same pattern emerges; one fix in `monitorPin.ts` is not enough to justify a repo-wide rule. |
+
+## Implementation Evidence
+
+| Task | Status | Evidence |
+|---|---|---|
+| T1 | done | `src/claude/monitorPin.ts`: added `ResolveMonitorPinOptions` (`platform`, `nodePath`); `resolveMonitorPin(env, options)` selects `path.win32.isAbsolute` vs `path.posix.isAbsolute` based on `platform`; on `win32` normalizes `\\` → `/` and then calls `assertMonitorPathIsNotUnc` against the **post-normalization** form so mixed-separator UNC inputs (e.g. `\/server/share/...` or `/\server/share/...`) are caught alongside the canonical `\\server\share\...` and `//server/share/...` forms before `assertMonitorPathIsSupported`. |
+| T2 | done | `src/claude/monitorPin.ts`: `assertMonitorPathIsSupported` accepts an `AssertMonitorPathOptions` `{ platform? }` arg. POSIX branch keeps the original message byte-for-byte; the `platform === 'win32'` branch adds a single sentence "On Windows, backslashes in this path are auto-normalized to forward slashes before this check; the remaining forbidden characters still apply." UNC rejection lives in a new `assertMonitorPathIsNotUnc` with a dedicated message. |
+| T3 | done | `src/__tests__/monitorPin.test.ts` (new, 10 tests): platform-aware `isAbsolute` regression, forward-slash Bash allow patterns for the issue-reported install layout, dedicated UNC error for both `bin` and `nodePath` in canonical `\\\\...` form, **mixed-separator UNC `bin` and `nodePath` (`\/...` and `/\...`) that only become `//...` after normalization** (regression lock for the post-normalization UNC check), Windows-aware forbidden-character message, POSIX absolute success, POSIX backslash rejection (verbatim message), and explicit byte-exact POSIX-message lock for the assert function. |
+| T4 | done | `src/__tests__/claudeHarness.test.ts`: single new assertion in the `Claude harness config builder` suite proving `buildClaudeHarnessConfig` (which runs `assertMonitorPermissionInvariant` internally) does not throw when `monitorPin` is built under `platform: 'win32'`. |
+| T5 | pending | Manual Windows smoke is owned by the issue reporter or another Windows operator with Git Bash installed (per decision #11). Not runnable on the Linux implementation host. |
+| T6 | done | `README.md`: added a short Windows note under the cross-platform paragraph: Git Bash hard prerequisite for `agent-orchestrator claude`, supervisor monitor pin emits forward-slash paths on Windows. `docs/development/mcp-tooling.md` reviewed; no POSIX-only assertions found that needed updating. |
+| T7 | done (with caveat) | See verification log below. `pnpm build` and `pnpm test` pass. `pnpm verify` fails only on the pre-existing `pnpm audit --prod` advisory for the transitive `ip-address` package via `@modelcontextprotocol/sdk` → `express-rate-limit`; reproduced on the base commit `cf50a6f` without these changes, so unrelated. |
+
+### Verification Log
+
+- `pnpm install --frozen-lockfile`: succeeded.
+- `pnpm build`: succeeded (tsc clean) on both passes.
+- `node --test dist/__tests__/monitorPin.test.js`: 10/10 pass after the post-normalization-UNC follow-up (was 8/8 on the first pass; +2 tests for mixed-separator UNC `bin` and `nodePath`).
+- `node --test dist/__tests__/claudeHarness.test.js`: 29/29 pass (includes the T4 invariant assertion under `platform: 'win32'`).
+- `pnpm test`: 335 pass, 1 skipped, 0 fail across the repo suite (was 333 pass before the +2 mixed-separator UNC tests).
+- `pnpm verify`: build + test + publish-ready + dist-tag resolve + npm pack dry-run all succeed; `pnpm audit --prod` reports a single moderate advisory `GHSA-v2v4-37r5-5v8g` against transitive `ip-address` (path `@modelcontextprotocol/sdk → express-rate-limit → ip-address`). Reproduced from `cf50a6f` with the working tree stashed, so it is pre-existing and unrelated to this fix.
+- `git diff --check`: clean.
+
+### Files Changed
+
+- `src/claude/monitorPin.ts` (modified): platform-aware `resolveMonitorPin`, `AssertMonitorPathOptions`, `assertMonitorPathIsNotUnc`.
+- `src/__tests__/monitorPin.test.ts` (new): 10 focused unit tests.
+- `src/__tests__/claudeHarness.test.ts` (modified): one new `assertMonitorPermissionInvariant` integration assertion under `platform: 'win32'`.
+- `README.md` (modified): one Windows note (Git Bash prereq + forward-slash supervisor paths).
+- `plans/42-project-doesnt-work-on-windows/plans/42-claude-launcher-windows-monitor-pin.md` (this file): status, evidence section.
+
+### Residual Risks / Open Items
+
+- T5 manual Windows smoke is the only remaining quality gate. It must be run on a Windows host with Git Bash installed against the issue-reported install layout before the fix can be considered fully verified.
+- The pre-existing `ip-address` audit advisory blocks `pnpm verify` end-to-end. It is independent of this change and should be tracked separately.
+- No public surface changed: the `options` argument on `resolveMonitorPin` and `assertMonitorPathIsSupported` is undocumented and additive. MCP, CLI, env, dependency, lockfile, and Bash deny-list surfaces are untouched.
