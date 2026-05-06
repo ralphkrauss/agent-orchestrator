@@ -6,6 +6,13 @@
 # into the recipe body and makes quoted prompts unsafe.
 set positional-arguments
 
+# Recipes use POSIX shell idioms ([ ... ], printf, rm -rf, ...) so on Windows
+# just must invoke Git Bash's sh.exe rather than the default lookup, which
+# fails under PowerShell or CMD with "could not find the shell: program not
+# found". Run from inside Git Bash, or ensure Git's usr\bin is on PATH so
+# sh.exe resolves.
+set windows-shell := ["sh.exe", "-cu"]
+
 repo_root := justfile_directory()
 local_orchestrator_home := `node scripts/local-orchestrator-home.mjs`
 local_cli := repo_root + "/dist/cli.js"
