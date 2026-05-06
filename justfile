@@ -1,16 +1,23 @@
 # Agent Orchestrator development tasks.
+#
+# Cross-shell invariant: recipe bodies must be either (a) a single
+# external-program invocation that works in any shell (PowerShell
+# Desktop, sh, cmd.exe), or (b) `[script("node")]` recipes that import
+# a helper under `scripts/just/`. Never use POSIX-only shell idioms
+# (`[ ... ]`, `printf`, `find`, `rm`, `|`, `&&`) in a recipe body.
+#
+# `set positional-arguments` is required so that `[script("node")]`
+# recipes receive their arguments via `process.argv`. Without it,
+# `process.argv.slice(2)` is empty inside the script body and recipe
+# args are dropped on the floor. The directive does NOT permit
+# parameter-taking shell recipes; those remain forbidden by the rule
+# above.
+#
+# `just >= 1.44` required (the version that stabilized the `[script]`
+# attribute). Older `just` parses with an unstable-attribute error.
 
-# Bind recipe args to $1, $2, ... so quoted arguments containing shell
-# metacharacters (semicolons, pipes, redirects, etc.) do not expand as live
-# shell syntax. Without this, `{{args}}` interpolation pastes raw user input
-# into the recipe body and makes quoted prompts unsafe.
 set positional-arguments
-
-repo_root := justfile_directory()
-local_orchestrator_home := `node scripts/local-orchestrator-home.mjs`
-local_cli := repo_root + "/dist/cli.js"
-local_shim_root := repo_root + "/.agent-orchestrator-local"
-local_bin_dir := local_shim_root + "/bin"
+set windows-shell := ["powershell.exe", "-NoLogo", "-NoProfile", "-Command"]
 
 default:
     @just --list
@@ -41,8 +48,10 @@ init-mcp-secrets:
     node scripts/init-mcp-secrets.mjs
 
 # Bridge secret-bearing MCP stdio servers through the shared env contract.
+[script("node")]
 mcp-secret-bridge *args:
-    node scripts/mcp-secret-bridge.mjs {{args}}
+    const { pathToFileURL } = require('node:url'); const { resolve } = require('node:path');
+    import(pathToFileURL(resolve('scripts/just/passthrough.mjs')).href).then(m => m.default({ script: 'scripts/mcp-secret-bridge.mjs' }));
 
 # Show supported MCP bridge profiles.
 mcp-profiles:
@@ -57,12 +66,16 @@ orchestrator-help: orchestrator-build
     node dist/cli.js --help
 
 # Run the local branch CLI against its isolated daemon store.
+[script("node")]
 agent-orchestrator *args: orchestrator-build
-    @if [ "${1:-}" = "--" ]; then shift; fi; AGENT_ORCHESTRATOR_HOME="{{local_orchestrator_home}}" node "{{local_cli}}" "$@"
+    const { pathToFileURL } = require('node:url'); const { resolve } = require('node:path');
+    import(pathToFileURL(resolve('scripts/just/local-cli.mjs')).href).then(m => m.default());
 
 # Short alias for running the local branch CLI against its isolated daemon store.
+[script("node")]
 local *args: orchestrator-build
-    @if [ "${1:-}" = "--" ]; then shift; fi; AGENT_ORCHESTRATOR_HOME="{{local_orchestrator_home}}" node "{{local_cli}}" "$@"
+    const { pathToFileURL } = require('node:url'); const { resolve } = require('node:path');
+    import(pathToFileURL(resolve('scripts/just/local-cli.mjs')).href).then(m => m.default());
 
 # Short alias for creating npm-style local command shims and printing a shell export.
 local-env:
@@ -86,74 +99,91 @@ agent-orchestrator-local-bin:
 
 # Print the isolated store used by the local branch daemon.
 agent-orchestrator-local-home:
-    @printf '%s\n' "{{local_orchestrator_home}}"
+    @node scripts/local-orchestrator-home.mjs
 
 # Stop the local branch daemon and remove its isolated store and command shims.
 agent-orchestrator-local-clean:
-    @if [ -f "{{local_cli}}" ]; then AGENT_ORCHESTRATOR_HOME="{{local_orchestrator_home}}" node "{{local_cli}}" stop --force >/dev/null 2>&1 || true; fi
-    @rm -rf "{{local_orchestrator_home}}" "{{local_shim_root}}"
-    @printf 'removed %s\n' "{{local_orchestrator_home}}"
-    @printf 'removed %s\n' "{{local_shim_root}}"
+    @node scripts/just/local-clean.mjs
 
 # Print the generated OpenCode orchestration config for inspection.
+[script("node")]
 orchestrator-opencode-config *args: orchestrator-build
-    node dist/cli.js opencode --print-config {{args}}
+    const { pathToFileURL } = require('node:url'); const { resolve } = require('node:path');
+    import(pathToFileURL(resolve('scripts/just/cli.mjs')).href).then(m => m.default({ prefix: ['opencode', '--print-config'] }));
 
 # Start OpenCode in constrained orchestration mode.
+[script("node")]
 orchestrator-opencode *args: orchestrator-build
-    node dist/cli.js opencode {{args}}
+    const { pathToFileURL } = require('node:url'); const { resolve } = require('node:path');
+    import(pathToFileURL(resolve('scripts/just/cli.mjs')).href).then(m => m.default({ prefix: ['opencode'] }));
 
 # Check local worker CLI availability from the current build.
 orchestrator-doctor: orchestrator-build
     node dist/cli.js doctor
 
 # Show the current daemon status. Pass --verbose or --json for observability output.
+[script("node")]
 orchestrator-status *args: orchestrator-build
-    node dist/cli.js status {{args}}
+    const { pathToFileURL } = require('node:url'); const { resolve } = require('node:path');
+    import(pathToFileURL(resolve('scripts/just/cli.mjs')).href).then(m => m.default({ prefix: ['status'] }));
 
 # Show session and run observability output.
+[script("node")]
 orchestrator-runs *args: orchestrator-build
-    node dist/cli.js runs {{args}}
+    const { pathToFileURL } = require('node:url'); const { resolve } = require('node:path');
+    import(pathToFileURL(resolve('scripts/just/cli.mjs')).href).then(m => m.default({ prefix: ['runs'] }));
 
 # Open the interactive terminal observability dashboard.
+[script("node")]
 orchestrator-watch *args: orchestrator-build
-    node dist/cli.js watch {{args}}
+    const { pathToFileURL } = require('node:url'); const { resolve } = require('node:path');
+    import(pathToFileURL(resolve('scripts/just/cli.mjs')).href).then(m => m.default({ prefix: ['watch'] }));
 
 # Explicitly start the daemon. MCP clients also auto-start it via node dist/cli.js.
 orchestrator-start: orchestrator-build
     node dist/cli.js start
 
 # Stop the daemon. Pass --force to cancel active runs first.
+[script("node")]
 orchestrator-stop *args: orchestrator-build
-    node dist/cli.js stop {{args}}
+    const { pathToFileURL } = require('node:url'); const { resolve } = require('node:path');
+    import(pathToFileURL(resolve('scripts/just/cli.mjs')).href).then(m => m.default({ prefix: ['stop'] }));
 
 # Restart the daemon so it picks up the current build.
 orchestrator-restart: orchestrator-build
     node dist/cli.js restart --force
 
 # Preview terminal run pruning for runs older than the requested age.
+[script("node")]
 orchestrator-prune-dry-run days="30": orchestrator-build
-    node dist/cli.js prune --older-than-days {{days}} --dry-run
+    const { pathToFileURL } = require('node:url'); const { resolve } = require('node:path');
+    import(pathToFileURL(resolve('scripts/just/cli.mjs')).href).then(m => m.default({ prefix: ['prune', '--older-than-days'], suffix: ['--dry-run'] }));
 
 # Prune terminal runs older than the requested age.
+[script("node")]
 orchestrator-prune days="30": orchestrator-build
-    node dist/cli.js prune --older-than-days {{days}}
+    const { pathToFileURL } = require('node:url'); const { resolve } = require('node:path');
+    import(pathToFileURL(resolve('scripts/just/cli.mjs')).href).then(m => m.default({ prefix: ['prune', '--older-than-days'] }));
 
 # Show AI workspace files.
 ai-files:
-    find AGENTS.md CLAUDE.md .agents .claude .cursor .codex .githooks docs/development -maxdepth 4 -type f 2>/dev/null | sort
+    @node scripts/just/ai-files.mjs
 
 # Create or attach a worktree for a branch.
+[script("node")]
 worktree branch:
-    node scripts/worktree.mjs create {{branch}}
+    const { pathToFileURL } = require('node:url'); const { resolve } = require('node:path');
+    import(pathToFileURL(resolve('scripts/just/passthrough.mjs')).href).then(m => m.default({ script: 'scripts/worktree.mjs', prefix: ['create'] }));
 
 # List all active worktrees.
 worktree-list:
     node scripts/worktree.mjs list
 
 # Remove a clean worktree by branch name.
+[script("node")]
 worktree-remove branch:
-    node scripts/worktree.mjs remove {{branch}}
+    const { pathToFileURL } = require('node:url'); const { resolve } = require('node:path');
+    import(pathToFileURL(resolve('scripts/just/passthrough.mjs')).href).then(m => m.default({ script: 'scripts/worktree.mjs', prefix: ['remove'] }));
 
 # Remove clean worktrees whose tracking branch no longer exists on origin.
 worktree-prune:

@@ -1,14 +1,13 @@
 #!/usr/bin/env node
-import { createHash } from 'node:crypto';
 import { chmodSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resolveLocalOrchestratorHome } from './local-home-lib.mjs';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = realpathSync(resolve(scriptDir, '..'));
 const binDir = join(repoRoot, '.agent-orchestrator-local', 'bin');
-const localHome = resolveLocalHome(repoRoot);
+const localHome = resolveLocalOrchestratorHome(repoRoot);
 const nodePath = process.execPath;
 const args = new Set(process.argv.slice(2));
 
@@ -36,18 +35,6 @@ if (args.has('--print-env')) {
 } else {
   process.stdout.write(`wrote local agent-orchestrator shims to ${binDir}\n`);
   process.stdout.write(`run: export PATH=${quoteShell(binDir)}:"$PATH"\n`);
-}
-
-function resolveLocalHome(root) {
-  const base = process.env.AGENT_ORCHESTRATOR_LOCAL_BASE || join(tmpdir(), 'agent-orchestrator-local');
-  const slug = sanitizePathSegment(basename(root) || 'checkout');
-  const hash = createHash('sha256').update(root).digest('hex').slice(0, 12);
-  return join(base, `${slug}-${hash}`);
-}
-
-function sanitizePathSegment(value) {
-  const sanitized = value.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
-  return sanitized.slice(0, 40) || 'checkout';
 }
 
 function posixShim(node, target, home) {

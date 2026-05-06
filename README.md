@@ -66,6 +66,20 @@ Linux and macOS use Unix sockets and POSIX process groups. Windows uses a
 per-store named pipe for daemon IPC and `taskkill` for worker process-tree
 cancellation.
 
+On Windows, `agent-orchestrator claude` requires Git Bash (the MSYS-flavored
+`bash` that Claude Code uses for its `Bash` tool); PowerShell-only Claude Code
+installs are not supported. The Claude supervisor's pinned monitor command and
+`Bash(...)` permission entries are emitted with forward-slash paths on Windows
+(for example `C:/Users/<name>/AppData/Roaming/npm/...`) so they do not collide
+with the supervisor's Bash deny list.
+
+On Windows, `just` recipes run under PowerShell Desktop and through `node`
+directly for parameter-taking recipes (via `just`'s `[script]` attribute, which
+requires `just >= 1.44`); no Git Bash or `sh.exe` is required for the dev
+workflow. The Git Bash requirement for `agent-orchestrator claude` itself
+(described above) is unchanged because Claude Code uses Bash for its `Bash`
+tool.
+
 The MCP package never installs or bundles worker CLIs. Missing workers are reported by diagnostics and by failed run results, but one missing backend does not prevent the MCP server from starting.
 
 ## Diagnostics
