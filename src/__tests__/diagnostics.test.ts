@@ -233,6 +233,50 @@ describe('backend diagnostics', () => {
   });
 });
 
+describe('claude diagnostic account overflow', () => {
+  let originalHome: string | undefined;
+  beforeEach(() => {
+    originalHome = process.env.AGENT_ORCHESTRATOR_HOME;
+    originalAnthropicKey = process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+  });
+  afterEach(() => {
+    restoreEnv('AGENT_ORCHESTRATOR_HOME', originalHome);
+    restoreEnv('ANTHROPIC_API_KEY', originalAnthropicKey);
+  });
+
+  it('caps human-readable checks at 16 entries and surfaces an aggregate hint when more accounts are registered', async () => {
+    const tempHome = await mkdtemp(join(tmpdir(), 'claude-diag-cap-'));
+    process.env.AGENT_ORCHESTRATOR_HOME = tempHome;
+    const bin = await mkdtemp(join(tmpdir(), 'claude-diag-bin-'));
+    await writeMockCli(bin, 'codex', [
+      ['--version', 'codex 1.0.0'],
+      ['exec --help', 'Usage: codex exec --json --cd --skip-git-repo-check --model -'],
+      ['exec resume --help', 'Usage: codex exec resume --json --skip-git-repo-check --model <session> -'],
+    ]);
+    await writeMockCli(bin, 'claude', [
+      ['--version', 'claude 1.0.0'],
+      ['--help', 'Usage: claude -p --output-format stream-json --resume --model <session>'],
+    ]);
+    process.env.PATH = prependPath(bin, originalPath);
+
+    const { accountRegistryPaths, upsertAccount } = await import('../claude/accountRegistry.js');
+    const paths = accountRegistryPaths(tempHome);
+    for (let i = 1; i <= 17; i += 1) {
+      await upsertAccount(paths, { name: `acct${i}`, mode: 'api_env' });
+    }
+
+    const report = await getBackendStatus({ cursorSdkAdapter: missingCursorAdapter });
+    const claude = report.backends.find((backend) => backend.name === 'claude')!;
+    const accountChecks = claude.checks.filter((check) => check.name.startsWith('claude account:'));
+    assert.equal(accountChecks.length, 16, 'human-readable checks must cap at 16 entries');
+    assert.ok(
+      claude.hints.some((hint) => /and 1 more registered claude accounts/.test(hint)),
+      'overflow aggregate hint must be present',
+    );
+  });
+});
+
 describe('cursor auth source identification', () => {
   let originalSecretsFile: string | undefined;
   let originalCursor: string | undefined;

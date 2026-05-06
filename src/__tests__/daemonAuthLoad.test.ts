@@ -156,12 +156,12 @@ describe('daemon auth load via bootDaemon', () => {
     assert.deepStrictEqual(cursor.capturedApiKeys, [VALID_KEY_FILE]);
   });
 
-  it('refuses to inject non-wired-provider keys (e.g. NODE_OPTIONS, ANTHROPIC_API_KEY) from the secrets file', async () => {
+  it('refuses to inject non-wired-provider keys (e.g. NODE_OPTIONS, OPENAI_API_KEY) from the secrets file', async () => {
     const paths = await makePaths();
     const secretsPath = join(paths.home, 'secrets.env');
     await writeFile(
       secretsPath,
-      `CURSOR_API_KEY=${VALID_KEY_FILE}\nNODE_OPTIONS=--inspect\nANTHROPIC_API_KEY=should-not-leak\n`,
+      `CURSOR_API_KEY=${VALID_KEY_FILE}\nNODE_OPTIONS=--inspect\nOPENAI_API_KEY=should-not-leak\n`,
       { mode: 0o600 },
     );
     process.env.AGENT_ORCHESTRATOR_SECRETS_FILE = secretsPath;
@@ -175,7 +175,8 @@ describe('daemon auth load via bootDaemon', () => {
 
     assert.equal(process.env.CURSOR_API_KEY, VALID_KEY_FILE);
     assert.equal(process.env.NODE_OPTIONS, undefined, 'NODE_OPTIONS must not leak from the secrets file');
-    assert.equal(process.env.ANTHROPIC_API_KEY, undefined, 'reserved provider keys must not be injected by the daemon');
+    // Codex stays reserved in this slice; OPENAI_API_KEY must not be injected.
+    assert.equal(process.env.OPENAI_API_KEY, undefined, 'reserved provider keys must not be injected by the daemon');
   });
 
   it('keeps env precedence: env value reaches the runtime, not the file value', async () => {

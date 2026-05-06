@@ -52,10 +52,30 @@ import {
   type WorkerEvent,
   type WorkerResult,
 } from './contract.js';
+import { errorFromEvent } from './backend/common.js';
 import { OrchestratorRegistry } from './daemon/orchestratorRegistry.js';
 import { computeOrchestratorStatusSnapshot } from './daemon/orchestratorStatus.js';
 import { validateClaudeModelAndEffort } from './backend/claudeValidation.js';
-import type { RuntimeRunHandle, WorkerRuntime } from './backend/runtime.js';
+import type { AccountSpawnContribution, RuntimeRunHandle, WorkerRuntime } from './backend/runtime.js';
+import type { EarlyEventInterceptor, EarlyEventInterceptorOutcome } from './backend/WorkerBackend.js';
+import { copySessionJsonlForRotation, type CopyOutcome } from './claude/sessionCopy.js';
+import {
+  appendRotationEntry,
+  readAccountUsed,
+  readRotationHistory,
+  readRotationState,
+  resolveClaudeAccountBinding,
+  ROTATION_HISTORY_CAP,
+  type ClaudeRotationHistoryEntry,
+  type ClaudeRotationState,
+} from './claude/accountBinding.js';
+import {
+  accountRegistryPaths,
+  loadAccountRegistry,
+  markAccountCooledDown,
+  pickHealthyAccount,
+  resolveAccountSpawn,
+} from './claude/accountRegistry.js';
 import { getBackendStatus } from './diagnostics.js';
 import { captureGitSnapshot } from './gitSnapshot.js';
 import { buildObservabilitySnapshot } from './observability.js';
@@ -97,6 +117,24 @@ const legacyGeneratedConfig: OrchestratorConfig = {
 type ToolResult = ToolResponse<object>;
 type OrchestratorLogger = (message: string) => void;
 
+/**
+ * D-COR-Resume-Layer Step 2: window for the in-run session_not_found
+ * interceptor. Not on the public contract.
+ */
+const SESSION_NOT_FOUND_INTERCEPT_THRESHOLD = { events: 50, ms: 5_000 } as const;
+
+interface RotationTrackerEntry {
+  /** Promise gating the in-flight picker for this parent. */
+  lock: Promise<void>;
+  /**
+   * Destinations already bound to a child run of this parent. Source-of-truth
+   * is the run store (`metadata.claude_account_used`); this is a cache.
+   */
+  claimed: Set<string>;
+  /** True once `claimed` has been hydrated from disk for this parent. */
+  reconstructed: boolean;
+}
+
 export interface OrchestratorDispatchContext {
   frontend_version?: string | null;
   policy_context?: RpcPolicyContext | null;
@@ -111,6 +149,7 @@ interface ResolvedStartRunTarget {
   codexNetwork: CodexNetwork | undefined;
   metadata: Record<string, unknown>;
   profileId: string | null;
+  accountSpawn?: AccountSpawnContribution;
 }
 
 export type RunLifecycleEventKind = 'started' | 'activity' | 'terminal' | 'notification';
@@ -129,6 +168,13 @@ export class OrchestratorService {
   private readonly activeRuns = new Map<string, RuntimeRunHandle>();
   private readonly timers = new Map<string, NodeJS.Timeout>();
   private readonly profileUpdateLocks = new Map<string, Promise<void>>();
+  /**
+   * Per-parent rotation tracker (D-COR-Lock). Hydrated lazily; entries live
+   * until the parent run is pruned. The in-memory state is a cache; the
+   * source-of-truth is `metadata.claude_rotation_state.parent_run_id` +
+   * `metadata.claude_account_used` written to each child run's `meta.json`.
+   */
+  private readonly rotationTrackers = new Map<string, RotationTrackerEntry>();
   private config: OrchestratorConfig = defaultConfig;
   private shuttingDown = false;
   readonly orchestratorRegistry = new OrchestratorRegistry();
@@ -306,6 +352,7 @@ export class OrchestratorService {
     if (!resolved.ok) return wrapErr(resolved.error);
     const { backendName, runtime, model, reasoningEffort, serviceTier, codexNetwork, metadata: resolvedMetadata, profileId } = resolved.value;
     const metadata = stampOrchestratorIdInMetadata(resolvedMetadata, context.policy_context);
+    const accountSpawn = resolved.value.accountSpawn;
     const idleTimeout = this.resolveIdleTimeout(input.idle_timeout_seconds);
     if (!idleTimeout.ok) return wrapErr(idleTimeout.error);
     const executionTimeout = this.resolveExecutionTimeout(input.execution_timeout_seconds);
@@ -328,7 +375,7 @@ export class OrchestratorService {
     await this.captureAndPersistGitSnapshot(meta.run_id, input.cwd);
     await this.maybeEmitCodexNetworkDefaultWarning(meta.run_id, backendName, codexNetwork, profileId);
 
-    await this.startManagedRun(meta.run_id, runtime, input.prompt, input.cwd, idleTimeout.value, executionTimeout.value, settings.value, model, undefined);
+    await this.startManagedRun(meta.run_id, runtime, input.prompt, input.cwd, idleTimeout.value, executionTimeout.value, settings.value, model, undefined, accountSpawn);
     return wrapOk({ run_id: meta.run_id });
   }
 
@@ -373,6 +420,11 @@ export class OrchestratorService {
       }
       const runtime = this.runtimes.get(input.backend);
       if (!runtime) return { ok: false, error: orchestratorError('BACKEND_NOT_FOUND', `Backend not found: ${input.backend}`) };
+
+      const claudeBinding = await this.resolveClaudeBindingFromDirect(input);
+      if (!claudeBinding.ok) return { ok: false, error: claudeBinding.error };
+
+      const metadata = applyClaudeBindingToMetadata(input.metadata, claudeBinding.binding);
       return {
         ok: true,
         value: {
@@ -382,8 +434,9 @@ export class OrchestratorService {
           reasoningEffort: input.reasoning_effort,
           serviceTier: input.service_tier,
           codexNetwork: input.codex_network,
-          metadata: input.metadata,
+          metadata,
           profileId: null,
+          accountSpawn: claudeBinding.binding?.accountSpawn,
         },
       };
     }
@@ -444,6 +497,18 @@ export class OrchestratorService {
 
     const profileSettings = parseProfileModelSettings(profile, profilesFile);
     if (!profileSettings.ok) return { ok: false, error: profileSettings.error };
+
+    const claudeBinding = await this.resolveClaudeBindingFromProfile(backendName.data, profile);
+    if (!claudeBinding.ok) return { ok: false, error: claudeBinding.error };
+
+    const baseMetadata: Record<string, unknown> = {
+      ...input.metadata,
+      worker_profile: {
+        mode: 'profile',
+        profile: profile.id,
+        profiles_file: profilesFile,
+      },
+    };
     return {
       ok: true,
       value: {
@@ -453,17 +518,46 @@ export class OrchestratorService {
         reasoningEffort: profileSettings.reasoningEffort,
         serviceTier: profileSettings.serviceTier,
         codexNetwork: profileSettings.codexNetwork,
-        metadata: {
-          ...input.metadata,
-          worker_profile: {
-            mode: 'profile',
-            profile: profile.id,
-            profiles_file: profilesFile,
-          },
-        },
+        metadata: applyClaudeBindingToMetadata(baseMetadata, claudeBinding.binding),
         profileId: profile.id,
+        accountSpawn: claudeBinding.binding?.accountSpawn,
       },
     };
+  }
+
+  private async resolveClaudeBindingFromDirect(input: StartRun): Promise<ClaudeBindingResolution> {
+    if (input.backend !== 'claude') {
+      // Schema-level guard rejects claude_* on non-claude backends, but be defensive.
+      return { ok: true, binding: null };
+    }
+    if (!input.claude_account && !input.claude_accounts) {
+      return { ok: true, binding: null };
+    }
+    const result = await resolveClaudeAccountBinding({
+      home: this.store.root,
+      account: input.claude_account,
+      priority: input.claude_accounts ? [...input.claude_accounts] : undefined,
+      source: 'direct',
+    });
+    return result.ok ? { ok: true, binding: result.value } : { ok: false, error: result.error };
+  }
+
+  private async resolveClaudeBindingFromProfile(
+    backendName: Backend,
+    profile: ValidatedWorkerProfile,
+  ): Promise<ClaudeBindingResolution> {
+    if (backendName !== 'claude') return { ok: true, binding: null };
+    const account = profile.claude_account;
+    const priority = profile.claude_account_priority;
+    if (!account && !priority) return { ok: true, binding: null };
+    const result = await resolveClaudeAccountBinding({
+      home: this.store.root,
+      account,
+      priority: priority ? [...priority] : undefined,
+      cooldownSecondsOverride: profile.claude_cooldown_seconds,
+      source: 'profile',
+    });
+    return result.ok ? { ok: true, binding: result.value } : { ok: false, error: result.error };
   }
 
   async listWorkerProfiles(params: unknown): Promise<ToolResult> {
@@ -525,7 +619,13 @@ export class OrchestratorService {
       }));
     }
     const status = await getBackendStatus();
-    const inspected = inspectWorkerProfiles(parsedManifest.value, createWorkerCapabilityCatalog(status));
+    const accounts = await this.loadClaudeAccountNames();
+    if (!accounts.ok) {
+      return wrapErr(orchestratorError('INVALID_STATE', accounts.message));
+    }
+    const inspected = inspectWorkerProfiles(parsedManifest.value, createWorkerCapabilityCatalog(status), {
+      knownClaudeAccounts: accounts.value,
+    });
     const invalidTarget = inspected.invalid_profiles[input.profile];
     if (invalidTarget) {
       return wrapErr(orchestratorError('INVALID_INPUT', `Worker profile ${input.profile} would be invalid: ${invalidTarget.errors.join('; ')}`, {
@@ -571,7 +671,36 @@ export class OrchestratorService {
 
   private async loadLiveWorkerProfiles(profilesFile: string): ReturnType<typeof loadInspectedWorkerProfilesFromFile> {
     const status = await getBackendStatus();
-    return loadInspectedWorkerProfilesFromFile(profilesFile, createWorkerCapabilityCatalog(status));
+    const accounts = await this.loadClaudeAccountNames();
+    if (!accounts.ok) {
+      return { ok: false, errors: [accounts.message] };
+    }
+    return loadInspectedWorkerProfilesFromFile(profilesFile, createWorkerCapabilityCatalog(status), {
+      knownClaudeAccounts: accounts.value,
+    });
+  }
+
+  /**
+   * Read the claude account registry as a name set. Returns a structured error
+   * for schema-version mismatch so callers can distinguish "tampered/old
+   * registry" from "valid registry that happens to contain no matching name".
+   */
+  private async loadClaudeAccountNames(): Promise<
+    | { ok: true; value: ReadonlySet<string> }
+    | { ok: false; message: string }
+  > {
+    try {
+      const loaded = await loadAccountRegistry(accountRegistryPaths(this.store.root));
+      if (!loaded.ok) {
+        return {
+          ok: false,
+          message: `claude account registry version mismatch (observed: ${String(loaded.observed_version)}); resolve manually before resolving worker profiles`,
+        };
+      }
+      return { ok: true, value: new Set(loaded.file.accounts.map((entry) => entry.name)) };
+    } catch {
+      return { ok: true, value: new Set() };
+    }
   }
 
   // Walk parent_run_id back to the chain root and report whether the root
@@ -616,23 +745,13 @@ export class OrchestratorService {
     if (!isTerminalStatus(parent.meta.status)) {
       return wrapErr(orchestratorError('INVALID_STATE', 'Cannot send follow-up while parent run is still running'));
     }
-    const resumeSessionId = parent.meta.observed_session_id ?? parent.meta.session_id;
-    if (!resumeSessionId) {
-      return wrapErr(orchestratorError('INVALID_STATE', 'Cannot send follow-up because parent run has no backend session id'));
-    }
 
     const backendName = BackendSchema.parse(parent.meta.backend);
     const runtime = this.runtimes.get(backendName);
     if (!runtime) return wrapErr(orchestratorError('BACKEND_NOT_FOUND', `Backend not found: ${backendName}`));
     // OD2 = B (locked 2026-05-05): direct-mode-only override. send_followup
-    // must reject codex_network whenever the *originating* start_run was a
-    // profile-mode call, not just when the immediate parent was. metadata
-    // strips worker_profile on every follow-up step (intentionally — child
-    // runs are not themselves profile aliases), so checking only
-    // parent.meta.metadata would miss `start_run(profile) -> send_followup
-    // -> send_followup(codex_network)` chains. Walk back through
-    // parent_run_id until we hit the chain root and check the root's
-    // metadata.worker_profile flag.
+    // must reject codex_network whenever the originating start_run was a
+    // profile-mode call, not just when the immediate parent was.
     const chainOriginIsProfileMode = await this.chainOriginatedFromProfileMode(parent.meta);
     if (parsed.data.codex_network !== undefined && chainOriginIsProfileMode) {
       return wrapErr(orchestratorError('INVALID_INPUT', 'Profile-mode follow-ups cannot override codex_network; edit the profile or run a direct-mode follow-up instead'));
@@ -640,12 +759,34 @@ export class OrchestratorService {
     if (parsed.data.codex_network !== undefined && backendName !== 'codex') {
       return wrapErr(orchestratorError('INVALID_INPUT', `codex_network is only supported on the codex backend; got backend ${backendName}`));
     }
+    // Rotation eligibility check (D7 / D8). The decision carries a
+    // `releaseLock` callback when rotation succeeded — must be called after
+    // the new child's meta.json is durably written.
+    const rotationDecision = await this.evaluateRotation(backendName, parent.meta, parent.meta.run_id);
+    if (!rotationDecision.ok) return wrapErr(rotationDecision.error);
+
+    const isRotation = rotationDecision.rotation !== null;
+    const releaseLock = rotationDecision.releaseLock;
+    let resumeSessionId: string | null = null;
+    if (!isRotation) {
+      resumeSessionId = parent.meta.observed_session_id ?? parent.meta.session_id;
+      if (!resumeSessionId) {
+        return wrapErr(orchestratorError('INVALID_STATE', 'Cannot send follow-up because parent run has no backend session id'));
+      }
+    }
+
     const idleTimeout = this.resolveIdleTimeout(parsed.data.idle_timeout_seconds);
-    if (!idleTimeout.ok) return wrapErr(idleTimeout.error);
+    if (!idleTimeout.ok) {
+      releaseLock?.();
+      return wrapErr(idleTimeout.error);
+    }
     const executionTimeout = this.resolveExecutionTimeout(parsed.data.execution_timeout_seconds);
-    if (!executionTimeout.ok) return wrapErr(executionTimeout.error);
+    if (!executionTimeout.ok) {
+      releaseLock?.();
+      return wrapErr(executionTimeout.error);
+    }
     const model = parsed.data.model ?? parent.meta.model;
-    const metadata = stampOrchestratorIdInMetadata(
+    const baseMetadata = stampOrchestratorIdInMetadata(
       metadataForFollowup(parent.meta.metadata, parsed.data.metadata),
       context.policy_context,
     );
@@ -665,7 +806,10 @@ export class OrchestratorService {
         : parsed.data.model || backendName === 'cursor'
           ? validateInheritedModelSettingsForBackend(backendName, model, parent.meta.model_settings)
           : { ok: true as const, value: parent.meta.model_settings };
-    if (!settings.ok) return wrapErr(settings.error);
+    if (!settings.ok) {
+      releaseLock?.();
+      return wrapErr(settings.error);
+    }
     // B2 (issue #31): normalize legacy parent records before persisting the
     // child. A legacy codex parent has model_settings.codex_network === null;
     // sandboxArgs() defensively treats that as 'isolated', but the child run
@@ -676,25 +820,456 @@ export class OrchestratorService {
       ? { ...settings.value, codex_network: 'isolated' as CodexNetwork, mode: 'normal' as const }
       : settings.value;
 
-    const meta = await this.store.createRun({
-      backend: backendName,
-      cwd: parent.meta.cwd,
-      prompt: parsed.data.prompt,
-      parent_run_id: parent.meta.run_id,
-      session_id: resumeSessionId,
-      requested_session_id: resumeSessionId,
-      model,
-      model_source: modelSource,
-      model_settings: persistedSettings,
-      display: displayMetadata(parsed.data.metadata, parsed.data.prompt, parent.meta.display),
-      metadata,
-      idle_timeout_seconds: idleTimeout.value,
-      execution_timeout_seconds: executionTimeout.value,
-    });
-    await this.captureAndPersistGitSnapshot(meta.run_id, parent.meta.cwd);
+    let accountSpawn: AccountSpawnContribution | undefined;
+    let metadata: Record<string, unknown> = baseMetadata;
+    let terminalContext: Record<string, unknown> | null = null;
+    let rotationResumeSessionId: string | null = null;
+    let rotationResumed = false;
 
-    await this.startManagedRun(meta.run_id, runtime, parsed.data.prompt, parent.meta.cwd, idleTimeout.value, executionTimeout.value, persistedSettings, model, resumeSessionId);
+    if (isRotation && rotationDecision.rotation) {
+      const rotation = rotationDecision.rotation;
+      // Mark the prior account cooled-down. Best-effort; never fail the
+      // follow-up because of a registry-write hiccup.
+      if (rotation.priorAccount) {
+        try {
+          await markAccountCooledDown(accountRegistryPaths(this.store.root), {
+            name: rotation.priorAccount,
+            cooldownSeconds: rotation.cooldownSeconds,
+            errorCategory: rotation.parentErrorCategory,
+          });
+        } catch (error) {
+          this.logger(`failed to mark claude account ${rotation.priorAccount} cooled-down: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      accountSpawn = rotation.binding.accountSpawn;
+
+      // D-COR state diagram: api_env gate -> source-existence -> copy helper.
+      const rotationFields = {
+        parent_run_id: parent.meta.run_id,
+        prior_account: rotation.priorAccount,
+        new_account: rotation.binding.account.name,
+        parent_error_category: rotation.parentErrorCategory,
+      };
+      const observedSessionId = parent.meta.observed_session_id ?? parent.meta.session_id;
+      const accountModes = await this.readAccountModesForRotation(rotation.priorAccount, rotation.binding.account.name);
+
+      if (accountModes.priorMode === 'api_env' || accountModes.newMode === 'api_env') {
+        // D-COR-API: skip the copy entirely.
+        terminalContext = {
+          kind: 'fresh_chat_after_rotation',
+          copy_skip_reason: 'api_env_in_rotation_path',
+          details: { prior_mode: accountModes.priorMode, new_mode: accountModes.newMode },
+          ...rotationFields,
+        };
+      } else if (!observedSessionId) {
+        terminalContext = {
+          kind: 'fresh_chat_after_rotation',
+          copy_skip_reason: 'no_observed_session_id',
+          details: {},
+          ...rotationFields,
+        };
+      } else {
+        const accountsRoot = accountRegistryPaths(this.store.root).accountsRoot;
+        let outcome: CopyOutcome;
+        try {
+          outcome = await copySessionJsonlForRotation({
+            accountsRoot,
+            priorAccount: rotation.priorAccount ?? '',
+            newAccount: rotation.binding.account.name,
+            cwd: parent.meta.cwd,
+            sessionId: observedSessionId,
+          });
+        } catch (error) {
+          outcome = {
+            ok: false,
+            reason: 'copy_failed',
+            details: { error: error instanceof Error ? error.message : String(error) },
+          };
+        }
+        if (outcome.ok) {
+          rotationResumed = true;
+          rotationResumeSessionId = outcome.resumed_session_id;
+          terminalContext = {
+            kind: 'resumed_after_rotation',
+            resumed_session_id: outcome.resumed_session_id,
+            source_path: outcome.source_path,
+            target_path: outcome.target_path,
+            copied_bytes: outcome.copied_bytes,
+            copy_duration_ms: outcome.copy_duration_ms,
+            ...(outcome.collision_resolution ? { collision_resolution: outcome.collision_resolution } : {}),
+            ...rotationFields,
+          };
+        } else {
+          terminalContext = {
+            kind: 'fresh_chat_after_rotation',
+            copy_skip_reason: outcome.reason,
+            details: outcome.details,
+            ...rotationFields,
+          };
+        }
+      }
+
+      metadata = applyRotationMetadata(baseMetadata, rotation, parent.meta.run_id, rotationResumed);
+    } else {
+      // Non-rotation follow-up: re-bind the parent's account if any so the
+      // env-scrub policy still fires.
+      const accountBindingForFollowup = await this.resolveBindingForFollowup(backendName, parent.meta);
+      if (!accountBindingForFollowup.ok) return wrapErr(accountBindingForFollowup.error);
+      if (accountBindingForFollowup.binding) {
+        accountSpawn = accountBindingForFollowup.binding.accountSpawn;
+        metadata = { ...metadata, claude_account_used: accountBindingForFollowup.binding.account.name };
+      }
+    }
+
+    // For the rotated child run, set requested_session_id to the resumed
+    // session id ONLY when resume was chosen (D-COR-Resume / T-COR2 step 7).
+    const isResumeAfterRotation = isRotation && rotationResumed && rotationResumeSessionId !== null;
+    const childRequestedSessionId = isRotation
+      ? (isResumeAfterRotation ? rotationResumeSessionId : null)
+      : resumeSessionId;
+    const childSessionId = isRotation ? null : resumeSessionId;
+
+    let meta;
+    try {
+      meta = await this.store.createRun({
+        backend: backendName,
+        cwd: parent.meta.cwd,
+        prompt: parsed.data.prompt,
+        parent_run_id: parent.meta.run_id,
+        session_id: childSessionId,
+        requested_session_id: childRequestedSessionId,
+        model,
+        model_source: modelSource,
+        model_settings: persistedSettings,
+        display: displayMetadata(parsed.data.metadata, parsed.data.prompt, parent.meta.display),
+        metadata,
+        idle_timeout_seconds: idleTimeout.value,
+        execution_timeout_seconds: executionTimeout.value,
+      });
+      await this.captureAndPersistGitSnapshot(meta.run_id, parent.meta.cwd);
+
+      if (terminalContext) {
+        await this.store.updateMeta(meta.run_id, (current) => ({
+          ...current,
+          terminal_context: { ...(current.terminal_context ?? {}), ...terminalContext },
+        }));
+      }
+
+      // D-COR-Lock: at this point the new child's meta.json is durably
+      // written carrying claude_rotation_state.parent_run_id +
+      // claude_account_used. Update the in-memory tracker AND release the
+      // picker lock together. The disk write happens before the in-memory
+      // add, so a daemon-restart reconstruction always reads at least as
+      // up-to-date a state as the cache.
+      if (isRotation && rotationDecision.rotation) {
+        const tracker = this.rotationTrackers.get(parent.meta.run_id);
+        tracker?.claimed.add(rotationDecision.rotation.binding.account.name);
+      }
+    } finally {
+      releaseLock?.();
+    }
+
+    // Sub-task 5 / D-COR-Resume-Layer: when the spawn shape is resume,
+    // build the in-run interceptor with retryInvocation in start-shape.
+    let earlyEventInterceptor: EarlyEventInterceptor | undefined;
+    let effectiveTerminalContext = terminalContext;
+    let effectiveSessionIdForSpawn: string | undefined;
+    if (isRotation && isResumeAfterRotation && rotationResumeSessionId) {
+      const built = await runtime.buildStartInvocation({
+        runId: meta.run_id,
+        prompt: parsed.data.prompt,
+        cwd: parent.meta.cwd,
+        model,
+        modelSettings: persistedSettings,
+        accountSpawn,
+      });
+      if (built.ok) {
+        const downgradeContext = {
+          ...(terminalContext ?? {}),
+          kind: 'fresh_chat_after_rotation' as const,
+          resume_attempted: true,
+          resume_failure_reason: 'session_not_found' as const,
+        };
+        earlyEventInterceptor = {
+          thresholdEvents: SESSION_NOT_FOUND_INTERCEPT_THRESHOLD.events,
+          thresholdMs: SESSION_NOT_FOUND_INTERCEPT_THRESHOLD.ms,
+          classify: classifySessionNotFound,
+          retryInvocation: built.invocation,
+          // Reviewer fix #2b: write the post-retry terminal_context to meta
+          // synchronously, BEFORE the retry attempt's `markTerminal` runs.
+          // This closes the race where a reader between `markTerminal` and
+          // the post-completion re-merge would observe stale
+          // `kind: "resumed_after_rotation"`.
+          onRetryFired: async () => {
+            await this.store.updateMeta(meta.run_id, (current) => ({
+              ...current,
+              terminal_context: { ...(current.terminal_context ?? {}), ...downgradeContext },
+            }));
+          },
+        };
+        effectiveSessionIdForSpawn = rotationResumeSessionId;
+      } else {
+        // Failed to pre-bake the retry invocation; fall back to fresh-chat
+        // so the resume worker is not spawned without a retry plan. This
+        // is essentially impossible in practice (resume() would also fail
+        // if the binary is missing) but the contingency is cheap.
+        this.logger(`failed to build retry invocation for run ${meta.run_id}; falling back to fresh-chat: ${built.failure.message}`);
+        const fallback: Record<string, unknown> = {
+          kind: 'fresh_chat_after_rotation',
+          copy_skip_reason: 'retry_invocation_unavailable',
+          details: { ...built.failure.details, code: built.failure.code },
+          parent_run_id: parent.meta.run_id,
+          prior_account: rotationDecision.rotation?.priorAccount ?? null,
+          new_account: rotationDecision.rotation?.binding.account.name ?? null,
+          parent_error_category: rotationDecision.rotation?.parentErrorCategory ?? null,
+        };
+        effectiveTerminalContext = fallback;
+        await this.store.updateMeta(meta.run_id, (current) => ({
+          ...current,
+          requested_session_id: null,
+          terminal_context: { ...(current.terminal_context ?? {}), ...fallback },
+        }));
+      }
+    } else if (!isRotation && resumeSessionId) {
+      effectiveSessionIdForSpawn = resumeSessionId;
+    }
+
+    await this.startManagedRun(
+      meta.run_id,
+      runtime,
+      parsed.data.prompt,
+      parent.meta.cwd,
+      idleTimeout.value,
+      executionTimeout.value,
+      persistedSettings,
+      model,
+      effectiveSessionIdForSpawn,
+      accountSpawn,
+      effectiveTerminalContext,
+      earlyEventInterceptor,
+    );
     return wrapOk({ run_id: meta.run_id });
+  }
+
+  private async readAccountModesForRotation(
+    priorAccount: string | null,
+    newAccount: string,
+  ): Promise<{ priorMode: 'config_dir' | 'api_env' | null; newMode: 'config_dir' | 'api_env' | null }> {
+    try {
+      const loaded = await loadAccountRegistry(accountRegistryPaths(this.store.root));
+      if (!loaded.ok) return { priorMode: null, newMode: null };
+      const priorEntry = priorAccount ? loaded.file.accounts.find((entry) => entry.name === priorAccount) : null;
+      const newEntry = loaded.file.accounts.find((entry) => entry.name === newAccount);
+      return {
+        priorMode: priorEntry?.mode ?? null,
+        newMode: newEntry?.mode ?? null,
+      };
+    } catch {
+      return { priorMode: null, newMode: null };
+    }
+  }
+
+  private async evaluateRotation(
+    backendName: Backend,
+    parent: { metadata: Record<string, unknown>; latest_error: { category?: string } | null },
+    parentRunId: string,
+  ): Promise<RotationDecision> {
+    if (backendName !== 'claude') return { ok: true, rotation: null };
+    const rotationState = readRotationState(parent.metadata);
+    if (!rotationState) return { ok: true, rotation: null };
+    const errorCategory = parent.latest_error?.category;
+    if (errorCategory !== 'rate_limit' && errorCategory !== 'quota') {
+      return { ok: true, rotation: null };
+    }
+    const priorAccount = readAccountUsed(parent.metadata);
+
+    // D-COR-Lock: serialize the picker per parent. Chain a new promise onto
+    // the tracker's existing lock BEFORE awaiting any I/O so concurrent
+    // callers see the new lock immediately.
+    const tracker = this.getOrCreateRotationTracker(parentRunId);
+    const previousLock = tracker.lock;
+    let releaseLock!: () => void;
+    const newLock = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    tracker.lock = newLock;
+    await previousLock.catch(() => undefined);
+
+    try {
+      // Lazy reconstruction of `claimed` from on-disk run records. Hidden
+      // behind the lock so concurrent callers do not duplicate the scan.
+      if (!tracker.reconstructed) {
+        try {
+          tracker.claimed = await this.reconstructClaimedDestinations(parentRunId);
+        } catch {
+          tracker.claimed = new Set<string>();
+        }
+        tracker.reconstructed = true;
+      }
+
+      const paths = accountRegistryPaths(this.store.root);
+      const loaded = await loadAccountRegistry(paths);
+      if (!loaded.ok) {
+        releaseLock();
+        return {
+          ok: false,
+          error: orchestratorError('INVALID_STATE', `claude account registry version mismatch (observed: ${String(loaded.observed_version)})`),
+        };
+      }
+      const accounts = loaded.file.accounts;
+      const now = Date.now();
+
+      // Filter the priority list: skip prior account AND skip already-claimed
+      // destinations BEFORE handing the remaining list to the cooldown filter.
+      const filteredPriority = rotationState.accounts.filter((name) => {
+        if (priorAccount && name === priorAccount) return false;
+        if (tracker.claimed.has(name)) return false;
+        return true;
+      });
+      const { picked, cooldownSummary } = pickHealthyAccount(accounts, filteredPriority, now);
+      if (!picked) {
+        releaseLock();
+        // Distinguish "exhausted by claimed" from "all cooled-down".
+        const reason = tracker.claimed.size > 0 || (priorAccount && rotationState.accounts.includes(priorAccount))
+          ? 'priority_exhausted_for_parent'
+          : 'all_cooled_down';
+        if (reason === 'priority_exhausted_for_parent') {
+          return {
+            ok: false,
+            error: orchestratorError('INVALID_STATE', 'no claude account available for this parent rotation: every priority entry is either the prior account, already bound to a sibling rotation, or cooled-down', {
+              reason,
+              claimed: Array.from(tracker.claimed),
+              cooled_down: cooldownSummary,
+              priority: rotationState.accounts,
+              prior_account: priorAccount,
+            }),
+          };
+        }
+        return {
+          ok: false,
+          error: orchestratorError('INVALID_STATE', 'all claude accounts in the rotation priority list are currently cooled-down', {
+            cooldown_summary: cooldownSummary,
+          }),
+        };
+      }
+      const spawn = resolveAccountSpawn({ paths, account: picked });
+      if (!spawn.ok) {
+        releaseLock();
+        return {
+          ok: false,
+          error: orchestratorError('INVALID_STATE', `claude account ${picked.name} cannot be bound: ${spawn.reason}`, {
+            reason: spawn.reason,
+            ...spawn.details,
+          }),
+        };
+      }
+      return {
+        ok: true,
+        rotation: {
+          binding: {
+            account: picked,
+            accountSpawn: { env: spawn.env, envPolicy: spawn.envPolicy },
+          },
+          priorAccount,
+          parentErrorCategory: errorCategory,
+          rotationState,
+          cooldownSeconds: rotationState.cooldown_seconds,
+        },
+        releaseLock,
+      };
+    } catch (error) {
+      releaseLock();
+      throw error;
+    }
+  }
+
+  private getOrCreateRotationTracker(parentRunId: string): RotationTrackerEntry {
+    let tracker = this.rotationTrackers.get(parentRunId);
+    if (!tracker) {
+      tracker = {
+        lock: Promise.resolve(),
+        claimed: new Set<string>(),
+        reconstructed: false,
+      };
+      this.rotationTrackers.set(parentRunId, tracker);
+    }
+    return tracker;
+  }
+
+  /**
+   * D-COR-Lock reconstruction algorithm. Returns the set of accounts already
+   * bound to a rotated child run of the given parent, sourced from on-disk
+   * run metadata. A child counts as a rotation child if it carries the
+   * top-level `parent_run_id` AND a `claude_rotation_state` (the rotation
+   * state is what distinguishes a rotated child from a plain followup).
+   * Schema-invalid entries are silently skipped.
+   */
+  private async reconstructClaimedDestinations(parentRunId: string): Promise<Set<string>> {
+    const claimed = new Set<string>();
+    let runs;
+    try {
+      runs = await this.store.listRuns();
+    } catch {
+      return claimed;
+    }
+    for (const run of runs) {
+      if ((run as { parent_run_id?: unknown }).parent_run_id !== parentRunId) continue;
+      const metadata = (run as { metadata?: unknown }).metadata;
+      if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) continue;
+      const meta = metadata as Record<string, unknown>;
+      const rotationState = meta.claude_rotation_state;
+      if (!rotationState || typeof rotationState !== 'object' || Array.isArray(rotationState)) continue;
+      const accountUsed = meta.claude_account_used;
+      if (typeof accountUsed === 'string' && accountUsed.length > 0) {
+        claimed.add(accountUsed);
+      }
+    }
+    return claimed;
+  }
+
+  private async resolveBindingForFollowup(
+    backendName: Backend,
+    parentMeta: { metadata: Record<string, unknown> },
+  ): Promise<ClaudeBindingResolution> {
+    if (backendName !== 'claude') return { ok: true, binding: null };
+    const accountName = readAccountUsed(parentMeta.metadata);
+    if (!accountName) return { ok: true, binding: null };
+    const paths = accountRegistryPaths(this.store.root);
+    const loaded = await loadAccountRegistry(paths);
+    if (!loaded.ok) {
+      return {
+        ok: false,
+        error: orchestratorError('INVALID_STATE', `claude account registry version mismatch (observed: ${String(loaded.observed_version)})`),
+      };
+    }
+    const account = loaded.file.accounts.find((entry) => entry.name === accountName);
+    if (!account) {
+      return {
+        ok: false,
+        error: orchestratorError('INVALID_STATE', `claude account ${accountName} (used by parent run) is no longer registered`, {
+          account: accountName,
+        }),
+      };
+    }
+    const spawn = resolveAccountSpawn({ paths, account });
+    if (!spawn.ok) {
+      return {
+        ok: false,
+        error: orchestratorError('INVALID_STATE', `claude account ${accountName} cannot be bound: ${spawn.reason}`, {
+          reason: spawn.reason,
+          ...spawn.details,
+        }),
+      };
+    }
+    return {
+      ok: true,
+      binding: {
+        account,
+        accountSpawn: { env: spawn.env, envPolicy: spawn.envPolicy },
+        rotationState: null,
+        cooldownSeconds: 0,
+      },
+    };
   }
 
   async cancelRun(params: unknown): Promise<ToolResult> {
@@ -905,21 +1480,24 @@ export class OrchestratorService {
     modelSettings: RunModelSettings,
     model: string | null | undefined,
     sessionId: string | undefined,
+    accountSpawn?: AccountSpawnContribution,
+    rotationTerminalContext?: Record<string, unknown> | null,
+    earlyEventInterceptor?: EarlyEventInterceptor,
   ): Promise<void> {
     try {
       await access(cwd, constants.R_OK | constants.W_OK);
     } catch (error) {
-      await this.failPreSpawn(runId, runtime.name, 'cwd is not readable and writable', { error: error instanceof Error ? error.message : String(error) });
+      await this.failPreSpawn(runId, runtime.name, 'cwd is not readable and writable', { error: error instanceof Error ? error.message : String(error) }, rotationTerminalContext);
       return;
     }
 
-    const startInput = { runId, prompt, cwd, model, modelSettings };
+    const startInput = { runId, prompt, cwd, model, modelSettings, accountSpawn, earlyEventInterceptor };
     const result = sessionId
       ? await runtime.resume(sessionId, startInput)
       : await runtime.start(startInput);
     if (!result.ok) {
       const failure = result.failure;
-      await this.failPreSpawn(runId, runtime.name, failure.message, { ...failure.details, code: failure.code });
+      await this.failPreSpawn(runId, runtime.name, failure.message, { ...failure.details, code: failure.code }, rotationTerminalContext);
       return;
     }
 
@@ -953,9 +1531,73 @@ export class OrchestratorService {
         scheduleProcessExit();
       }
     }).catch(() => undefined);
+
+    // Preserve the rotation marker in `terminal_context` regardless of how
+    // the worker terminates (success, failure, cancellation). The
+    // `markTerminal` path overrides terminal_context when a terminal override
+    // supplies its own context, so we re-merge after completion. When the
+    // resume interceptor fired, additionally merge the
+    // `resume_attempted` / `resume_failure_reason` fields and downgrade
+    // `kind` to `fresh_chat_after_rotation` (D-COR-Resume-Layer Step 2).
+    if (rotationTerminalContext || earlyEventInterceptor) {
+      handle.completion.then(async () => {
+        try {
+          let interceptorFired = false;
+          if (earlyEventInterceptor) {
+            interceptorFired = await this.didSessionNotFoundInterceptorFire(runId);
+          }
+          await this.store.updateMeta(runId, (current) => {
+            const mergedBase = { ...(current.terminal_context ?? {}), ...(rotationTerminalContext ?? {}) };
+            const merged = interceptorFired
+              ? {
+                  ...mergedBase,
+                  kind: 'fresh_chat_after_rotation',
+                  resume_attempted: true,
+                  resume_failure_reason: 'session_not_found',
+                }
+              : mergedBase;
+            return { ...current, terminal_context: merged };
+          });
+        } catch (error) {
+          this.logger(`failed to persist rotation terminal_context for run ${runId}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }, () => undefined).catch(() => undefined);
+    }
+
+    // When a rotation-eligible account-bound run reaches terminal with a
+    // rate_limit / quota error, persist the cooldown to the registry so the
+    // next start_run with the same priority array skips this account — and
+    // so a daemon restart between terminal and any send_followup picks the
+    // cooldown up off disk. Single-account direct runs (no rotation_state)
+    // do not trigger a cooldown write (BI5).
+    if (runtime.name === 'claude') {
+      handle.completion.then(async (terminalMeta) => {
+        const errorCategory = terminalMeta.latest_error?.category;
+        if (errorCategory !== 'rate_limit' && errorCategory !== 'quota') return;
+        const rotationState = readRotationState(terminalMeta.metadata);
+        if (!rotationState) return;
+        const accountUsed = readAccountUsed(terminalMeta.metadata);
+        if (!accountUsed) return;
+        try {
+          await markAccountCooledDown(accountRegistryPaths(this.store.root), {
+            name: accountUsed,
+            cooldownSeconds: rotationState.cooldown_seconds,
+            errorCategory,
+          });
+        } catch (error) {
+          this.logger(`failed to mark claude account ${accountUsed} cooled-down at terminal: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }, () => undefined).catch(() => undefined);
+    }
   }
 
-  private async failPreSpawn(runId: string, backend: Backend, message: string, context: Record<string, unknown>): Promise<void> {
+  private async failPreSpawn(
+    runId: string,
+    backend: Backend,
+    message: string,
+    context: Record<string, unknown>,
+    rotationTerminalContext?: Record<string, unknown> | null,
+  ): Promise<void> {
     const latestError = preSpawnError(backend, message, context);
     const result: WorkerResult = {
       status: 'failed',
@@ -965,10 +1607,30 @@ export class OrchestratorService {
       artifacts: this.store.defaultArtifacts(runId),
       errors: [latestError],
     };
+    // Reviewer fix #2a: when the run is a rotation child, the rotation marker
+    // (`kind: "resumed_after_rotation"` or `kind: "fresh_chat_after_rotation"`
+    // plus parent_run_id / prior_account / new_account / parent_error_category)
+    // was pre-set on the run's meta in `sendFollowup`. `markTerminal` would
+    // overwrite `terminal_context` with the failure context unless we merge
+    // the rotation marker into it here. The failure error rides alongside the
+    // rotation marker, so supervisors still see both.
+    let mergedContext: Record<string, unknown> = { ...context };
+    if (rotationTerminalContext) {
+      mergedContext = { ...rotationTerminalContext, ...mergedContext };
+    } else {
+      try {
+        const current = await this.store.loadMeta(runId);
+        if (current.terminal_context && typeof current.terminal_context === 'object') {
+          mergedContext = { ...(current.terminal_context as Record<string, unknown>), ...mergedContext };
+        }
+      } catch {
+        // Best-effort — fall through to the non-merged context.
+      }
+    }
     await this.store.markTerminal(runId, 'failed', result.errors, result, {
       reason: 'pre_spawn_failed',
       latest_error: latestError,
-      context,
+      context: mergedContext,
     });
     // Pre-spawn failures must drive the aggregate-status engine immediately
     // so a fatal pre-spawn error transitions the orchestrator to `attention`
@@ -1094,6 +1756,27 @@ export class OrchestratorService {
     }
   }
 
+  /**
+   * Inspect the run's events stream for the lifecycle marker emitted by
+   * `ProcessManager` when the early-event interceptor fired and the resume
+   * worker was killed-and-replaced (D-COR-Resume-Layer Step 1).
+   */
+  private async didSessionNotFoundInterceptorFire(runId: string): Promise<boolean> {
+    try {
+      const result = await this.store.readEvents(runId, 0, 10_000);
+      for (const event of result.events) {
+        if (event.type !== 'lifecycle') continue;
+        const payload = event.payload as Record<string, unknown> | undefined;
+        if (payload && payload.subtype === 'session_not_found_in_run_retry') {
+          return true;
+        }
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
   private async orphanRunningRuns(): Promise<void> {
     for (const run of await this.store.listRuns()) {
       if (run.status !== 'running') continue;
@@ -1115,6 +1798,18 @@ export class OrchestratorService {
 
 function defaultLogger(message: string): void {
   process.stderr.write(`agent-orchestrator: ${message}\n`);
+}
+
+/**
+ * D-COR-Resume-Layer Step 2: classifier for the early-event interceptor.
+ * Returns `retry_with_start` only when the parsed event corresponds to a
+ * structured `session_not_found` from Claude (the only error category that
+ * is genuinely benign for the in-run retry — see plan D-COR5 / D-COR-Resume).
+ */
+function classifySessionNotFound(event: { type: string; payload: Record<string, unknown> }): EarlyEventInterceptorOutcome {
+  if (event.type !== 'error') return 'continue';
+  const err = errorFromEvent(event.payload, 'claude');
+  return err?.category === 'session_not_found' ? 'retry_with_start' : 'continue';
 }
 
 function invalidInput(message: string): ToolResult {
@@ -1390,6 +2085,9 @@ function workerProfileFromUpsert(input: UpsertWorkerProfile): WorkerProfile {
   if (input.codex_network !== undefined) profile.codex_network = input.codex_network;
   if (input.description !== undefined) profile.description = input.description;
   if (input.metadata !== undefined) profile.metadata = input.metadata;
+  if (input.claude_account !== undefined) profile.claude_account = input.claude_account;
+  if (input.claude_account_priority !== undefined) profile.claude_account_priority = [...input.claude_account_priority];
+  if (input.claude_cooldown_seconds !== undefined) profile.claude_cooldown_seconds = input.claude_cooldown_seconds;
   return profile;
 }
 
@@ -1404,6 +2102,9 @@ function formatValidProfile(profile: ValidatedWorkerProfile): Record<string, unk
     codex_network: profile.codex_network ?? null,
     description: profile.description ?? null,
     metadata: profile.metadata ?? {},
+    claude_account: profile.claude_account ?? null,
+    claude_account_priority: profile.claude_account_priority ?? null,
+    claude_cooldown_seconds: profile.claude_cooldown_seconds ?? null,
     capability: {
       backend: profile.capability.backend,
       display_name: profile.capability.display_name,
@@ -1503,6 +2204,63 @@ function metadataForFollowup(
 ): Record<string, unknown> {
   const { worker_profile: _workerProfile, ...inheritedMetadata } = parentMetadata;
   return { ...inheritedMetadata, ...childMetadata };
+}
+
+interface ClaudeBindingValue {
+  account: { name: string };
+  accountSpawn: AccountSpawnContribution;
+  rotationState: ClaudeRotationState | null;
+  cooldownSeconds: number;
+}
+
+type ClaudeBindingResolution =
+  | { ok: true; binding: ClaudeBindingValue | null }
+  | { ok: false; error: OrchestratorError };
+
+interface RotationContext {
+  binding: { account: { name: string }; accountSpawn: AccountSpawnContribution };
+  priorAccount: string | null;
+  parentErrorCategory: string;
+  rotationState: ClaudeRotationState;
+  cooldownSeconds: number;
+}
+
+type RotationDecision =
+  | { ok: true; rotation: RotationContext | null; releaseLock?: () => void }
+  | { ok: false; error: OrchestratorError };
+
+function applyClaudeBindingToMetadata(
+  metadata: Record<string, unknown>,
+  binding: ClaudeBindingValue | null,
+): Record<string, unknown> {
+  if (!binding) return metadata;
+  const out: Record<string, unknown> = { ...metadata, claude_account_used: binding.account.name };
+  if (binding.rotationState) out.claude_rotation_state = binding.rotationState;
+  return out;
+}
+
+function applyRotationMetadata(
+  base: Record<string, unknown>,
+  rotation: RotationContext,
+  parentRunId: string,
+  resumed: boolean,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...base };
+  out.claude_account_used = rotation.binding.account.name;
+  out.claude_rotation_state = rotation.rotationState;
+  const history = readRotationHistory(base);
+  const entry: ClaudeRotationHistoryEntry = {
+    parent_run_id: parentRunId,
+    prior_account: rotation.priorAccount ?? '',
+    new_account: rotation.binding.account.name,
+    parent_error_category: rotation.parentErrorCategory,
+    rotated_at: new Date().toISOString(),
+    resumed,
+  };
+  const result = appendRotationEntry(history, entry);
+  void ROTATION_HISTORY_CAP; // keep import for documentation tests
+  out.claude_rotation_history = result.history;
+  return out;
 }
 
 function orchestratorIdFromMeta(metadata: Record<string, unknown> | undefined): string | null {

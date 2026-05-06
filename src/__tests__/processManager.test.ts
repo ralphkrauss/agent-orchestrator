@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ClaudeBackend } from '../backend/claude.js';
 import { CodexBackend } from '../backend/codex.js';
-import { prepareWorkerSpawn, ProcessManager, terminateProcessTree } from '../processManager.js';
+import { applyEnvPolicy, prepareWorkerSpawn, ProcessManager, terminateProcessTree } from '../processManager.js';
 import { RunStore } from '../runStore.js';
 import type { RunActivitySource, RunMeta, TerminalRunStatus, WorkerResult } from '../contract.js';
 
@@ -633,3 +633,74 @@ process.stdin.on('end', () => {
     );
   });
 });
+
+describe("applyEnvPolicy", () => {
+  it("returns a shallow copy when the policy is undefined or default", () => {
+    const env = { HOME: "/home/x", ANTHROPIC_API_KEY: "secret", PATH: "/usr/bin" };
+    const noPolicy = applyEnvPolicy(env, undefined);
+    assert.deepStrictEqual(noPolicy, env);
+    const defaultPolicy = applyEnvPolicy(env, "default");
+    assert.deepStrictEqual(defaultPolicy, env);
+  });
+
+  it("strips explicit deny-list keys but keeps unrelated keys", () => {
+    const env = {
+      HOME: "/home/x",
+      PATH: "/usr/bin",
+      EDITOR: "vim",
+      LANG: "en_US.UTF-8",
+      GH_TOKEN: "gh-allowed",
+      ANTHROPIC_API_KEY: "remove me",
+      ANTHROPIC_AUTH_TOKEN: "remove me",
+      ANTHROPIC_BASE_URL: "remove me",
+      ANTHROPIC_MODEL: "remove me",
+      CLAUDE_CONFIG_DIR: "remove me",
+      CLAUDECODE: "remove me",
+    };
+    const result = applyEnvPolicy(env, {
+      scrub: [
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_MODEL",
+        "CLAUDE_CONFIG_DIR",
+        "CLAUDECODE",
+      ],
+    });
+    assert.equal(result.HOME, "/home/x");
+    assert.equal(result.PATH, "/usr/bin");
+    assert.equal(result.EDITOR, "vim");
+    assert.equal(result.LANG, "en_US.UTF-8");
+    assert.equal(result.GH_TOKEN, "gh-allowed");
+    assert.equal(result.ANTHROPIC_API_KEY, undefined);
+    assert.equal(result.ANTHROPIC_AUTH_TOKEN, undefined);
+    assert.equal(result.ANTHROPIC_BASE_URL, undefined);
+    assert.equal(result.ANTHROPIC_MODEL, undefined);
+    assert.equal(result.CLAUDE_CONFIG_DIR, undefined);
+    assert.equal(result.CLAUDECODE, undefined);
+  });
+
+  it("strips glob-matched keys (ANTHROPIC_*, *_API_KEY, *_AUTH_TOKEN)", () => {
+    const env = {
+      HOME: "/home/x",
+      PATH: "/usr/bin",
+      ANTHROPIC_FOO: "remove",
+      ANTHROPIC_BAR: "remove",
+      OPENAI_API_KEY: "remove",
+      VENDOR_AUTH_TOKEN: "remove",
+      CURSOR_API_KEY: "remove",
+      INERT_VAR: "keep",
+    };
+    const result = applyEnvPolicy(env, {
+      scrub: [],
+      scrubGlobs: ["ANTHROPIC_*", "*_API_KEY", "*_AUTH_TOKEN"],
+    });
+    assert.equal(result.HOME, "/home/x");
+    assert.equal(result.INERT_VAR, "keep");
+    assert.equal(result.ANTHROPIC_FOO, undefined);
+    assert.equal(result.OPENAI_API_KEY, undefined);
+    assert.equal(result.VENDOR_AUTH_TOKEN, undefined);
+    assert.equal(result.CURSOR_API_KEY, undefined);
+  });
+});
+

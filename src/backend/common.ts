@@ -162,6 +162,10 @@ export function errorFromEvent(record: Record<string, unknown>, backend: Backend
   if (type) context.type = type;
   const code = getString(nestedError?.code) ?? getString(record.code);
   if (code) context.code = code;
+  // T-COR-Classifier: preserve `subtype` so structured branches can fire on
+  // categories like `session_not_found` that rely on per-event subtype.
+  const subtype = getString(nestedError?.subtype) ?? getString(record.subtype);
+  if (subtype) context.subtype = subtype;
   return classifyBackendError({
     backend,
     source: 'backend_event',
@@ -176,7 +180,7 @@ export function classifyBackendError(input: {
   message: string;
   context?: Record<string, unknown>;
 }): RunError {
-  const category = classifyErrorCategory(input.message, input.context);
+  const category = classifyErrorCategory(input.message, input.context, input.source);
   return {
     message: input.message,
     category,
@@ -188,13 +192,23 @@ export function classifyBackendError(input: {
   };
 }
 
-function classifyErrorCategory(message: string, context: Record<string, unknown> | undefined): RunErrorCategory {
+function classifyErrorCategory(
+  message: string,
+  context: Record<string, unknown> | undefined,
+  source: RunErrorSource,
+): RunErrorCategory {
   const normalizedMessage = message.toLowerCase();
   const code = stringContext(context, 'code').toLowerCase();
   const type = stringContext(context, 'type').toLowerCase();
   const status = stringContext(context, 'status').toLowerCase();
-  const structured = [code, type, status].join(' ');
+  const subtype = stringContext(context, 'subtype').toLowerCase();
+  const structured = [code, type, status, subtype].join(' ');
   const haystack = [normalizedMessage, structured].join(' ');
+
+  // T-COR-Classifier: structured-first check for `session_not_found` so
+  // arbitrary user-prompt content cannot misclassify. Fires only on exact
+  // match against `code` / `subtype`.
+  if (subtype === 'session_not_found' || code === 'session_not_found') return 'session_not_found';
 
   if (/\b(auth|authentication|unauthorized|unauthorised|credential|api key|login)\b/.test(haystack)) return 'auth';
   if (/\b(rate.?limit|too many requests|429)\b/.test(haystack)) return 'rate_limit';
@@ -203,6 +217,12 @@ function classifyErrorCategory(message: string, context: Record<string, unknown>
   if (/\b(permission denied|access denied|not allowed|policy|forbidden)\b/.test(haystack)) return 'permission';
   if (isProtocolError(normalizedMessage, structured, status)) return 'protocol';
   if (isBackendUnavailableError(normalizedMessage, structured, status)) return 'backend_unavailable';
+  // T-COR-Classifier: stderr-only fallback regex for `session_not_found`.
+  // Restricted to `source === 'stderr'` so user-supplied prompt text (which
+  // flows through backend_event payloads) cannot trigger the category.
+  if (source === 'stderr' && (/session\s+not\s+found/i.test(message) || /no\s+(?:such\s+)?session/i.test(message))) {
+    return 'session_not_found';
+  }
   return 'unknown';
 }
 

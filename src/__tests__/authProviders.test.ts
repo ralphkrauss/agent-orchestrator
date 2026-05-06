@@ -3,12 +3,12 @@ import assert from 'node:assert/strict';
 import { AUTH_PROVIDERS, getProvider } from '../auth/providers.js';
 
 describe('auth providers registry', () => {
-  it('exposes cursor as wired and claude/codex as reserved', () => {
+  it('exposes cursor and claude as wired and codex as reserved', () => {
     const cursor = getProvider('cursor');
     const claude = getProvider('claude');
     const codex = getProvider('codex');
     assert.equal(cursor?.status, 'wired');
-    assert.equal(claude?.status, 'reserved');
+    assert.equal(claude?.status, 'wired');
     assert.equal(codex?.status, 'reserved');
     assert.deepStrictEqual(AUTH_PROVIDERS.map((provider) => provider.id), ['cursor', 'claude', 'codex']);
   });

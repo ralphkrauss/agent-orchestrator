@@ -3,9 +3,9 @@ import { createWriteStream } from 'node:fs';
 import { realpath } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { createInterface } from 'node:readline';
-import type { RunError, RunLatestError, RunStatus, RunTerminalReason, RunTimeoutReason } from './contract.js';
+import type { RunError, RunLatestError, RunStatus, RunTerminalReason, RunTimeoutReason, WorkerEvent } from './contract.js';
 import { WorkerResultSchema, type RunMeta, type WorkerResult } from './contract.js';
-import type { BackendResultEvent, WorkerBackend, WorkerInvocation } from './backend/WorkerBackend.js';
+import type { BackendResultEvent, EarlyEventInterceptor, WorkerBackend, WorkerInvocation, WorkerInvocationEnvPolicy } from './backend/WorkerBackend.js';
 import { classifyBackendError } from './backend/common.js';
 import { RunStore } from './runStore.js';
 import { changedFilesSinceSnapshot } from './gitSnapshot.js';
@@ -33,6 +33,27 @@ export type TaskkillSpawn = (command: string, args: string[], options: { stdio: 
 export interface PreparedWorkerSpawn {
   command: string;
   args: string[];
+}
+
+interface AttemptHandle {
+  child: ChildProcessWithoutNullStreams;
+  outcome: Promise<AttemptOutcome>;
+}
+
+type AttemptOutcome =
+  | { kind: 'finalize'; meta: RunMeta }
+  | {
+      kind: 'retry';
+      retryInvocation: WorkerInvocation;
+      killedPid: number | null;
+      durationMs: number;
+      observedEvents: number;
+      onRetryFired?: () => Promise<void>;
+    };
+
+interface SharedManagedHandle {
+  activeCancel: ((status: Extract<RunStatus, 'failed' | 'cancelled' | 'timed_out'>, terminal?: RunTerminalOverride) => void) | null;
+  activeLastActivityMs: () => number;
 }
 
 /**
@@ -72,7 +93,61 @@ export class ProcessManager {
   }
 
   async start(runId: string, backend: WorkerBackend, invocation: WorkerInvocation): Promise<ManagedRun> {
-    const parentEnv = stripTerminalMultiplexerEnv(process.env);
+    const sharedHandle: SharedManagedHandle = {
+      activeCancel: null,
+      activeLastActivityMs: () => Date.now(),
+    };
+    const cancel = (status: Extract<RunStatus, 'failed' | 'cancelled' | 'timed_out'>, terminal?: RunTerminalOverride): void => {
+      sharedHandle.activeCancel?.(status, terminal);
+    };
+    const lastActivityMs = (): number => sharedHandle.activeLastActivityMs();
+
+    const first = await this.executeAttempt(runId, backend, invocation, sharedHandle);
+    const completion = (async (): Promise<RunMeta> => {
+      let outcome = await first.outcome;
+      while (outcome.kind === 'retry') {
+        await this.store.appendEvent(runId, {
+          type: 'lifecycle',
+          payload: {
+            subtype: 'session_not_found_in_run_retry',
+            killed_pid: outcome.killedPid,
+            resume_attempt_duration_ms: outcome.durationMs,
+            observed_events: outcome.observedEvents,
+          },
+        });
+        // Reviewer fix #2b: invoke the caller-supplied retry hook AFTER the
+        // lifecycle marker is appended and BEFORE the retry attempt is
+        // spawned, so the run's terminal_context is downgraded to the
+        // post-retry shape synchronously — closing the window where a
+        // reader could observe `kind: "resumed_after_rotation"` after the
+        // actual outcome will be `fresh_chat_after_rotation`.
+        if (outcome.onRetryFired) {
+          try {
+            await outcome.onRetryFired();
+          } catch {
+            // Best-effort — the rotation context fallback in startManagedRun
+            // will still re-merge after completion.
+          }
+        }
+        // Single-shot enforcement: never re-attach an interceptor to the retry.
+        const retryInvocation: WorkerInvocation = { ...outcome.retryInvocation, earlyEventInterceptor: undefined };
+        const next = await this.executeAttempt(runId, backend, retryInvocation, sharedHandle);
+        outcome = await next.outcome;
+      }
+      return outcome.meta;
+    })();
+
+    return { runId, child: first.child, completion, cancel, lastActivityMs };
+  }
+
+  private async executeAttempt(
+    runId: string,
+    backend: WorkerBackend,
+    invocation: WorkerInvocation,
+    sharedHandle: SharedManagedHandle,
+  ): Promise<AttemptHandle> {
+    const inherited = applyEnvPolicy(process.env, invocation.envPolicy);
+    const parentEnv = stripTerminalMultiplexerEnv(inherited);
     const parentOrchestratorId = await this.parentOrchestratorIdForRun(runId);
     const env: NodeJS.ProcessEnv = {
       ...parentEnv,
@@ -107,6 +182,18 @@ export class ProcessManager {
       lastPersistedActivityMs = lastActivityMs;
       trackPersistence(this.store.recordActivity(runId, source, now));
     };
+
+    // D-COR-Resume-Layer: per-attempt interceptor state. When `interceptor` is
+    // undefined, the interceptor branch is fully bypassed and behaviour matches
+    // the pre-existing implementation byte-for-byte.
+    const interceptor: EarlyEventInterceptor | undefined = invocation.earlyEventInterceptor;
+    const spawnedAt = Date.now();
+    let eventsObserved = 0;
+    let interceptorDisengaged = !interceptor;
+    let cancelledByInterceptor = false;
+    let retryDetails: { retryInvocation: WorkerInvocation; killedPid: number | null; durationMs: number; observedEvents: number; onRetryFired?: () => Promise<void> } | null = null;
+    const eventBuffer: Omit<WorkerEvent, 'seq' | 'ts'>[] = [];
+
     const child = spawn(preparedSpawn.command, preparedSpawn.args, {
       cwd: invocation.cwd,
       env,
@@ -114,6 +201,8 @@ export class ProcessManager {
       detached: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
+
+    sharedHandle.activeLastActivityMs = () => lastActivityMs;
 
     const workerPid = child.pid ?? null;
     const workerPgid = process.platform === 'win32' ? null : workerPid;
@@ -130,10 +219,28 @@ export class ProcessManager {
         args: invocation.args,
       },
     }));
-    await this.store.appendEvent(runId, {
+
+    /**
+     * D-COR-Resume-Layer: while the interceptor is engaged, every event that
+     * would normally be appended to `events.jsonl` is buffered. On
+     * `retry_with_start` the buffer is dropped (so the cancelled attempt's
+     * stream never lands on disk). Once the interceptor disengages, the
+     * buffer is flushed in arrival order and subsequent events are appended
+     * directly. When `interceptor` is undefined this helper short-circuits to
+     * the direct `store.appendEvent` call — identical to the original code path.
+     */
+    const appendEventBuffered = (event: Omit<WorkerEvent, 'seq' | 'ts'>): Promise<unknown> => {
+      if (interceptor && !interceptorDisengaged && !cancelledByInterceptor) {
+        eventBuffer.push(event);
+        return Promise.resolve();
+      }
+      return this.store.appendEvent(runId, event);
+    };
+
+    trackPersistence(appendEventBuffered({
       type: 'lifecycle',
       payload: { status: 'started', pid: workerPid, pgid: workerPgid },
-    });
+    }));
     lastPersistedActivityMs = lastActivityMs;
 
     child.stdin.end(invocation.stdinPayload);
@@ -156,6 +263,20 @@ export class ProcessManager {
     let terminalOverrideDetails: RunTerminalOverride | undefined;
     let killTimer: NodeJS.Timeout | null = null;
     const parseTasks: Promise<void>[] = [];
+
+    const cancel = (status: Extract<RunStatus, 'failed' | 'cancelled' | 'timed_out'>, terminal?: RunTerminalOverride): void => {
+      if (terminalOverride) return;
+      terminalOverride = status;
+      terminalOverrideDetails = terminal;
+      const pid = child.pid;
+      if (pid) {
+        terminateProcessTree(pid, false);
+        killTimer = setTimeout(() => {
+          terminateProcessTree(pid, true);
+        }, 5_000);
+      }
+    };
+    sharedHandle.activeCancel = cancel;
 
     const recordObservedError = (error: RunError): void => {
       observedErrors.push(error);
@@ -180,11 +301,65 @@ export class ProcessManager {
       }
     };
 
+    /**
+     * D-COR-Resume-Layer: classify each parsed event before any side effects.
+     * Returns `true` when the caller should abort further processing of the
+     * current line (i.e. the interceptor triggered a retry and the worker has
+     * been killed). This is invoked for every parsed event in stream order so
+     * a single line carrying multiple events still triggers on the first
+     * `retry_with_start` outcome.
+     */
+    const interceptorAborted = (events: Omit<WorkerEvent, 'seq' | 'ts'>[]): boolean => {
+      if (!interceptor || interceptorDisengaged || cancelledByInterceptor) return false;
+      for (const event of events) {
+        const within = eventsObserved < interceptor.thresholdEvents
+          && (Date.now() - spawnedAt) < interceptor.thresholdMs;
+        if (!within) {
+          // Disengage and flush the buffer before the side-effects in this
+          // line execute, so buffered events land on disk in arrival order.
+          for (const buffered of eventBuffer) {
+            trackPersistence(this.store.appendEvent(runId, buffered));
+          }
+          eventBuffer.length = 0;
+          interceptorDisengaged = true;
+          return false;
+        }
+        const outcome = interceptor.classify({ type: event.type, payload: event.payload as Record<string, unknown> });
+        eventsObserved += 1;
+        if (outcome === 'retry_with_start') {
+          cancelledByInterceptor = true;
+          retryDetails = {
+            retryInvocation: interceptor.retryInvocation,
+            killedPid: child.pid ?? null,
+            durationMs: Date.now() - spawnedAt,
+            observedEvents: eventsObserved,
+            onRetryFired: interceptor.onRetryFired?.bind(interceptor),
+          };
+          // Drop the cancelled attempt's buffered events; they must not land
+          // in events.jsonl.
+          eventBuffer.length = 0;
+          if (child.pid) {
+            const pid = child.pid;
+            terminateProcessTree(pid, false);
+            // Reviewer note: arm a forced-kill fallback so a worker that
+            // ignores SIGTERM cannot hang the retry. Mirrors the cancel
+            // path's 5s SIGKILL escalation.
+            killTimer = setTimeout(() => {
+              terminateProcessTree(pid, true);
+            }, 5_000);
+          }
+          return true;
+        }
+      }
+      return false;
+    };
+
     const stdoutLines = createInterface({ input: child.stdout });
     const stdoutClosed = new Promise<void>((resolve) => {
       stdoutLines.on('close', resolve);
     });
     stdoutLines.on('line', (line) => {
+      if (cancelledByInterceptor) return;
       parseTasks.push(this.handleJsonLine(runId, backend, line, {
         setSessionId: (id) => { sessionId = id; },
         setResultEvent: (event) => { resultEvent = event; },
@@ -192,7 +367,11 @@ export class ProcessManager {
         addFile: (path) => filesFromEvents.add(path),
         addCommand: (command) => commandsRun.push(command),
         addError: (error) => recordObservedError(error),
-      }, () => recordActivity('backend_event')));
+      }, () => recordActivity('backend_event'), {
+        interceptorAborted,
+        appendEvent: appendEventBuffered,
+        isCancelledByInterceptor: () => cancelledByInterceptor,
+      }));
     });
 
     const stderrLines = createInterface({ input: child.stderr, crlfDelay: Infinity });
@@ -203,6 +382,7 @@ export class ProcessManager {
       recordActivity('stderr');
     });
     stderrLines.on('line', (line) => {
+      if (cancelledByInterceptor) return;
       const text = line.trim();
       if (!text) return;
       const error = classifyBackendError({
@@ -213,25 +393,16 @@ export class ProcessManager {
       });
       if (!shouldSurfaceStderrError(text, error)) return;
       recordObservedError(error);
-      trackPersistence(this.store.appendEvent(runId, { type: 'error', payload: { stream: 'stderr', text, error } }));
+      trackPersistence(appendEventBuffered({ type: 'error', payload: { stream: 'stderr', text, error } }));
     });
 
-    function cancel(status: Extract<RunStatus, 'failed' | 'cancelled' | 'timed_out'>, terminal?: RunTerminalOverride): void {
-      if (terminalOverride) return;
-      terminalOverride = status;
-      terminalOverrideDetails = terminal;
-      const pid = child.pid;
-      if (pid) {
-        terminateProcessTree(pid, false);
-        killTimer = setTimeout(() => {
-          terminateProcessTree(pid, true);
-        }, 5_000);
-      }
-    }
-
-    const completion = new Promise<RunMeta>((resolve, reject) => {
+    const outcome = new Promise<AttemptOutcome>((resolve, reject) => {
       child.on('close', (exitCode, signal) => {
-        recordActivity('terminal', { force: true });
+        // Skip the 'terminal' activity write on the cancelled attempt so the
+        // retry attempt's first activity isn't overwritten by a stale stamp.
+        if (!(cancelledByInterceptor && retryDetails)) {
+          recordActivity('terminal', { force: true });
+        }
         if (killTimer) clearTimeout(killTimer);
         stdoutStream.end();
         stderrStream.end();
@@ -240,9 +411,32 @@ export class ProcessManager {
           await stderrClosed;
           await Promise.allSettled(parseTasks);
           await Promise.allSettled(persistenceTasks);
+          if (cancelledByInterceptor && retryDetails) {
+            return { kind: 'retry' as const, ...retryDetails };
+          }
+          // Reviewer fix: when the interceptor was engaged but the worker
+          // closed cleanly within the threshold (i.e. no `retry_with_start`
+          // and no threshold expiry), the buffer was never flushed by the
+          // disengage path. Flush it here before finalization so the
+          // run's `events.jsonl` carries the started + assistant + result
+          // events the worker actually emitted.
+          if (interceptor && !interceptorDisengaged && eventBuffer.length > 0) {
+            interceptorDisengaged = true;
+            for (const buffered of eventBuffer) {
+              try {
+                await this.store.appendEvent(runId, buffered);
+              } catch (error) {
+                if (!persistenceFailed) {
+                  persistenceFailed = true;
+                  persistenceError = error;
+                }
+              }
+            }
+            eventBuffer.length = 0;
+          }
           try {
             if (persistenceFailed) throw persistenceError;
-            return await this.finalizeRun(
+            const meta = await this.finalizeRun(
               runId,
               backend,
               exitCode,
@@ -256,14 +450,16 @@ export class ProcessManager {
               terminalOverride,
               terminalOverrideDetails,
             );
+            return { kind: 'finalize' as const, meta };
           } catch (error) {
-            return this.failFinalization(runId, error, Array.from(filesFromEvents), commandsRun);
+            const meta = await this.failFinalization(runId, error, Array.from(filesFromEvents), commandsRun);
+            return { kind: 'finalize' as const, meta };
           }
         })().then(resolve, reject);
       });
     });
 
-    return { runId, child, completion, cancel, lastActivityMs: () => lastActivityMs };
+    return { child, outcome };
   }
 
   private async handleJsonLine(
@@ -279,6 +475,15 @@ export class ProcessManager {
       addError(error: RunError): void;
     },
     markActivity: () => void,
+    interceptorHooks?: {
+      /** Returns true when the interceptor triggered a retry and processing
+       *  of the current line must abort before any side-effects fire. */
+      interceptorAborted(events: Omit<WorkerEvent, 'seq' | 'ts'>[]): boolean;
+      /** Buffered or direct append; semantics chosen by the caller. */
+      appendEvent(event: Omit<WorkerEvent, 'seq' | 'ts'>): Promise<unknown>;
+      /** Predicate to short-circuit further side-effects after the line abort. */
+      isCancelledByInterceptor(): boolean;
+    },
   ): Promise<void> {
     const trimmed = line.trim();
     if (!trimmed) return;
@@ -290,6 +495,13 @@ export class ProcessManager {
     }
 
     const parsed = backend.parseEvent(raw);
+
+    // D-COR-Resume-Layer: run the interceptor BEFORE any side-effects so a
+    // `retry_with_start` outcome can suppress meta updates, sink writes, and
+    // appendEvent for the cancelled attempt. When no interceptor hook is
+    // wired (every existing caller / non-rotation run), this is a no-op.
+    if (interceptorHooks?.interceptorAborted(parsed.events)) return;
+
     // Capture the latest assistant_message text in stream order *before* any
     // awaited persistence work below. Each handleJsonLine() call runs
     // concurrently, so awaiting first would let an older line overwrite the
@@ -320,12 +532,15 @@ export class ProcessManager {
         model_source: !meta.model && observedModel && meta.model_source === 'legacy_unknown' ? 'backend_default' : meta.model_source,
       }));
     }
+    if (interceptorHooks?.isCancelledByInterceptor()) return;
     if (parsed.resultEvent) sinks.setResultEvent(parsed.resultEvent);
     for (const file of parsed.filesChanged) sinks.addFile(file);
     for (const command of parsed.commandsRun) sinks.addCommand(command);
     for (const error of parsed.errors) sinks.addError(error);
+    const append = interceptorHooks?.appendEvent ?? ((event: Omit<WorkerEvent, 'seq' | 'ts'>) => this.store.appendEvent(runId, event));
     for (const event of parsed.events) {
-      await this.store.appendEvent(runId, event);
+      if (interceptorHooks?.isCancelledByInterceptor()) return;
+      await append(event);
     }
   }
 
@@ -379,10 +594,7 @@ export class ProcessManager {
       ? [terminalOverrideError(backend, terminalOverride, terminalOverrideDetails)]
       : exitCode === 0 && resultEvent
         ? []
-        : [
-            ...(exitCode === 0 ? [] : [processExitError(backend, exitCode, signal)]),
-            ...dedupeErrors(observedErrors),
-          ];
+        : buildTerminalErrorList(backend, exitCode, signal, observedErrors);
 
     let finalized = backend.finalizeResult({
       runStatusOverride: terminalOverride,
@@ -467,6 +679,24 @@ function terminalOverrideError(
     fatal: status !== 'cancelled',
     context: details?.context,
   };
+}
+
+/**
+ * T-COR-Classifier: when a non-zero exit happened but the stream produced a
+ * structured (non-`process_exit`) classified error, drop the synthetic
+ * `process_exit` error so the terminal `latest_error.category` reflects the
+ * structured cause (e.g. `session_not_found`) instead of `process_exit`.
+ */
+function buildTerminalErrorList(
+  backend: WorkerBackend,
+  exitCode: number | null,
+  signal: NodeJS.Signals | null,
+  observedErrors: RunError[],
+): RunError[] {
+  const deduped = dedupeErrors(observedErrors);
+  const hasStructured = deduped.some((error) => error.category !== 'process_exit');
+  if (exitCode === 0 || hasStructured) return deduped;
+  return [processExitError(backend, exitCode, signal), ...deduped];
 }
 
 function processExitError(backend: WorkerBackend, exitCode: number | null, signal: NodeJS.Signals | null): RunError {
@@ -657,6 +887,34 @@ function dedupeErrors(errors: RunError[]): RunError[] {
     unique.push(error);
   }
   return unique;
+}
+
+/**
+ * Strip env keys per `WorkerInvocation.envPolicy` (D12). The default policy
+ * preserves today's behaviour (no scrub) so non-`claude` and unbound-`claude`
+ * runs are byte-identical to before this change.
+ *
+ * Globs use `*` (zero-or-more characters) only and are anchored at both ends.
+ */
+export function applyEnvPolicy(
+  env: NodeJS.ProcessEnv,
+  policy: WorkerInvocationEnvPolicy | undefined,
+): NodeJS.ProcessEnv {
+  if (!policy || policy === 'default') return { ...env };
+  const explicit = new Set(policy.scrub);
+  const globPatterns = (policy.scrubGlobs ?? []).map((glob) => globToRegExp(glob));
+  const next: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (explicit.has(key)) continue;
+    if (globPatterns.some((pattern) => pattern.test(key))) continue;
+    next[key] = value;
+  }
+  return next;
+}
+
+function globToRegExp(glob: string): RegExp {
+  const escaped = glob.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+  return new RegExp(`^${escaped}$`);
 }
 
 export function prepareWorkerSpawn(

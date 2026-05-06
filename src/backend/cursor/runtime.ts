@@ -19,6 +19,7 @@ import { changedFilesSinceSnapshot } from '../../gitSnapshot.js';
 import { normalizeCursorSdkError, type NormalizedCursorError } from './errors.js';
 import type {
   CancelStatus,
+  RuntimeBuildInvocationResult,
   RuntimeRunHandle,
   RuntimeStartInput,
   RuntimeStartResult,
@@ -70,6 +71,24 @@ export class CursorSdkRuntime implements WorkerRuntime {
 
   async resume(sessionId: string, input: RuntimeStartInput): Promise<RuntimeStartResult> {
     return this.spawn(input, sessionId);
+  }
+
+  /**
+   * The Cursor SDK runtime is not driven by a `WorkerInvocation`, so the
+   * pre-bake helper (used by the Claude rotation interceptor) is unsupported
+   * for this backend. Returning `SPAWN_FAILED` here is purely defensive — the
+   * orchestrator only calls `buildStartInvocation` for the rotation-resume
+   * path which is gated to claude.
+   */
+  async buildStartInvocation(_input: RuntimeStartInput): Promise<RuntimeBuildInvocationResult> {
+    return {
+      ok: false,
+      failure: {
+        code: 'SPAWN_FAILED',
+        message: 'cursor backend does not support buildStartInvocation',
+        details: { backend: this.name },
+      },
+    };
   }
 
   private async spawn(input: RuntimeStartInput, sessionId: string | undefined): Promise<RuntimeStartResult> {

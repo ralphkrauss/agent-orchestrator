@@ -306,9 +306,13 @@ requires `CURSOR_API_KEY`; cursor profiles must declare `model` and must omit
 `docs/development/cursor-backend.md`). **BREAKING (codex):** codex profiles
 gain a new optional `codex_network` field (`isolated` / `workspace` /
 `user-config`) that defaults to `'isolated'` when unset. See
-`docs/development/codex-backend.md` for the migration. The profiles manifest
-stays provider-agnostic so future backends can add capability descriptors
-without changing the supervisor workflow.
+`docs/development/codex-backend.md` for the migration. Claude profiles can opt
+into native multi-account rotation via `claude_account_priority` and the
+`agent-orchestrator auth login claude --account <name>` /
+`auth set claude --account <name>` commands; details in
+`docs/development/claude-multi-account.md`. The profiles manifest stays
+provider-agnostic so future backends can add capability descriptors without
+changing the supervisor workflow.
 
 OpenCode permissions are application-level guardrails, not an operating-system
 sandbox. For stronger enforcement, run the supervisor in a read-only worktree

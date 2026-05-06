@@ -6,6 +6,7 @@ export {
   parseWorkerProfileManifest,
   validateWorkerProfiles,
   type InspectedWorkerProfiles,
+  type InspectWorkerProfilesOptions,
   type InvalidWorkerProfile,
   type WorkerBackendCapability,
   type WorkerCapabilityCatalog,

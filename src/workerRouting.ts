@@ -5,6 +5,7 @@ import {
   inspectWorkerProfiles,
   parseWorkerProfileManifest,
   type InspectedWorkerProfiles,
+  type InspectWorkerProfilesOptions,
   type ValidatedWorkerProfiles,
   type WorkerCapabilityCatalog,
 } from './opencode/capabilities.js';
@@ -31,8 +32,9 @@ export function resolveWorkerProfilesFile(
 export async function loadValidatedWorkerProfilesFromFile(
   profilesFile: string,
   catalog: WorkerCapabilityCatalog,
+  options: InspectWorkerProfilesOptions = {},
 ): Promise<{ ok: true; profiles: ValidatedWorkerProfiles } | { ok: false; errors: string[] }> {
-  const inspected = await loadInspectedWorkerProfilesFromFile(profilesFile, catalog);
+  const inspected = await loadInspectedWorkerProfilesFromFile(profilesFile, catalog, options);
   if (!inspected.ok) return inspected;
   if (inspected.profiles.errors.length > 0) return { ok: false, errors: inspected.profiles.errors };
   return {
@@ -47,6 +49,7 @@ export async function loadValidatedWorkerProfilesFromFile(
 export async function loadInspectedWorkerProfilesFromFile(
   profilesFile: string,
   catalog: WorkerCapabilityCatalog,
+  options: InspectWorkerProfilesOptions = {},
 ): Promise<{ ok: true; profiles: InspectedWorkerProfiles } | { ok: false; errors: string[] }> {
   let raw: string;
   try {
@@ -64,5 +67,5 @@ export async function loadInspectedWorkerProfilesFromFile(
 
   const parsed = parseWorkerProfileManifest(value);
   if (!parsed.ok) return { ok: false, errors: parsed.errors };
-  return { ok: true, profiles: inspectWorkerProfiles(parsed.value, catalog) };
+  return { ok: true, profiles: inspectWorkerProfiles(parsed.value, catalog, options) };
 }
