@@ -8,6 +8,7 @@ import {
   CancelRunInputSchema,
   CodexNetworkSchema,
   GetObservabilitySnapshotInputSchema,
+  GetOrchestratorStatusInputSchema,
   GetRunEventsInputSchema,
   GetRunProgressInputSchema,
   isTerminalStatus,
@@ -16,11 +17,14 @@ import {
   orchestratorError,
   PruneRunsInputSchema,
   ReasoningEffortSchema,
+  RegisterSupervisorInputSchema,
   RunIdInputSchema,
   SendFollowupInputSchema,
   ShutdownInputSchema,
+  SignalSupervisorEventInputSchema,
   StartRunInputSchema,
   ServiceTierSchema,
+  UnregisterSupervisorInputSchema,
   UpsertWorkerProfileInputSchema,
   WaitForAnyRunInputSchema,
   WaitForRunInputSchema,
@@ -42,11 +46,14 @@ import {
   type RunError,
   type RunErrorCategory,
   type ServiceTier,
+  type SupervisorEvent,
   type ToolResponse,
   type UpsertWorkerProfile,
   type WorkerEvent,
   type WorkerResult,
 } from './contract.js';
+import { OrchestratorRegistry } from './daemon/orchestratorRegistry.js';
+import { computeOrchestratorStatusSnapshot } from './daemon/orchestratorStatus.js';
 import { validateClaudeModelAndEffort } from './backend/claudeValidation.js';
 import type { RuntimeRunHandle, WorkerRuntime } from './backend/runtime.js';
 import { getBackendStatus } from './diagnostics.js';
@@ -106,18 +113,49 @@ interface ResolvedStartRunTarget {
   profileId: string | null;
 }
 
+export type RunLifecycleEventKind = 'started' | 'activity' | 'terminal' | 'notification';
+
+export interface RunLifecycleEvent {
+  kind: RunLifecycleEventKind;
+  run_id: string;
+  orchestrator_id: string | null;
+  status?: RunStatus;
+  notification?: RunNotification;
+}
+
+export type RunLifecycleListener = (event: RunLifecycleEvent) => void;
+
 export class OrchestratorService {
   private readonly activeRuns = new Map<string, RuntimeRunHandle>();
   private readonly timers = new Map<string, NodeJS.Timeout>();
   private readonly profileUpdateLocks = new Map<string, Promise<void>>();
   private config: OrchestratorConfig = defaultConfig;
   private shuttingDown = false;
+  readonly orchestratorRegistry = new OrchestratorRegistry();
+  private readonly runLifecycleListeners = new Set<RunLifecycleListener>();
 
   constructor(
     readonly store: RunStore,
     private readonly runtimes: Map<Backend, WorkerRuntime>,
     private readonly logger: OrchestratorLogger = defaultLogger,
   ) {}
+
+  onRunLifecycle(listener: RunLifecycleListener): () => void {
+    this.runLifecycleListeners.add(listener);
+    return () => {
+      this.runLifecycleListeners.delete(listener);
+    };
+  }
+
+  emitRunLifecycle(event: RunLifecycleEvent): void {
+    for (const listener of this.runLifecycleListeners) {
+      try {
+        listener(event);
+      } catch (error) {
+        this.logger(`run lifecycle listener threw: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  }
 
   async initialize(): Promise<void> {
     await this.store.ensureReady();
@@ -134,7 +172,7 @@ export class OrchestratorService {
       case 'prune_runs':
         return this.pruneRuns(params);
       case 'start_run':
-        return this.startRun(params);
+        return this.startRun(params, context);
       case 'list_worker_profiles':
         return this.listWorkerProfiles(params);
       case 'upsert_worker_profile':
@@ -158,7 +196,7 @@ export class OrchestratorService {
       case 'get_run_result':
         return this.getRunResult(params);
       case 'send_followup':
-        return this.sendFollowup(params);
+        return this.sendFollowup(params, context);
       case 'cancel_run':
         return this.cancelRun(params);
       case 'get_backend_status':
@@ -171,18 +209,103 @@ export class OrchestratorService {
         });
       case 'get_observability_snapshot':
         return this.getObservabilitySnapshot(params, context);
+      case 'register_supervisor':
+        return this.registerSupervisor(params);
+      case 'signal_supervisor_event':
+        return this.signalSupervisorEvent(params);
+      case 'unregister_supervisor':
+        return this.unregisterSupervisor(params);
+      case 'get_orchestrator_status':
+        return this.getOrchestratorStatus(params);
       default:
         return wrapErr(orchestratorError('INVALID_INPUT', `Unknown method: ${method}`));
     }
   }
 
-  async startRun(params: unknown): Promise<ToolResult> {
+  registerSupervisor(params: unknown): ToolResult {
+    const parsed = RegisterSupervisorInputSchema.safeParse(params);
+    if (!parsed.success) return invalidInput(parsed.error.message);
+    const record = this.orchestratorRegistry.register({
+      client: parsed.data.client,
+      label: parsed.data.label,
+      cwd: parsed.data.cwd,
+      display: parsed.data.display,
+      orchestrator_id: parsed.data.orchestrator_id,
+    });
+    return wrapOk({ orchestrator: record });
+  }
+
+  signalSupervisorEvent(params: unknown): ToolResult {
+    const parsed = SignalSupervisorEventInputSchema.safeParse(params);
+    if (!parsed.success) return invalidInput(parsed.error.message);
+    const updated = this.orchestratorRegistry.applyEvent(parsed.data.orchestrator_id, parsed.data.event as SupervisorEvent);
+    if (!updated) {
+      return wrapErr(orchestratorError('INVALID_INPUT', `Unknown orchestrator id: ${parsed.data.orchestrator_id}`));
+    }
+    return wrapOk({ orchestrator_id: parsed.data.orchestrator_id, event: parsed.data.event });
+  }
+
+  unregisterSupervisor(params: unknown): ToolResult {
+    const parsed = UnregisterSupervisorInputSchema.safeParse(params);
+    if (!parsed.success) return invalidInput(parsed.error.message);
+    const removed = this.orchestratorRegistry.unregister(parsed.data.orchestrator_id);
+    return wrapOk({ orchestrator_id: parsed.data.orchestrator_id, removed });
+  }
+
+  async getOrchestratorStatus(params: unknown): Promise<ToolResult> {
+    const parsed = GetOrchestratorStatusInputSchema.safeParse(params);
+    if (!parsed.success) return invalidInput(parsed.error.message);
+    const state = this.orchestratorRegistry.get(parsed.data.orchestrator_id);
+    if (!state) {
+      return wrapErr(orchestratorError('INVALID_INPUT', `Unknown orchestrator id: ${parsed.data.orchestrator_id}`));
+    }
+    const ownedRunSnapshot = await this.collectOwnedRunSnapshot(parsed.data.orchestrator_id);
+    const status = computeOrchestratorStatusSnapshot(state, ownedRunSnapshot);
+    return wrapOk({
+      orchestrator: state.record,
+      status,
+      display: state.record.display,
+    });
+  }
+
+  /**
+   * Snapshot the orchestrator's owned worker runs for the aggregate-status
+   * computation. Pure read-only scan.
+   *
+   * `running_child_count` counts owned runs whose status is non-terminal.
+   * `failed_unacked_count` counts unacked `fatal_error` notifications across
+   * **all** owned runs, including still-running runs (D3b rule 1: `attention`
+   * must dominate while ANY owned run has an unacked fatal notification, even
+   * if that run hasn't reached terminal state yet).
+   */
+  async collectOwnedRunSnapshot(orchestratorId: string): Promise<{ running: number; failed_unacked: number }> {
+    const runs = await this.store.listRuns();
+    let running = 0;
+    const ownedRunIds: string[] = [];
+    for (const run of runs) {
+      const stamped = typeof run.metadata?.orchestrator_id === 'string' ? run.metadata.orchestrator_id : null;
+      if (stamped !== orchestratorId) continue;
+      ownedRunIds.push(run.run_id);
+      if (!isTerminalStatus(run.status)) running += 1;
+    }
+    if (ownedRunIds.length === 0) return { running, failed_unacked: 0 };
+    const notifications = await this.store.listNotifications({
+      runIds: ownedRunIds,
+      kinds: ['fatal_error'],
+      includeAcked: false,
+      limit: ownedRunIds.length,
+    });
+    return { running, failed_unacked: notifications.length };
+  }
+
+  async startRun(params: unknown, context: OrchestratorDispatchContext = {}): Promise<ToolResult> {
     const parsed = StartRunInputSchema.safeParse(params);
     if (!parsed.success) return invalidInput(parsed.error.message);
     const input = parsed.data;
     const resolved = await this.resolveStartRunTarget(input);
     if (!resolved.ok) return wrapErr(resolved.error);
-    const { backendName, runtime, model, reasoningEffort, serviceTier, codexNetwork, metadata, profileId } = resolved.value;
+    const { backendName, runtime, model, reasoningEffort, serviceTier, codexNetwork, metadata: resolvedMetadata, profileId } = resolved.value;
+    const metadata = stampOrchestratorIdInMetadata(resolvedMetadata, context.policy_context);
     const idleTimeout = this.resolveIdleTimeout(input.idle_timeout_seconds);
     if (!idleTimeout.ok) return wrapErr(idleTimeout.error);
     const executionTimeout = this.resolveExecutionTimeout(input.execution_timeout_seconds);
@@ -485,7 +608,7 @@ export class OrchestratorService {
     return false;
   }
 
-  async sendFollowup(params: unknown): Promise<ToolResult> {
+  async sendFollowup(params: unknown, context: OrchestratorDispatchContext = {}): Promise<ToolResult> {
     const parsed = SendFollowupInputSchema.safeParse(params);
     if (!parsed.success) return invalidInput(parsed.error.message);
     const parent = await this.store.loadRun(parsed.data.run_id);
@@ -522,7 +645,10 @@ export class OrchestratorService {
     const executionTimeout = this.resolveExecutionTimeout(parsed.data.execution_timeout_seconds);
     if (!executionTimeout.ok) return wrapErr(executionTimeout.error);
     const model = parsed.data.model ?? parent.meta.model;
-    const metadata = metadataForFollowup(parent.meta.metadata, parsed.data.metadata);
+    const metadata = stampOrchestratorIdInMetadata(
+      metadataForFollowup(parent.meta.metadata, parsed.data.metadata),
+      context.policy_context,
+    );
     const modelSource: ModelSource = parsed.data.model ? 'explicit' : parent.meta.model ? 'inherited' : 'backend_default';
     // S3 / R8 / T10 (issue #31): inherit codex_network from the parent unless
     // the follow-up sets it explicitly. The parent's resolved value is
@@ -703,6 +829,20 @@ export class OrchestratorService {
     const parsed = AckRunNotificationInputSchema.safeParse(params);
     if (!parsed.success) return invalidInput(parsed.error.message);
     const result = await this.store.markNotificationAcked(parsed.data.notification_id);
+    if (result.acked) {
+      // Acking a fatal notification can clear `attention` (D3b rule 1). The
+      // status engine subscribes to lifecycle 'notification' events; emit one
+      // for every registered orchestrator so the engine recomputes for any
+      // owner whose unacked fatal count just changed. The 250ms debounce +
+      // last-payload de-dup in the engine collapses no-op recomputes.
+      for (const state of this.orchestratorRegistry.list()) {
+        this.emitRunLifecycle({
+          kind: 'notification',
+          run_id: '',
+          orchestrator_id: state.record.id,
+        });
+      }
+    }
     return wrapOk({ acked: result.acked, notification_id: parsed.data.notification_id });
   }
 
@@ -786,9 +926,29 @@ export class OrchestratorService {
     const handle = result.handle;
     this.activeRuns.set(runId, handle);
     this.armRunTimer(runId, idleTimeoutSeconds, executionTimeoutSeconds, handle);
-    handle.completion.finally(() => {
+    const startMeta = await this.store.loadMeta(runId).catch(() => null);
+    this.emitRunLifecycle({
+      kind: 'started',
+      run_id: runId,
+      orchestrator_id: orchestratorIdFromMeta(startMeta?.metadata),
+      status: startMeta?.status,
+    });
+    handle.completion.then(async (terminalMeta) => {
       this.clearRunTimer(runId);
       this.activeRuns.delete(runId);
+      this.emitRunLifecycle({
+        kind: 'terminal',
+        run_id: runId,
+        orchestrator_id: orchestratorIdFromMeta(terminalMeta.metadata),
+        status: terminalMeta.status,
+      });
+      if (terminalMeta.latest_error?.fatal) {
+        this.emitRunLifecycle({
+          kind: 'notification',
+          run_id: runId,
+          orchestrator_id: orchestratorIdFromMeta(terminalMeta.metadata),
+        });
+      }
       if (this.shuttingDown && this.activeRuns.size === 0) {
         scheduleProcessExit();
       }
@@ -810,6 +970,28 @@ export class OrchestratorService {
       latest_error: latestError,
       context,
     });
+    // Pre-spawn failures must drive the aggregate-status engine immediately
+    // so a fatal pre-spawn error transitions the orchestrator to `attention`
+    // without waiting for some other lifecycle signal (issue #40, F4).
+    try {
+      const meta = await this.store.loadMeta(runId);
+      const orchestratorId = orchestratorIdFromMeta(meta.metadata);
+      this.emitRunLifecycle({
+        kind: 'terminal',
+        run_id: runId,
+        orchestrator_id: orchestratorId,
+        status: meta.status,
+      });
+      if (meta.latest_error?.fatal) {
+        this.emitRunLifecycle({
+          kind: 'notification',
+          run_id: runId,
+          orchestrator_id: orchestratorId,
+        });
+      }
+    } catch (error) {
+      this.logger(`failPreSpawn lifecycle emit failed for ${runId}: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   private async captureAndPersistGitSnapshot(runId: string, cwd: string): Promise<void> {
@@ -1321,6 +1503,37 @@ function metadataForFollowup(
 ): Record<string, unknown> {
   const { worker_profile: _workerProfile, ...inheritedMetadata } = parentMetadata;
   return { ...inheritedMetadata, ...childMetadata };
+}
+
+function orchestratorIdFromMeta(metadata: Record<string, unknown> | undefined): string | null {
+  const value = metadata?.orchestrator_id;
+  return typeof value === 'string' && value.trim() ? value : null;
+}
+
+/**
+ * Stamp `metadata.orchestrator_id` from `RpcPolicyContext.orchestrator_id`
+ * (issue #40, Decision 10 / R8). The harness-owned MCP server entry pins
+ * this value via env so the model never authors it.
+ *
+ * Forge-prevention invariant: any model- or parent-supplied
+ * `orchestrator_id` on the incoming metadata is **stripped first**,
+ * regardless of whether a pinned id is present. Then, only when a pinned id
+ * exists, it is added back from the policy context.
+ *
+ * Calls without a pinned id (e.g. CLI smoke tests) end with no
+ * `orchestrator_id` on the run, so the run is never aggregated to any
+ * orchestrator. This applies to direct `start_run` calls and to follow-up
+ * runs whose parent metadata may itself carry a stamp from a previous turn.
+ */
+export function stampOrchestratorIdInMetadata(
+  metadata: Record<string, unknown>,
+  policyContext: RpcPolicyContext | null | undefined,
+): Record<string, unknown> {
+  const { orchestrator_id: _stripped, ...rest } = metadata;
+  void _stripped;
+  const pinned = policyContext?.orchestrator_id;
+  if (!pinned) return rest;
+  return { ...rest, orchestrator_id: pinned };
 }
 
 function modelSettingsForBackend(

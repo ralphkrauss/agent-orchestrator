@@ -28,6 +28,14 @@ export interface ClaudeHarnessConfigInput {
   profileDiagnostics: string[];
   mcpCliPath: string;
   monitorPin: ResolvedMonitorPin;
+  /**
+   * Pinned orchestrator id supplied by the launcher (issue #40, Decision 10).
+   * Forwarded to the harness-owned MCP server entry's env so the MCP frontend
+   * can stamp `RpcPolicyContext.orchestrator_id` on every IPC call.
+   */
+  orchestratorId?: string;
+  /** Embed Remote Control settings keys when true (Decision 12). */
+  remoteControl?: boolean;
 }
 
 export interface ClaudeMcpConfig {
@@ -52,21 +60,26 @@ export interface ClaudeHarnessConfig {
 export function buildClaudeHarnessConfig(input: ClaudeHarnessConfigInput): ClaudeHarnessConfig {
   const settings = buildClaudeSupervisorSettings({
     monitorBashAllowPatterns: input.monitorPin.monitor_bash_allow_patterns,
+    monitorPin: input.monitorPin,
+    remoteControl: input.remoteControl,
   });
   assertMonitorPermissionInvariant(settings, input.monitorPin);
+  const mcpEnv: Record<string, string> = {
+    AGENT_ORCHESTRATOR_WRITABLE_PROFILES_FILE: input.manifestPath,
+  };
+  if (input.orchestratorId) {
+    // Pin the orchestrator id into the MCP server entry env so the MCP
+    // frontend can attach it to every IPC call's policy_context. The model
+    // never authors this value (Decision 10).
+    mcpEnv.AGENT_ORCHESTRATOR_ORCH_ID = input.orchestratorId;
+  }
   const mcpConfig: ClaudeMcpConfig = {
     mcpServers: {
       [CLAUDE_MCP_SERVER_NAME]: {
         type: 'stdio',
         command: process.execPath,
         args: [input.mcpCliPath],
-        // Pin the writable profiles manifest path. The MCP frontend rejects
-        // upsert_worker_profile calls whose resolved profiles_file does not
-        // match this value, so the supervisor cannot use the tool as a write
-        // primitive against arbitrary paths in the target workspace.
-        env: {
-          AGENT_ORCHESTRATOR_WRITABLE_PROFILES_FILE: input.manifestPath,
-        },
+        env: mcpEnv,
       },
     },
   };
@@ -121,6 +134,9 @@ function buildSupervisorSystemPrompt(input: ClaudeHarnessConfigInput): string {
     '',
     'Allowed agent-orchestrator MCP tools:',
     allowedMcpTools.map((name) => `- ${name}`).join('\n'),
+    '',
+    'Orchestrator status hooks:',
+    '- Supervisor turn signaling is automatic. The harness installs Claude Code lifecycle hooks (UserPromptSubmit / Notification / Stop / SessionStart / SessionEnd) that report turn boundaries to the daemon; the daemon emits aggregate-status events to the user\'s ~/.config/agent-orchestrator/hooks.json scripts. Do not invoke any "supervisor signal" CLI yourself — the harness handles it. A user tmux or desktop hook will see the daemon-owned aggregate state, not whichever Claude/worker process last fired a local hook.',
     '',
     'Daemon-owned run lifecycle:',
     '- The persistent agent-orchestrator daemon owns worker subprocesses, durable run state, event logs, results, and notification records. The supervisor is only an orchestration client.',

@@ -396,6 +396,29 @@ The spawn passes:
   `.claude/skills`, so `/skills` can find the same project skills without
   enabling project `settings.json`, hooks, or project MCP configuration.
 
+### Status hooks (issue #40)
+
+The launcher accepts two opt-in flags that drive the daemon-owned orchestrator
+status surface:
+
+- `--remote-control` embeds the documented `remoteControlAtStartup` and
+  `agentPushNotifEnabled` keys in the generated supervisor `settings.json`
+  (off by default). `--remote-control-session-name-prefix <prefix>` is forwarded
+  to Claude as a CLI flag.
+- `--orchestrator-label <name>` sets the orchestrator's display label
+  surfaced to user-level status hooks. Defaults to `basename(cwd)`.
+
+User-level hooks live in `~/.config/agent-orchestrator/hooks.json` and follow
+the Claude-parity shell-string shape used by `~/.claude/settings.json` hooks.
+The daemon emits a v1 `orchestrator_status_changed` payload to each entry
+and never blocks orchestration on hook execution. See
+[`docs/development/orchestrator-status-hooks.md`](docs/development/orchestrator-status-hooks.md)
+and the example tmux hook at [`examples/hooks/tmux-status.sh`](examples/hooks/tmux-status.sh).
+
+Read the current orchestrator status from a shell with
+`agent-orchestrator supervisor status`. The top-level
+`agent-orchestrator status` subcommand stays reserved for daemon status.
+
 The harness intentionally does **not** pass:
 
 - `--add-dir <target workspace>` because the target workspace is already the

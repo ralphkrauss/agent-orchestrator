@@ -91,6 +91,7 @@ function toBackendInput(input: RuntimeStartInput): BackendStartInput {
     cwd: input.cwd,
     model: input.model,
     modelSettings: input.modelSettings,
+    runId: input.runId,
   };
 }
 

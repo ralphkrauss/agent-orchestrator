@@ -35,15 +35,53 @@ export interface PreparedWorkerSpawn {
   args: string[];
 }
 
+/**
+ * Terminal-multiplexer / pane-correlation env vars stripped from worker
+ * subprocesses (issue #40, Decision 8). Limited to multiplexer surface so
+ * unrelated tooling that depends on the daemon's env keeps working. The
+ * supervisor's tmux/status display is owned by daemon-emitted hooks; workers
+ * have no business seeing or addressing it.
+ */
+export const WORKER_STRIPPED_TERMINAL_ENV_VARS = [
+  'TMUX',
+  'TMUX_PANE',
+  'STY',
+  'WEZTERM_PANE',
+  'KITTY_WINDOW_ID',
+  'ITERM_SESSION_ID',
+  'WT_SESSION',
+] as const;
+
+export function stripTerminalMultiplexerEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const next: NodeJS.ProcessEnv = { ...env };
+  for (const key of WORKER_STRIPPED_TERMINAL_ENV_VARS) delete next[key];
+  return next;
+}
+
 export class ProcessManager {
   constructor(private readonly store: RunStore) {}
 
+  private async parentOrchestratorIdForRun(runId: string): Promise<string | null> {
+    try {
+      const meta = await this.store.loadMeta(runId);
+      const value = meta.metadata?.orchestrator_id;
+      return typeof value === 'string' && value.trim() ? value : null;
+    } catch {
+      return null;
+    }
+  }
+
   async start(runId: string, backend: WorkerBackend, invocation: WorkerInvocation): Promise<ManagedRun> {
-    const env = {
-      ...process.env,
+    const parentEnv = stripTerminalMultiplexerEnv(process.env);
+    const parentOrchestratorId = await this.parentOrchestratorIdForRun(runId);
+    const env: NodeJS.ProcessEnv = {
+      ...parentEnv,
       ...invocation.env,
       NO_COLOR: '1',
       TERM: 'dumb',
+      AGENT_ORCHESTRATOR_WORKER: '1',
+      AGENT_ORCHESTRATOR_WORKER_RUN_ID: runId,
+      AGENT_ORCHESTRATOR_PARENT_ORCHESTRATOR_ID: parentOrchestratorId ?? '',
     };
     const preparedSpawn = prepareWorkerSpawn(invocation.command, invocation.args);
     let lastActivityMs = Date.now();

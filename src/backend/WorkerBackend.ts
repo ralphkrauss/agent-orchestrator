@@ -20,6 +20,11 @@ export interface BackendStartInput {
   cwd: string;
   model?: string | null;
   modelSettings: RunModelSettings;
+  /**
+   * Worker run id. Optional for backwards compatibility; the Claude backend
+   * uses it to write per-run worker isolation settings (issue #40, T5).
+   */
+  runId?: string;
 }
 
 export interface ParsedBackendEvent {

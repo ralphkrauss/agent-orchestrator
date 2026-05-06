@@ -21,6 +21,121 @@ describe('agent orchestrator integration with mock CLIs', () => {
     process.env.PATH = originalPath;
   });
 
+  it('forge prevention: model-supplied metadata.orchestrator_id is stripped in start_run and send_followup unless pinned (D10/R8)', async () => {
+    const fixture = await createFixture();
+    const repo = await createGitRepo(fixture.root);
+    const service = await createService(fixture.home);
+
+    // 1. start_run with model-supplied orchestrator_id and NO pinned policy:
+    // metadata must be cleansed of the forged value.
+    const start = await service.dispatch(
+      'start_run',
+      { backend: 'codex', prompt: 'forge', cwd: repo, metadata: { orchestrator_id: 'forged-from-model', other: 'kept' } },
+      {},
+    ) as { ok: boolean; run_id?: string };
+    assert.equal(start.ok, true);
+    const runId = start.run_id!;
+    await service.waitForRun({ run_id: runId, wait_seconds: 5 });
+    const startMeta = await service.store.loadMeta(runId);
+    assert.equal(Object.prototype.hasOwnProperty.call(startMeta.metadata, 'orchestrator_id'), false, 'forged orchestrator_id must be stripped');
+    assert.equal(startMeta.metadata.other, 'kept');
+
+    // 2. start_run WITH pinned policy: pinned id wins over model-supplied.
+    const pinned = await service.dispatch(
+      'start_run',
+      { backend: 'codex', prompt: 'pinned', cwd: repo, metadata: { orchestrator_id: 'forged-from-model' } },
+      { policy_context: { orchestrator_id: '01PINNEDORCH0000000000000ZZ' } },
+    ) as { ok: boolean; run_id?: string };
+    assert.equal(pinned.ok, true);
+    await service.waitForRun({ run_id: pinned.run_id!, wait_seconds: 5 });
+    const pinnedMeta = await service.store.loadMeta(pinned.run_id!);
+    assert.equal(pinnedMeta.metadata.orchestrator_id, '01PINNEDORCH0000000000000ZZ');
+
+    // 3. send_followup with no pinned policy: parent-inherited orchestrator_id
+    // must NOT bleed through.
+    const followNoPin = await service.dispatch(
+      'send_followup',
+      { run_id: pinned.run_id!, prompt: 'continue', metadata: { orchestrator_id: 'forged-followup' } },
+      {},
+    ) as { ok: boolean; run_id?: string };
+    assert.equal(followNoPin.ok, true);
+    await service.waitForRun({ run_id: followNoPin.run_id!, wait_seconds: 5 });
+    const followMeta = await service.store.loadMeta(followNoPin.run_id!);
+    assert.equal(Object.prototype.hasOwnProperty.call(followMeta.metadata, 'orchestrator_id'), false, 'parent orchestrator_id must not be inherited without a pinned policy');
+  });
+
+  it('orchestrator status flow: supervisor events + owned worker run drive aggregate state (issue #40)', async () => {
+    const fixture = await createFixture();
+    const repo = await createGitRepo(fixture.root);
+    const service = await createService(fixture.home);
+
+    // Register an orchestrator the way the Claude launcher would.
+    const reg = await service.registerSupervisor({
+      label: 'demo',
+      cwd: repo,
+      client: 'claude',
+      orchestrator_id: '01TESTORCHESTRATOR0001IMPLZ',
+    });
+    assert.equal(reg.ok, true);
+    const orchestratorId = '01TESTORCHESTRATOR0001IMPLZ';
+
+    // 1. Idle baseline.
+    let status = await service.getOrchestratorStatus({ orchestrator_id: orchestratorId });
+    assert.equal(status.ok, true);
+    assert.equal((status as unknown as { status: { state: string } }).status.state, 'idle');
+
+    // 2. Supervisor turn → in_progress.
+    await service.signalSupervisorEvent({ orchestrator_id: orchestratorId, event: 'turn_started' });
+    status = await service.getOrchestratorStatus({ orchestrator_id: orchestratorId });
+    assert.equal((status as unknown as { status: { state: string } }).status.state, 'in_progress');
+
+    // 3. Notification (sticky waiting_for_user) — no children yet → waiting_for_user.
+    await service.signalSupervisorEvent({ orchestrator_id: orchestratorId, event: 'turn_stopped' });
+    await service.signalSupervisorEvent({ orchestrator_id: orchestratorId, event: 'waiting_for_user' });
+    status = await service.getOrchestratorStatus({ orchestrator_id: orchestratorId });
+    assert.equal((status as unknown as { status: { state: string } }).status.state, 'waiting_for_user');
+
+    // 4. Start a worker run that is stamped with the orchestrator id via
+    // policy_context. AC8 invariant: aggregate must be in_progress while the
+    // child runs, even though the sticky waiting_for_user flag is still set.
+    const start = await service.dispatch('start_run', {
+      backend: 'codex',
+      prompt: 'work',
+      cwd: repo,
+    }, { policy_context: { orchestrator_id: orchestratorId } }) as { ok: boolean; run_id?: string };
+    assert.equal(start.ok, true);
+    const childRunId = start.run_id!;
+
+    // While the child is running, aggregate is in_progress (AC8).
+    status = await service.getOrchestratorStatus({ orchestrator_id: orchestratorId });
+    assert.equal((status as unknown as { status: { state: string; running_child_count: number; waiting_for_user: boolean } }).status.state, 'in_progress');
+    assert.equal((status as unknown as { status: { running_child_count: number } }).status.running_child_count, 1);
+    assert.equal((status as unknown as { status: { waiting_for_user: boolean } }).status.waiting_for_user, true, 'sticky waiting_for_user must remain set on the snapshot');
+
+    // 5. Wait for the child to finish — aggregate transitions back to
+    // waiting_for_user (sticky flag still set, no running children).
+    await service.waitForRun({ run_id: childRunId, wait_seconds: 5 });
+    status = await service.getOrchestratorStatus({ orchestrator_id: orchestratorId });
+    assert.equal((status as unknown as { status: { state: string; running_child_count: number } }).status.state, 'waiting_for_user');
+    assert.equal((status as unknown as { status: { running_child_count: number } }).status.running_child_count, 0);
+
+    // 6. SessionEnd → stale.
+    await service.signalSupervisorEvent({ orchestrator_id: orchestratorId, event: 'session_ended' });
+    status = await service.getOrchestratorStatus({ orchestrator_id: orchestratorId });
+    assert.equal((status as unknown as { status: { state: string } }).status.state, 'stale');
+
+    // 7. Verify the worker run was stamped with the orchestrator id (D10).
+    const runResult = await service.getRunResult({ run_id: childRunId });
+    const runMeta = (runResult as unknown as { run_summary: { metadata: Record<string, unknown> } }).run_summary;
+    assert.equal(runMeta.metadata.orchestrator_id, orchestratorId);
+
+    // 8. Unregister cleans up.
+    const unreg = await service.unregisterSupervisor({ orchestrator_id: orchestratorId });
+    assert.equal(unreg.ok, true);
+    const after = await service.getOrchestratorStatus({ orchestrator_id: orchestratorId });
+    assert.equal(after.ok, false);
+  });
+
   it('runs Codex with git-based files_changed and captures session/result', async () => {
     const fixture = await createFixture();
     const repo = await createGitRepo(fixture.root);

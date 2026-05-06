@@ -42,6 +42,29 @@ pnpm verify
 
 `pnpm verify` builds, tests, checks publish readiness, resolves the npm dist-tag, audits production dependencies, and runs `npm pack --dry-run`.
 
+### Issue #40 release notes
+
+The orchestrator-status / Remote Control work in issue #40 introduces:
+
+- **New IPC methods** (`register_supervisor`, `signal_supervisor_event`,
+  `unregister_supervisor`, `get_orchestrator_status`). They are internal-only
+  and not exposed as MCP tools. **`PROTOCOL_VERSION` is unchanged at `1`**:
+  the new methods are purely additive on the existing wire protocol, so no
+  bump is required. **Package-version skew** between daemon and frontend is
+  enforced separately via `frontend_version` in `RpcRequest` and the existing
+  `PROTOCOL_VERSION_MISMATCH` / daemon-version-mismatch paths; rolling
+  upgrades that leave a supervisor pinned to an older daemon will be rejected
+  there until both sides restart. The launcher restart on next supervisor
+  launch reconciles automatically.
+- A new user-level config file `~/.config/agent-orchestrator/hooks.json`.
+  Document the file in upgrade notes; missing or invalid files behave like
+  no hooks. The schema is closed (v1) — additive changes can land in v2
+  without breaking v1 consumers.
+- New launcher flags `--remote-control`, `--remote-control-session-name-prefix`,
+  and `--orchestrator-label`. Default behavior is unchanged.
+- A new CLI subcommand family `agent-orchestrator supervisor`
+  (`register`, `signal`, `unregister`, `status`).
+
 ### `pnpm.overrides` policy for `@cursor/sdk` transitives
 
 `package.json` carries a `pnpm.overrides` block that pins the following

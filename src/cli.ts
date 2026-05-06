@@ -25,6 +25,9 @@ if (command === 'doctor') {
 } else if (command === 'auth') {
   const { runAuthCli } = await import('./auth/authCli.js');
   process.exitCode = await runAuthCli(process.argv.slice(3));
+} else if (command === 'supervisor') {
+  const { runSupervisorCli } = await import('./supervisorCli.js');
+  process.exitCode = await runSupervisorCli(process.argv.slice(3));
 } else if (isDaemonCliCommand(command)) {
   try {
     await runDaemonCli(process.argv.slice(2));
@@ -46,6 +49,10 @@ Usage:
   agent-orchestrator auth status [--json]
   agent-orchestrator auth <provider> [--from-env [VAR] | --from-stdin]
   agent-orchestrator auth unset <provider>
+  agent-orchestrator supervisor register --label <name> --cwd <path>
+  agent-orchestrator supervisor signal <event>
+  agent-orchestrator supervisor unregister --orchestrator-id <id>
+  agent-orchestrator supervisor status [--orchestrator-id <id>]
   agent-orchestrator status       Show daemon status
   agent-orchestrator status --json
   agent-orchestrator runs [--json] [--prompts]

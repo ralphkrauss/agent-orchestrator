@@ -46,6 +46,8 @@ const ALLOWED_FLAG_TOKENS = new Set<string>([
   '-n',
   '--exclude-dynamic-system-prompt-sections',
   '--no-session-persistence',
+  // Issue #40, Decision 12: opt-in Remote Control passthrough.
+  '--remote-control-session-name-prefix',
 ]);
 
 export function validateClaudePassthroughArgs(args: readonly string[]): PassthroughValidation {
