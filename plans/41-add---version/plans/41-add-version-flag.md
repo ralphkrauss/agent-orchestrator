@@ -107,7 +107,7 @@ passthrough boundary that forwards remaining args to the wrapped CLI.
 ## Quality Gates
 
 - [x] `pnpm build` passes (`tsc` clean).
-- [x] `pnpm test` passes — 544 tests, 542 pass, 2 skipped, 0 fail (includes new `cliVersion.test.ts` with 12 tests).
+- [x] `pnpm test` passes — 549 tests, 547 pass, 2 skipped, 0 fail (includes new `cliVersion.test.ts` with 17 tests).
 - [x] Manual smoke covered by spawn-based tests in `cliVersion.test.ts`.
 - [x] `--help` text on each bin lists `--version` (covered by the help-text assertion in `cliVersion.test.ts` plus inline edits to `claudeLauncherHelp()` / `openCodeLauncherHelp()`).
 - [x] `node-typescript` rule satisfied: both human-readable and JSON output verified.
@@ -142,15 +142,15 @@ passthrough boundary that forwards remaining args to the wrapped CLI.
 
 ### T5: Add tests
 - **Status:** done
-- **Evidence:** `src/__tests__/cliVersion.test.ts` — 14 tests, all passing:
+- **Evidence:** `src/__tests__/cliVersion.test.ts` — 17 tests, all passing:
   - 4 spawn tests (one per bin) asserting `^<bin-name> <getPackageVersion()>\n$`.
-  - 1 JSON test asserting `{ name, version }` and a single line.
+  - 4 JSON-output tests (one per bin): main and daemon spawn-based, claude and opencode in-process; each parses `{ name, version }` and asserts `name === getPackageMetadata().name` and `version === getPackageMetadata().version`. The main-bin test additionally asserts a single-line shape.
   - 2 spawn tests for subcommand routing (`agent-orchestrator claude --version`, `agent-orchestrator opencode --version`).
   - 2 in-process tests of `runClaudeLauncher` / `runOpenCodeLauncher` via stub streams to confirm exit `0` and no fs/discovery side effects.
   - 2 parser-level tests confirming `-- --version` is forwarded to `claudeArgs` / `opencodeArgs`.
   - 2 regression tests (added 2026-05-07 review) confirming a misplaced `--version` (e.g., `['--print-config', '--version']`) falls through to the parser, prints nothing on stdout, and yields `Unknown option: --version` on stderr.
   - 1 help-text test asserting both `agent-orchestrator --version` and `agent-orchestrator-daemon --version` appear in the main help.
-- **Notes:** Tests assert against `getPackageVersion()` rather than literal `0.2.1`, matching the existing pattern in `diagnostics.test.ts` / `ipc.test.ts`.
+- **Notes:** Tests assert against `getPackageVersion()` / `getPackageMetadata()` rather than literal `0.2.1`, matching the existing pattern in `diagnostics.test.ts` / `ipc.test.ts`. The three additional JSON tests for daemon/claude/opencode were added in PR #49 review round-2 (CodeRabbit nitpick) to close coverage on the shared `formatVersionOutput(..., true)` path.
 
 ### T6: Update README
 - **Status:** not needed

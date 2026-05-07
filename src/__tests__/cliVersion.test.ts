@@ -5,10 +5,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { getPackageMetadata, getPackageVersion } from '../packageMetadata.js';
-import { parseClaudeLauncherArgs } from '../claude/launcher.js';
-import { parseOpenCodeLauncherArgs } from '../opencode/launcher.js';
-import { runClaudeLauncher } from '../claude/launcher.js';
-import { runOpenCodeLauncher } from '../opencode/launcher.js';
+import { parseClaudeLauncherArgs, runClaudeLauncher } from '../claude/launcher.js';
+import { parseOpenCodeLauncherArgs, runOpenCodeLauncher } from '../opencode/launcher.js';
 
 const execFileAsync = promisify(execFile);
 const testDir = dirname(fileURLToPath(import.meta.url));
@@ -57,6 +55,47 @@ describe('cli --version', () => {
     const meta = getPackageMetadata();
     assert.equal(parsed.name, meta.name);
     assert.equal(parsed.version, meta.version);
+  });
+
+  it('returns single-line JSON for daemon --version --json', async () => {
+    const result = await execFileAsync(process.execPath, [daemonCliPath, '--version', '--json'], { timeout: 5_000 });
+    const parsed = JSON.parse(result.stdout) as { name: string; version: string };
+    const meta = getPackageMetadata();
+    assert.equal(parsed.name, meta.name);
+    assert.equal(parsed.version, meta.version);
+    assert.equal(result.stderr, '');
+  });
+
+  it('returns single-line JSON for claude --version --json', async () => {
+    const stdout = new CaptureStream();
+    const stderr = new CaptureStream();
+    const exit = await runClaudeLauncher(['--version', '--json'], {
+      stdout: stdout as unknown as NodeJS.WritableStream,
+      stderr: stderr as unknown as NodeJS.WritableStream,
+      env: process.env,
+    });
+    const parsed = JSON.parse(stdout.buffer) as { name: string; version: string };
+    const meta = getPackageMetadata();
+    assert.equal(exit, 0);
+    assert.equal(parsed.name, meta.name);
+    assert.equal(parsed.version, meta.version);
+    assert.equal(stderr.buffer, '');
+  });
+
+  it('returns single-line JSON for opencode --version --json', async () => {
+    const stdout = new CaptureStream();
+    const stderr = new CaptureStream();
+    const exit = await runOpenCodeLauncher(['--version', '--json'], {
+      stdout: stdout as unknown as NodeJS.WritableStream,
+      stderr: stderr as unknown as NodeJS.WritableStream,
+      env: process.env,
+    });
+    const parsed = JSON.parse(stdout.buffer) as { name: string; version: string };
+    const meta = getPackageMetadata();
+    assert.equal(exit, 0);
+    assert.equal(parsed.name, meta.name);
+    assert.equal(parsed.version, meta.version);
+    assert.equal(stderr.buffer, '');
   });
 
   it('routes "agent-orchestrator claude --version" through the launcher and prints the orchestrator version', async () => {
