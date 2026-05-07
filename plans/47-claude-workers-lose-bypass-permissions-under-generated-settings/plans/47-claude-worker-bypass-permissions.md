@@ -4,7 +4,7 @@ Branch: `47-claude-workers-lose-bypass-permissions-under-generated-settings`
 Plan Slug: `47-claude-worker-bypass-permissions`
 Parent Issue: #47
 Created: 2026-05-06
-Status: planning
+Status: complete
 
 ## Context
 
@@ -127,11 +127,11 @@ none open. Prior reviewer feedback (security framing of `bypassPermissions`, dri
 
 | Task ID | Title | Depends On | Status | Acceptance Criteria |
 |---|---|---|---|---|
-| T1 | Extend `CLAUDE_WORKER_SETTINGS_BODY` and `prepareWorkerIsolation` argv | — | pending | `CLAUDE_WORKER_SETTINGS_BODY` exports `{ disableAllHooks: true, permissions: { defaultMode: 'bypassPermissions' }, skipDangerousModePermissionPrompt: true }` (typed `as const`). `prepareWorkerIsolation()` returns `['--settings', settingsPath, '--setting-sources', 'user', '--permission-mode', 'bypassPermissions']`, used by both `start()` and `resume()`. The on-disk JSON file content matches the constant byte-for-byte (modulo the trailing newline). The legacy "no `runId`" branch still returns `[]`. |
-| T2 | Update worker isolation doc comment | T1 | pending | The block comment above `CLAUDE_WORKER_SETTINGS_FILENAME` records, in honest framing: (a) workers are intentionally trusted-local, full-access, non-interactive daemon workers running as the same OS user as the daemon, in the run cwd; (b) `--permission-mode bypassPermissions` (mirrored by `permissions.defaultMode = 'bypassPermissions'` in the file) removes Claude Code's interactive approval prompts so the non-interactive worker can complete — it does **not** restrict the tool surface, and the worker is not sandboxed; (c) `skipDangerousModePermissionPrompt: true` is required so the bypass mode does not surface a dangerous-mode confirmation prompt that the harness cannot answer; (d) `disableAllHooks: true` preserves hook isolation per issue #40 T5/T13 but is **not** a tool sandbox; (e) the `--permission-mode` CLI flag is set in addition to the file value to mirror the supervisor envelope and survive precedence drift; (f) `--dangerously-skip-permissions` is forbidden everywhere per issue #13 Decisions 7 / 21 and is **not** used here. References issue #47 and prior Decisions 9 / 26 from issue #40. |
-| T3 | Update `claudeWorkerIsolation.test.ts` for the new effective settings | T1 | pending | `start` test asserts the on-disk JSON contains all three keys (`disableAllHooks`, `permissions.defaultMode === 'bypassPermissions'`, `skipDangerousModePermissionPrompt === true`) and that the invocation argv contains `--permission-mode bypassPermissions` adjacent to (or after) `--setting-sources user`. The `resume` test makes the same argv assertion **and** reads the on-disk per-run settings file (since `resume()` runs the same `prepareWorkerIsolation()` path) and asserts the same three keys (`disableAllHooks`, `permissions.defaultMode === 'bypassPermissions'`, `skipDangerousModePermissionPrompt === true`). Both the `start` and `resume` tests additionally assert that the invocation argv does **not** include `--dangerously-skip-permissions` (e.g. `assert.ok(!args.includes('--dangerously-skip-permissions'))`), enforcing the issue #13 Decisions 7 / 21 ban. The user-hook fixture test (T13/D9) gains the same on-disk assertions in addition to the existing `disableAllHooks` one and the sentinel non-existence check. The legacy "no runId" test is kept exactly as currently planned: it asserts the argv contains neither `--settings` nor `--setting-sources` nor `--permission-mode` (zero isolation flags). The exported constant assertion (`deepStrictEqual` against `CLAUDE_WORKER_SETTINGS_BODY`) continues to pass after the constant is widened. |
-| T4 | Run repository quality gates | T1, T2, T3 | pending | `pnpm build` succeeds. `pnpm test` passes, with the targeted file `src/__tests__/claudeWorkerIsolation.test.ts` showing the new assertions executing. `pnpm verify` succeeds (build + tests + publish-readiness + audit + dist-tag + npm pack dry run). Evidence captured in the Execution Log. |
-| T5 | Update plan execution log and link evidence | T4 | pending | Each task's Execution Log entry is filled in with the actual command output (test names, exit codes), the plan Status flips to `complete`, and the parent index `plan.md` Status mirrors that. |
+| T1 | Extend `CLAUDE_WORKER_SETTINGS_BODY` and `prepareWorkerIsolation` argv | — | complete | `CLAUDE_WORKER_SETTINGS_BODY` exports `{ disableAllHooks: true, permissions: { defaultMode: 'bypassPermissions' }, skipDangerousModePermissionPrompt: true }` (typed `as const`). `prepareWorkerIsolation()` returns `['--settings', settingsPath, '--setting-sources', 'user', '--permission-mode', 'bypassPermissions']`, used by both `start()` and `resume()`. The on-disk JSON file content matches the constant byte-for-byte (modulo the trailing newline). The legacy "no `runId`" branch still returns `[]`. |
+| T2 | Update worker isolation doc comment | T1 | complete | The block comment above `CLAUDE_WORKER_SETTINGS_FILENAME` records, in honest framing: (a) workers are intentionally trusted-local, full-access, non-interactive daemon workers running as the same OS user as the daemon, in the run cwd; (b) `--permission-mode bypassPermissions` (mirrored by `permissions.defaultMode = 'bypassPermissions'` in the file) removes Claude Code's interactive approval prompts so the non-interactive worker can complete — it does **not** restrict the tool surface, and the worker is not sandboxed; (c) `skipDangerousModePermissionPrompt: true` is required so the bypass mode does not surface a dangerous-mode confirmation prompt that the harness cannot answer; (d) `disableAllHooks: true` preserves hook isolation per issue #40 T5/T13 but is **not** a tool sandbox; (e) the `--permission-mode` CLI flag is set in addition to the file value to mirror the supervisor envelope and survive precedence drift; (f) `--dangerously-skip-permissions` is forbidden everywhere per issue #13 Decisions 7 / 21 and is **not** used here. References issue #47 and prior Decisions 9 / 26 from issue #40. |
+| T3 | Update `claudeWorkerIsolation.test.ts` for the new effective settings | T1 | complete | `start` test asserts the on-disk JSON contains all three keys (`disableAllHooks`, `permissions.defaultMode === 'bypassPermissions'`, `skipDangerousModePermissionPrompt === true`) and that the invocation argv contains `--permission-mode bypassPermissions` adjacent to (or after) `--setting-sources user`. The `resume` test makes the same argv assertion **and** reads the on-disk per-run settings file (since `resume()` runs the same `prepareWorkerIsolation()` path) and asserts the same three keys (`disableAllHooks`, `permissions.defaultMode === 'bypassPermissions'`, `skipDangerousModePermissionPrompt === true`). Both the `start` and `resume` tests additionally assert that the invocation argv does **not** include `--dangerously-skip-permissions` (e.g. `assert.ok(!args.includes('--dangerously-skip-permissions'))`), enforcing the issue #13 Decisions 7 / 21 ban. The user-hook fixture test (T13/D9) gains the same on-disk assertions in addition to the existing `disableAllHooks` one and the sentinel non-existence check. The legacy "no runId" test is kept exactly as currently planned: it asserts the argv contains neither `--settings` nor `--setting-sources` nor `--permission-mode` (zero isolation flags). The exported constant assertion (`deepStrictEqual` against `CLAUDE_WORKER_SETTINGS_BODY`) continues to pass after the constant is widened. |
+| T4 | Run repository quality gates | T1, T2, T3 | complete | `pnpm build` succeeds. `pnpm test` passes, with the targeted file `src/__tests__/claudeWorkerIsolation.test.ts` showing the new assertions executing. `pnpm verify` succeeds (build + tests + publish-readiness + audit + dist-tag + npm pack dry run). Evidence captured in the Execution Log. |
+| T5 | Update plan execution log and link evidence | T4 | complete | Each task's Execution Log entry is filled in with the actual command output (test names, exit codes), the plan Status flips to `complete`, and the parent index `plan.md` Status mirrors that. |
 
 ## Rule Candidates
 
@@ -142,41 +142,44 @@ none open. Prior reviewer feedback (security framing of `bypassPermissions`, dri
 
 ## Quality Gates
 
-- [ ] `pnpm build` passes.
-- [ ] `pnpm test` passes (with `claudeWorkerIsolation.test.ts` exercising the
+- [x] `pnpm build` passes.
+- [x] `pnpm test` passes (with `claudeWorkerIsolation.test.ts` exercising the
       new assertions).
-- [ ] `pnpm verify` passes end-to-end.
-- [ ] Hook isolation invariant (T5 / T13 from issue #40) still holds: the
+- [x] `pnpm verify` passes end-to-end.
+- [x] Hook isolation invariant (T5 / T13 from issue #40) still holds: the
       user-hook fixture test still asserts no sentinel side effect and
       `disableAllHooks: true` on disk.
-- [ ] No `--dangerously-skip-permissions` is introduced anywhere (rules from
+- [x] No `--dangerously-skip-permissions` is introduced anywhere (rules from
       issue #13 Decisions 7 / 21).
-- [ ] Legacy direct-caller (no `runId`) behavior unchanged: zero isolation
+- [x] Legacy direct-caller (no `runId`) behavior unchanged: zero isolation
       flags emitted.
 
 ## Execution Log
 
 ### T1: Extend `CLAUDE_WORKER_SETTINGS_BODY` and `prepareWorkerIsolation` argv
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** complete
+- **Evidence:** `src/backend/claude.ts` — `CLAUDE_WORKER_SETTINGS_BODY` widened to `{ disableAllHooks: true, permissions: { defaultMode: 'bypassPermissions' }, skipDangerousModePermissionPrompt: true } as const`. `prepareWorkerIsolation()` now returns `['--settings', settingsPath, '--setting-sources', 'user', '--permission-mode', 'bypassPermissions']` when a `runId` and `store` are present; the legacy "no `runId`" branch still returns `[]`. Both `start()` and `resume()` consume the same argv via the existing call sites.
+- **Notes:** No public schema change — the constant is internal-but-exported for tests. `bypassPermissions` is hardcoded per Decision 4 (no profile knob).
 
 ### T2: Update worker isolation doc comment
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** complete
+- **Evidence:** `src/backend/claude.ts` — block comment above `CLAUDE_WORKER_SETTINGS_FILENAME` now records: workers run non-interactively under the daemon harness as the same OS user; `permissions.defaultMode: 'bypassPermissions'` (mirrored by `--permission-mode bypassPermissions`) removes Claude Code's interactive approval prompts and is **not** a tool sandbox; `skipDangerousModePermissionPrompt: true` is required so the bypass mode does not surface a dangerous-mode confirmation prompt that the harness cannot answer; `disableAllHooks: true` preserves hook isolation per issue #40 T5/T13 and is **not** a tool sandbox; the `--permission-mode` CLI flag is set in addition to the file value to mirror `buildClaudeSpawnArgs` and survive precedence drift; `--dangerously-skip-permissions` is forbidden per issue #13 Decisions 7 / 21 and is **not** used here. References issue #47 and Decisions 9 / 26 from issue #40.
+- **Notes:** Comment placement preserved (immediately above the exported filename/body pair). No README or AGENTS.md change per Decision 8.
 
 ### T3: Update `claudeWorkerIsolation.test.ts` for the new effective settings
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** complete
+- **Evidence:** `src/__tests__/claudeWorkerIsolation.test.ts` — (1) `start` test now asserts `--permission-mode bypassPermissions` is present and positioned after `--setting-sources user`, asserts `!invocation.args.includes('--dangerously-skip-permissions')`, and asserts the on-disk JSON has `disableAllHooks === true`, `permissions.defaultMode === 'bypassPermissions'`, and `skipDangerousModePermissionPrompt === true`; the existing `deepStrictEqual` against `CLAUDE_WORKER_SETTINGS_BODY` continues to pass after the constant is widened. (2) `resume` test now reads the on-disk per-run settings file and asserts the same three keys, asserts the same `--permission-mode bypassPermissions` argv pair adjacent/after `--setting-sources user`, and asserts no `--dangerously-skip-permissions`. (3) The user-hook fixture test (T5 / T13 / D9) gains assertions for `permissions.defaultMode === 'bypassPermissions'` and `skipDangerousModePermissionPrompt === true` on disk while preserving the existing `disableAllHooks: true` and sentinel non-existence checks. (4) The legacy "no `runId`" test now also asserts `!invocation.args.includes('--permission-mode')`.
+- **Notes:** All assertions use `findIndex`/`indexOf` rather than positional indexing, matching the existing style and Risk #5 mitigation.
 
 ### T4: Run repository quality gates
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** complete
+- **Evidence:**
+  - `pnpm build` — succeeded (no tsc output; exit 0).
+  - `pnpm test` — `tests 532 / pass 530 / fail 0 / skipped 2 / duration_ms 33921`. Targeted suite line: `▶ Claude worker isolation (issue #40, T5 / Decision 9) … ✔ start emits --settings <per-run-path>, --setting-sources user, --permission-mode bypassPermissions, and writes the bypass+disableAllHooks settings on disk (17.978858ms) … ✔ Claude worker isolation (issue #40, T5 / Decision 9) (29.892802ms)`.
+  - `pnpm verify` — `tests 532 / pass 530 / fail 0`, followed by `[publish-ready] package metadata is ready for publish`, `[publish-tag] @ralphkrauss/agent-orchestrator@0.2.1 will publish with npm dist-tag latest`, `pnpm audit --prod` clean, and `npm pack --dry-run` producing `ralphkrauss-agent-orchestrator-0.2.1.tgz` (454.6 kB / 276 files). Exit 0.
+- **Notes:** No new dependencies, no `tsconfig.json` changes, no install. The two skipped tests are pre-existing skips unrelated to this change.
 
 ### T5: Update plan execution log and link evidence
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** complete
+- **Evidence:** This Execution Log filled in (T1–T5), task table `Status` flipped to `complete`, plan front-matter `Status` flipped to `complete`, Quality Gates checked, and parent `plans/47-…/plan.md` index Status mirrored to `complete`.
+- **Notes:** No commit/push performed (per task instructions).

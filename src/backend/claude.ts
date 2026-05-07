@@ -5,18 +5,54 @@ import type { BackendStartInput, ParsedBackendEvent, WorkerInvocation } from './
 import { BaseBackend, commandFromToolInput, emptyParsedEvent, errorFromEvent, extractText, getRecord, getString, invocation, pathFromToolInput } from './common.js';
 
 /**
- * Worker-side Claude settings written per run. `disableAllHooks: true` blocks
- * inherited user `~/.claude/settings.json` hooks from firing under workers,
- * so workers cannot rename the supervisor's tmux/status display through the
- * user's hook scripts (issue #40, Decision 9 / 26 / T5).
+ * Worker-side Claude settings written per run.
  *
- * `--setting-sources user` plus `--settings <path>` is the chosen v1 method;
- * `CLAUDE_CONFIG_DIR` is intentionally not redirected (Decision 26). Decision
- * 9b documents the redirected fallback if T13 proves this approach
- * insufficient.
+ * Workers are intentionally trusted-local, full-access, non-interactive daemon
+ * workers: they run as the same OS user as the daemon harness, in the run
+ * cwd, with no human attached to answer permission prompts. This file plus
+ * the matching `--permission-mode` CLI flag in `prepareWorkerIsolation()`
+ * configure the worker's permission posture so it can complete its run
+ * non-interactively. None of this is a tool sandbox.
+ *
+ * - `permissions.defaultMode: 'bypassPermissions'` (mirrored on the spawn
+ *   argv as `--permission-mode bypassPermissions`) matches the user's normal
+ *   Claude Code posture and removes Claude Code's interactive approval
+ *   prompts so the non-interactive worker can run routine tools (Bash, Edit,
+ *   Write, …) without stalling. It does NOT restrict the tool surface.
+ * - `skipDangerousModePermissionPrompt: true` is required so the bypass mode
+ *   does not surface a dangerous-mode confirmation prompt that the harness
+ *   has no human to answer. Empirically validated by issue #47.
+ * - `disableAllHooks: true` preserves hook isolation so inherited user
+ *   `~/.claude/settings.json` hooks cannot fire under workers (issue #40,
+ *   Decisions 9 / 26 / T5 / T13). Hook isolation is independent of the
+ *   permission posture and is also NOT a tool sandbox.
+ *
+ * The `--permission-mode bypassPermissions` CLI flag is set in addition to
+ * the in-file `defaultMode` to mirror the supervisor envelope
+ * (`buildClaudeSpawnArgs` in `src/claude/launcher.ts`) and to survive
+ * precedence drift across Claude Code versions where the CLI flag may take
+ * precedence over file settings.
+ *
+ * `--setting-sources user` plus `--settings <path>` is the chosen v1
+ * isolation method; `CLAUDE_CONFIG_DIR` is intentionally not redirected
+ * (Decision 26). Decision 9b documents the redirected fallback if T13 proves
+ * this approach insufficient.
+ *
+ * `--dangerously-skip-permissions` is forbidden everywhere in this harness
+ * per issue #13 Decisions 7 / 21 and is NOT used here. The bypass posture is
+ * expressed via the documented `defaultMode` / `--permission-mode` surface
+ * only.
+ *
+ * See issue #47 for the empirical reproduction that motivated adding the
+ * permission keys, and issue #40 Decisions 9 / 26 for the underlying worker
+ * isolation envelope.
  */
 export const CLAUDE_WORKER_SETTINGS_FILENAME = 'claude-worker-settings.json';
-export const CLAUDE_WORKER_SETTINGS_BODY = { disableAllHooks: true } as const;
+export const CLAUDE_WORKER_SETTINGS_BODY = {
+  disableAllHooks: true,
+  permissions: { defaultMode: 'bypassPermissions' },
+  skipDangerousModePermissionPrompt: true,
+} as const;
 
 export class ClaudeBackend extends BaseBackend {
   readonly name = 'claude' as const;
@@ -44,7 +80,7 @@ export class ClaudeBackend extends BaseBackend {
       `${JSON.stringify(CLAUDE_WORKER_SETTINGS_BODY, null, 2)}\n`,
       { mode: 0o600 },
     );
-    return ['--settings', settingsPath, '--setting-sources', 'user'];
+    return ['--settings', settingsPath, '--setting-sources', 'user', '--permission-mode', 'bypassPermissions'];
   }
 
   parseEvent(raw: unknown): ParsedBackendEvent {

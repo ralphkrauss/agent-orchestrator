@@ -11,7 +11,7 @@ import {
 import { RunStore } from '../runStore.js';
 
 describe('Claude worker isolation (issue #40, T5 / Decision 9)', () => {
-  it('start emits --settings <per-run-path> and --setting-sources user with disableAllHooks:true contents', async () => {
+  it('start emits --settings <per-run-path>, --setting-sources user, --permission-mode bypassPermissions, and writes the bypass+disableAllHooks settings on disk', async () => {
     const root = await mkdtemp(join(tmpdir(), 'claude-iso-'));
     try {
       const store = new RunStore(root);
@@ -33,15 +33,30 @@ describe('Claude worker isolation (issue #40, T5 / Decision 9)', () => {
       const sourcesIndex = invocation.args.findIndex((arg) => arg === '--setting-sources');
       assert.equal(invocation.args[sourcesIndex + 1], 'user');
 
+      const permissionModeIndex = invocation.args.findIndex((arg) => arg === '--permission-mode');
+      assert.ok(permissionModeIndex >= 0, 'invocation must include --permission-mode');
+      assert.equal(invocation.args[permissionModeIndex + 1], 'bypassPermissions');
+      assert.ok(
+        permissionModeIndex > sourcesIndex,
+        '--permission-mode should be adjacent to or after --setting-sources user (supervisor parity)',
+      );
+      assert.ok(
+        !invocation.args.includes('--dangerously-skip-permissions'),
+        '--dangerously-skip-permissions is banned per issue #13 Decisions 7 / 21',
+      );
+
       const onDisk = JSON.parse(await readFile(settingsPath, 'utf8')) as Record<string, unknown>;
       assert.deepStrictEqual(onDisk, CLAUDE_WORKER_SETTINGS_BODY);
       assert.equal(onDisk.disableAllHooks, true, 'worker isolation requires disableAllHooks');
+      const permissions = onDisk.permissions as Record<string, unknown> | undefined;
+      assert.equal(permissions?.defaultMode, 'bypassPermissions', 'on-disk permissions.defaultMode must be bypassPermissions');
+      assert.equal(onDisk.skipDangerousModePermissionPrompt, true, 'on-disk skipDangerousModePermissionPrompt must be true');
     } finally {
       await rm(root, { recursive: true, force: true });
     }
   });
 
-  it('resume emits the same isolation flags', async () => {
+  it('resume emits the same isolation flags and writes the same per-run settings on disk', async () => {
     const root = await mkdtemp(join(tmpdir(), 'claude-iso-'));
     try {
       const store = new RunStore(root);
@@ -57,6 +72,29 @@ describe('Claude worker isolation (issue #40, T5 / Decision 9)', () => {
       assert.ok(invocation.args.includes('--settings'));
       assert.ok(invocation.args.includes('--setting-sources'));
       assert.ok(invocation.args.includes('--resume'));
+
+      const sourcesIndex = invocation.args.findIndex((arg) => arg === '--setting-sources');
+      assert.equal(invocation.args[sourcesIndex + 1], 'user');
+      const permissionModeIndex = invocation.args.findIndex((arg) => arg === '--permission-mode');
+      assert.ok(permissionModeIndex >= 0, 'resume invocation must include --permission-mode');
+      assert.equal(invocation.args[permissionModeIndex + 1], 'bypassPermissions');
+      assert.ok(
+        permissionModeIndex > sourcesIndex,
+        '--permission-mode should be adjacent to or after --setting-sources user',
+      );
+      assert.ok(
+        !invocation.args.includes('--dangerously-skip-permissions'),
+        '--dangerously-skip-permissions is banned per issue #13 Decisions 7 / 21',
+      );
+
+      const settingsIndex = invocation.args.findIndex((arg) => arg === '--settings');
+      const settingsPath = invocation.args[settingsIndex + 1]!;
+      assert.equal(settingsPath, join(store.runDir(meta.run_id), CLAUDE_WORKER_SETTINGS_FILENAME));
+      const onDisk = JSON.parse(await readFile(settingsPath, 'utf8')) as Record<string, unknown>;
+      assert.equal(onDisk.disableAllHooks, true, 'resume must still pin disableAllHooks');
+      const permissions = onDisk.permissions as Record<string, unknown> | undefined;
+      assert.equal(permissions?.defaultMode, 'bypassPermissions', 'resume on-disk permissions.defaultMode must be bypassPermissions');
+      assert.equal(onDisk.skipDangerousModePermissionPrompt, true, 'resume on-disk skipDangerousModePermissionPrompt must be true');
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -71,6 +109,7 @@ describe('Claude worker isolation (issue #40, T5 / Decision 9)', () => {
     });
     assert.ok(!invocation.args.includes('--settings'));
     assert.ok(!invocation.args.includes('--setting-sources'));
+    assert.ok(!invocation.args.includes('--permission-mode'));
   });
 
   it('with a representative user ~/.claude/settings.json hook present, the worker invocation still pins disableAllHooks:true and --setting-sources user (T5 / D9 isolation contract)', async () => {
@@ -123,10 +162,14 @@ describe('Claude worker isolation (issue #40, T5 / Decision 9)', () => {
       assert.ok(settingsIdx >= 0, 'worker must pass --settings');
       const settingsPath = invocation.args[settingsIdx + 1]!;
       assert.equal(settingsPath, join(store.runDir(meta.run_id), CLAUDE_WORKER_SETTINGS_FILENAME));
-      // ...whose contents include disableAllHooks: true.
+      // ...whose contents include disableAllHooks: true plus the worker
+      // permission posture (bypassPermissions + skipDangerousModePermissionPrompt).
       const onDisk = JSON.parse(await readFile(settingsPath, 'utf8')) as Record<string, unknown>;
       assert.deepStrictEqual(onDisk, CLAUDE_WORKER_SETTINGS_BODY);
       assert.equal(onDisk.disableAllHooks, true);
+      const permissions = onDisk.permissions as Record<string, unknown> | undefined;
+      assert.equal(permissions?.defaultMode, 'bypassPermissions');
+      assert.equal(onDisk.skipDangerousModePermissionPrompt, true);
 
       // 2. --setting-sources user forces Claude to read only user-tier
       // settings (combined with the harness-supplied --settings file). With
