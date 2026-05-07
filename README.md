@@ -18,8 +18,13 @@ For local development from a checkout:
 pnpm install --frozen-lockfile
 pnpm build
 node dist/cli.js doctor
-node dist/cli.js
+node dist/cli.js server
 ```
+
+Bare `agent-orchestrator` (no subcommand) prints this help when run from a
+terminal and starts the stdio MCP server when stdin is piped (the way every MCP
+client launches it). Use `agent-orchestrator server` to start the MCP server
+explicitly from a terminal.
 
 To test a checkout without colliding with an npm-installed stable daemon, use
 the short local `just` passthrough:

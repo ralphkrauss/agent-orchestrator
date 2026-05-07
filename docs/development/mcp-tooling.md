@@ -302,8 +302,13 @@ The `agent-orchestrator` server starts this repository's own MCP package from
 the local build output:
 
 ```text
-node dist/cli.js
+node dist/cli.js server
 ```
+
+The bare `node dist/cli.js` form prints help when run from a terminal and
+starts the stdio MCP server when stdin is piped (the path real MCP clients
+take). Use the explicit `server` subcommand above to start the MCP server from
+a terminal.
 
 This lets agents use the orchestrator while developing the orchestrator. Run
 `pnpm build` after changing source before restarting the MCP client. If the

@@ -4,7 +4,7 @@ Branch: `33-root-command-should-give-you-the-help`
 Plan Slug: `33-root-command-help`
 Parent Issue: #33
 Created: 2026-05-06
-Status: planning
+Status: implemented (awaiting review)
 
 ## Context
 
@@ -123,31 +123,37 @@ none
 ## Execution Log
 
 ### T1: Add `src/cliRoot.ts` with `HELP_TEXT` + `decideRootMode`
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done
+- **Evidence:** New `src/cliRoot.ts` created. No top-level `await`; imports nothing (no `./server.js`, no `./daemon/*`, no `./diagnostics.js`). Exports `HELP_TEXT` (with the Decision 5 wording change baked into the no-args line) and `decideRootMode(stdinIsTty)` returning `'help'` iff `stdinIsTty === true`.
+- **Notes:** Module is pure; safe to import from unit tests without daemon side effects.
 
 ### T2: Wire `src/cli.ts` to use the new module
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done
+- **Evidence:** `src/cli.ts` now imports `HELP_TEXT` and `decideRootMode` from `./cliRoot.js`. Inline help block removed (single source of truth). No-args branch consults `decideRootMode(process.stdin.isTTY)` — writes `HELP_TEXT` for `'help'`, falls through to `await import('./server.js')` for `'server'`. Explicit `command === 'server'` is its own branch and unchanged. `--help`/`-h`/`help` writes the same `HELP_TEXT`.
+- **Notes:** Existing `daemonCli.test.ts --help` assertions continue to pass because subcommand lines are unchanged.
 
 ### T3: Add focused tests in `src/__tests__/cliRoot.test.ts`
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done
+- **Evidence:** New `src/__tests__/cliRoot.test.ts` covers (a) `decideRootMode` truth table; (b) `HELP_TEXT` contains both the bare-invocation wording and the explicit-server line; (c) regression: `dist/cli.js --help` prints help; (d) spawn test that isolates `AGENT_ORCHESTRATOR_HOME` via `mkdtemp`, sends NDJSON `initialize` to a piped stdin, parses the framed response, asserts `result.serverInfo.name === "agent-orchestrator"`. Cleanup uses `dist/cli.js stop --force` + a locally-defined `waitForStopped` helper + `rm -rf` of the temp home (no import from `daemonCli.test.ts`). All four cliRoot tests pass.
+- **Notes:** Run: `node --test dist/__tests__/daemonCli.test.js dist/__tests__/cliRoot.test.js` → 11/11 passing.
 
 ### T4: Update README and human-facing docs
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done
+- **Evidence:** `README.md` local-checkout block changed `node dist/cli.js` → `node dist/cli.js server` and added a one-paragraph note clarifying that bare invocation prints help on a TTY and starts the MCP server when stdin is piped. `docs/development/mcp-tooling.md` ~line 301 changed the example to `node dist/cli.js server` and added a one-line note that the bare form prints help on a TTY. MCP client config blocks left unchanged because they always pipe stdio.
+- **Notes:** No changes elsewhere; line ~330 statement that `dist/cli.js` "starts the stdio MCP server" still holds in MCP-client (piped-stdin) context.
 
 ### T5: Sync AI workspace if any rule/skill changed
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done (no-op)
+- **Evidence:** No edits under `.agents/` — `sync-ai-workspace.mjs` not run.
+- **Notes:** Per plan, T5 is a documented no-op when no rule/skill changed.
 
 ### T6: Verify and record evidence
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** done
+- **Evidence:**
+  - `pnpm build` → exit 0.
+  - `node --test dist/__tests__/daemonCli.test.js dist/__tests__/cliRoot.test.js` → 11 pass / 0 fail (4 cliRoot, 7 daemon CLI).
+  - `pnpm test` → 534 pass / 0 fail / 2 skipped (536 total, 108 suites).
+  - `pnpm verify` → exit 0 (build + test + check-publish-ready + resolve-publish-tag + audit + npm pack --dry-run all green).
+  - Manual smoke: `TEMP_HOME=$(mktemp -d); printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"0.0.0"}}}\n' | AGENT_ORCHESTRATOR_HOME=$TEMP_HOME node dist/cli.js` returned `{"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"agent-orchestrator","version":"0.2.1"}},"jsonrpc":"2.0","id":1}`. `AGENT_ORCHESTRATOR_HOME=$TEMP_HOME node dist/cli.js stop --force` printed `agent-orchestrator daemon stopping store=$TEMP_HOME`. Temp home removed.
+  - Manual TTY smoke: `script -qfc "node dist/cli.js" /dev/null < /dev/null` (PTY-allocated stdin) printed the new help text starting with `agent-orchestrator` and the line `agent-orchestrator              Show this help in a terminal; start the MCP server for piped stdio`.
+- **Notes:** No commit, push, or version bump performed.
