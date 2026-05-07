@@ -4,6 +4,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveBinary } from '../backend/common.js';
 import { getBackendStatus } from '../diagnostics.js';
+import { formatVersionOutput } from '../packageMetadata.js';
 import { defaultWorkerProfilesFile } from '../workerRouting.js';
 import {
   createWorkerCapabilityCatalog,
@@ -116,6 +117,14 @@ export async function runOpenCodeLauncher(
     env: process.env,
   },
 ): Promise<number> {
+  const preParseArgs = [...argv];
+  if (preParseArgs[0] === 'setup') preParseArgs.shift();
+  const separatorIndex = preParseArgs.indexOf('--');
+  const ownArgs = separatorIndex >= 0 ? preParseArgs.slice(0, separatorIndex) : preParseArgs;
+  if (ownArgs[0] === '--version') {
+    io.stdout.write(formatVersionOutput('agent-orchestrator-opencode', ownArgs.includes('--json')));
+    return 0;
+  }
   const parsed = parseOpenCodeLauncherArgs(argv, io.env ?? process.env);
   if (!parsed.ok) {
     io.stderr.write(`${parsed.error}\nRun agent-orchestrator opencode --help for usage.\n`);
@@ -209,6 +218,7 @@ Options:
   --opencode-binary <path>             Defaults to opencode on PATH.
   --print-config                       Print generated OpenCode config and exit.
   --help
+  --version [--json]                   Print agent-orchestrator-opencode version and exit. Use \`-- --version\` to forward to the wrapped OpenCode binary.
 
 Passthrough after --:
   Omit passthrough args for the OpenCode TUI, or use run <prompt>.

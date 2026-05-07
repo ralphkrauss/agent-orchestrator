@@ -5,6 +5,7 @@ import { cp, mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/prom
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ulid } from 'ulid';
+import { formatVersionOutput } from '../packageMetadata.js';
 import { IpcClient, IpcRequestError } from '../ipc/client.js';
 import { daemonPaths } from '../daemon/paths.js';
 import {
@@ -173,6 +174,14 @@ export async function runClaudeLauncher(
   io: ClaudeLauncherIo = { stdout: process.stdout, stderr: process.stderr, env: process.env },
 ): Promise<number> {
   const env = io.env ?? process.env;
+  const preParseArgs = [...argv];
+  if (preParseArgs[0] === 'setup') preParseArgs.shift();
+  const separatorIndex = preParseArgs.indexOf('--');
+  const ownArgs = separatorIndex >= 0 ? preParseArgs.slice(0, separatorIndex) : preParseArgs;
+  if (ownArgs[0] === '--version') {
+    io.stdout.write(formatVersionOutput('agent-orchestrator-claude', ownArgs.includes('--json')));
+    return 0;
+  }
   const parsed = parseClaudeLauncherArgs(argv, env);
   if (!parsed.ok) {
     io.stderr.write(`${parsed.error}\nRun agent-orchestrator claude --help for usage.\n`);
@@ -391,6 +400,7 @@ Options:
   --print-discovery                  Print the Claude binary compatibility report and exit.
   --print-config                     Print the generated supervisor envelope (system prompt, settings, mcp, runtime skills) and exit.
   --help
+  --version [--json]                 Print agent-orchestrator-claude version and exit. Use \`-- --version\` to forward to the wrapped Claude binary.
 
 Passthrough after --:
   Allowed Claude flags: --print, -p, --output-format, --input-format, --include-partial-messages,

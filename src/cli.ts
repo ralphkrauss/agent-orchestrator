@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 import { getBackendStatus, formatBackendStatus } from './diagnostics.js';
 import { isDaemonCliCommand, runDaemonCli } from './daemon/daemonCli.js';
+import { formatVersionOutput } from './packageMetadata.js';
 
 const command = process.argv[2];
 
-if (command === 'doctor') {
+if (command === '--version') {
+  process.stdout.write(formatVersionOutput('agent-orchestrator', process.argv.includes('--json')));
+} else if (command === 'doctor') {
   const status = await getBackendStatus();
   if (process.argv.includes('--json')) {
     process.stdout.write(`${JSON.stringify(status, null, 2)}\n`);
@@ -61,6 +64,8 @@ Usage:
   agent-orchestrator stop [--force]
   agent-orchestrator restart [--force]
   agent-orchestrator prune --older-than-days <days> [--dry-run]
+  agent-orchestrator --version
+  agent-orchestrator --version --json
 
 Standalone daemon alias:
   agent-orchestrator-daemon status
@@ -75,9 +80,12 @@ Standalone daemon alias:
   agent-orchestrator-daemon auth status [--json]
   agent-orchestrator-daemon auth <provider> [--from-env [VAR] | --from-stdin]
   agent-orchestrator-daemon auth unset <provider>
+  agent-orchestrator-daemon --version
+  agent-orchestrator-daemon --version --json
 
 OpenCode orchestration:
   agent-orchestrator-opencode [options]
+  agent-orchestrator-opencode --version
 `);
 } else {
   process.stderr.write(`Unknown command: ${command}\nRun agent-orchestrator --help for usage.\n`);

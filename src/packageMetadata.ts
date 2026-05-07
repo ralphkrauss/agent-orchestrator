@@ -21,6 +21,14 @@ export function getPackageVersion(): string {
   return getPackageMetadata().version;
 }
 
+export function formatVersionOutput(binName: string, json: boolean): string {
+  const meta = getPackageMetadata();
+  if (json) {
+    return `${JSON.stringify({ name: meta.name, version: meta.version })}\n`;
+  }
+  return `${binName} ${meta.version}\n`;
+}
+
 function readPackageMetadata(): PackageMetadata {
   const packageJsonPath = resolve(dirname(fileURLToPath(import.meta.url)), '../package.json');
   try {

@@ -7,7 +7,7 @@ import { existsSync } from 'node:fs';
 import { IpcClient, IpcRequestError } from '../ipc/client.js';
 import { daemonPaths } from './paths.js';
 import { checkDaemonVersion } from '../daemonVersion.js';
-import { getPackageVersion } from '../packageMetadata.js';
+import { formatVersionOutput, getPackageVersion } from '../packageMetadata.js';
 import { RunStore, type PruneRunsResult } from '../runStore.js';
 import { buildObservabilitySnapshot } from '../observability.js';
 import { getBackendStatus } from '../diagnostics.js';
@@ -34,6 +34,9 @@ export async function runDaemonCli(argv: readonly string[] = process.argv.slice(
     case '-h':
     case 'help':
       process.stdout.write(daemonHelp());
+      break;
+    case '--version':
+      process.stdout.write(formatVersionOutput('agent-orchestrator-daemon', argv.includes('--json')));
       break;
     case 'start':
       await start();
@@ -73,6 +76,7 @@ function daemonHelp(): string {
     'Usage:',
     '  agent-orchestrator start | stop [--force] | restart [--force] | status [--verbose|--json] | runs [--json] [--prompts] | watch [--interval-ms <ms>] [--limit <n>] | prune --older-than-days <days> [--dry-run] | auth ...',
     '  agent-orchestrator-daemon start | stop [--force] | restart [--force] | status [--verbose|--json] | runs [--json] [--prompts] | watch [--interval-ms <ms>] [--limit <n>] | prune --older-than-days <days> [--dry-run] | auth ...',
+    '  agent-orchestrator-daemon --version [--json]',
     '',
   ].join('\n');
 }
