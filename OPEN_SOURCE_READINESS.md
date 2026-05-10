@@ -368,19 +368,18 @@ Before broadly sharing the project:
 
 - [x] `pnpm install --frozen-lockfile` succeeds from a clean clone.
 - [x] `pnpm verify` passes locally.
-- [ ] CI is green on the supported platform matrix.
-  - CI matrix is configured for Ubuntu/macOS full verification and Windows
-    smoke coverage, but the current tree must be committed and pushed before
-    GitHub Actions can prove this exact change set.
+- [x] CI is green on the supported platform matrix.
+  - PR #54 passed Ubuntu/macOS full verification and Windows smoke coverage on
+    Node 22 and Node 24.
 - [x] `npm pack --dry-run` contains only intended package files.
 - [x] README gives a clear five-minute path to success.
 - [x] Security model is documented.
 - [x] CONTRIBUTING flow is documented.
 - [x] Issue and PR templates exist.
 - [x] CHANGELOG has versioned released entries.
-- [ ] GitHub repo metadata is filled in.
-  - The exact description, homepage, topics, and authenticated `gh api`
-    commands are documented in `docs/repository-map.md`.
+- [x] GitHub repo metadata is filled in.
+  - The live repository description, homepage, and topics match
+    `docs/repository-map.md`.
 - [x] Public roadmap or project-status statement exists.
 
 ## Current Audit Status
@@ -407,8 +406,14 @@ Evidence from the latest clean-copy run:
 - The temporary clean-copy directory was removed.
 - No `.tgz` artifact remained in the worktree after verification.
 
-Remaining external blockers:
+Additional remote evidence:
 
-- The current tree is not committed or pushed, so GitHub Actions has not run on
-  this exact change set.
-- Live GitHub repository metadata still needs an authenticated maintainer update.
+- PR #54 ran the supported CI matrix successfully:
+  - `Verify on ubuntu-latest / Node 22`
+  - `Verify on ubuntu-latest / Node 24`
+  - `Verify on macos-latest / Node 22`
+  - `Verify on macos-latest / Node 24`
+  - `Windows Smoke on Node 22`
+  - `Windows Smoke on Node 24`
+- Live GitHub repository metadata was verified with the configured description,
+  npm homepage, and topics.
