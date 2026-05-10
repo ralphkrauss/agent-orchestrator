@@ -1,0 +1,93 @@
+name: Bug report
+description: Report a reproducible problem with Agent Orchestrator.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not paste secrets, API keys, private tokens, or full prompt logs. Use SECURITY.md for vulnerabilities.
+  - type: input
+    id: package_version
+    attributes:
+      label: Package version
+      description: Run `agent-orchestrator --version` or check `npm ls @ralphkrauss/agent-orchestrator`.
+      placeholder: "0.2.2"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      placeholder: "macOS 15.4, Ubuntu 24.04, Windows 11"
+    validations:
+      required: true
+  - type: input
+    id: node
+    attributes:
+      label: Node.js version
+      placeholder: "v22.15.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend
+      multiple: true
+      options:
+        - Codex
+        - Claude
+        - Cursor
+        - OpenCode
+        - Daemon / MCP server
+        - Packaging / CI
+        - Documentation
+    validations:
+      required: true
+  - type: input
+    id: mcp_client
+    attributes:
+      label: MCP client
+      placeholder: "Claude Code, Codex, Cursor, OpenCode, other"
+  - type: textarea
+    id: command
+    attributes:
+      label: Command or MCP tool call
+      description: Include the exact command or tool input, with secrets removed.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: Paste relevant `doctor --json`, `get_backend_status`, or run summary output with secrets removed.
+      render: json
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Keep excerpts minimal and remove secrets, private tokens, and unrelated prompt content.
+      render: text
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true

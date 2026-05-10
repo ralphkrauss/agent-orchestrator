@@ -1,7 +1,7 @@
 {
   "name": "@ralphkrauss/agent-orchestrator",
   "version": "0.2.2",
-  "description": "MCP agent orchestrator for Codex and Claude worker runs",
+  "description": "Local MCP orchestrator for supervising Codex, Claude, Cursor, and OpenCode worker runs.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -32,6 +32,13 @@
     "!dist/__tests__/",
     "!src/__tests__/",
     "README.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "SUPPORT.md",
+    "ROADMAP.md",
+    "CODE_OF_CONDUCT.md",
+    "docs/",
     "PUBLISHING.md",
     "LICENSE.md"
   ],
@@ -47,6 +54,17 @@
   },
   "homepage": "https://github.com/ralphkrauss/agent-orchestrator#readme",
   "license": "MIT",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "agent-orchestration",
+    "codex-cli",
+    "claude-code",
+    "cursor",
+    "opencode",
+    "typescript",
+    "nodejs"
+  ],
   "publishConfig": {
     "access": "public"
   },

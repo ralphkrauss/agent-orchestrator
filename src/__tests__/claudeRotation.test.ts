@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, realpath, writeFile } from 'node:fs/promises';
 import { delimiter, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createBackendRegistry } from '../backend/registry.js';
@@ -185,6 +185,10 @@ async function setupFixture(): Promise<Fixture> {
   const service = new OrchestratorService(store, createBackendRegistry(store));
   await service.initialize();
   return { home, cwd, service };
+}
+
+async function encodeWorkerCwd(cwd: string): Promise<string> {
+  return (await realpath(cwd)).replace(/\//g, '-');
 }
 
 describe('claude account-bound spawn env scrubbing (end-to-end through fake claude)', () => {
@@ -569,7 +573,7 @@ describe('T-COR4 — copy-on-rotate-resume end-to-end (config_dir accounts)', ()
     // Pinned: parent observed a session id and the JSONL exists under A's projects/.
     assert.ok(parent.observedSessionId, 'parent must have observed a session id');
     const sid = parent.observedSessionId!;
-    const encodedCwd = fixture.cwd.replace(/\//g, '-');
+    const encodedCwd = await encodeWorkerCwd(fixture.cwd);
     const sourcePath = join(aDir, 'projects', encodedCwd, `${sid}.jsonl`);
     const { readFile, stat } = await import('node:fs/promises');
     const sourceBytesBefore = await readFile(sourcePath);
@@ -671,7 +675,7 @@ describe('T-COR4 — copy-on-rotate-resume end-to-end (config_dir accounts)', ()
     const parent = await rateLimitParent(fixture, { firstAccount: 'A', priority: ['A', 'B'] });
     assert.ok(parent.observedSessionId);
     const sid = parent.observedSessionId!;
-    const encodedCwd = fixture.cwd.replace(/\//g, '-');
+    const encodedCwd = await encodeWorkerCwd(fixture.cwd);
     const aSourcePath = join(aDir, 'projects', encodedCwd, `${sid}.jsonl`);
     const bTargetPath = join(bDir, 'projects', encodedCwd, `${sid}.jsonl`);
     void bTargetPath;
@@ -704,7 +708,7 @@ describe('T-COR4 — copy-on-rotate-resume end-to-end (config_dir accounts)', ()
     const parent = await rateLimitParent(fixture, { firstAccount: 'A', priority: ['A', 'B'] });
     assert.ok(parent.observedSessionId);
     const sid = parent.observedSessionId!;
-    const encodedCwd = fixture.cwd.replace(/\//g, '-');
+    const encodedCwd = await encodeWorkerCwd(fixture.cwd);
     void aDir;
 
     // Pre-seed B's JSONL with DIFFERENT contents so the collision-different
@@ -803,15 +807,24 @@ describe('T-COR4 — copy-on-rotate-resume end-to-end (config_dir accounts)', ()
     // merge the rotation marker into the failure terminal_context so the
     // supervisor still sees `kind: "resumed_after_rotation"`.
     const fixture = await setupFixture();
-    await registerConfigDirAccount(fixture.home, 'A');
+    const aDir = await registerConfigDirAccount(fixture.home, 'A');
     await registerConfigDirAccount(fixture.home, 'B');
 
     const parent = await rateLimitParent(fixture, { firstAccount: 'A', priority: ['A', 'B'] });
     assert.ok(parent.observedSessionId);
 
+    const workerEncodedCwd = await encodeWorkerCwd(fixture.cwd);
+    const fallbackEncodedCwd = fixture.cwd.replace(/\//g, '-');
+    const sid = parent.observedSessionId!;
+    const { copyFile, mkdir, rm } = await import('node:fs/promises');
+    await mkdir(join(aDir, 'projects', fallbackEncodedCwd), { recursive: true });
+    await copyFile(
+      join(aDir, 'projects', workerEncodedCwd, `${sid}.jsonl`),
+      join(aDir, 'projects', fallbackEncodedCwd, `${sid}.jsonl`),
+    );
+
     // Wipe the cwd so the rotation child's startManagedRun fails the
     // access(R_OK | W_OK) check and routes through failPreSpawn.
-    const { rm } = await import('node:fs/promises');
     await rm(fixture.cwd, { recursive: true, force: true });
 
     const fu = await fixture.service.sendFollowup({ run_id: parent.runId, prompt: 'fu' });

@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, symlink, unlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, realpath, symlink, unlink, writeFile } from 'node:fs/promises';
 import { delimiter, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFile } from 'node:child_process';
@@ -64,7 +64,7 @@ process.exit(1);
     const capture = await captureGitSnapshot(repo);
     assert.equal(capture.status, 'captured');
     assert.ok(capture.snapshot);
-    assert.equal(capture.snapshot.root, repo);
+    assert.equal(capture.snapshot.root, await realpath(repo));
     assert.equal(capture.snapshot.branch, (await execFileAsync('git', ['branch', '--show-current'], { cwd: repo })).stdout.trim() || null);
 
     await writeFile(join(repo, 'tracked.txt'), 'dirty after\n');
