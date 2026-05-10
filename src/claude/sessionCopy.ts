@@ -10,13 +10,13 @@ const DIR_MODE = 0o700;
 
 /**
  * Encode an absolute cwd into Claude Code's `projects/` subdirectory name
- * (D-COR4). Slashes become `-`; the leading slash becomes a leading `-`.
+ * (D-COR4). Path separators become `-`; the leading slash becomes a leading `-`.
  *
  * Pinned by the live on-disk path under
  * `<run_store>/claude/accounts/<name>/projects/...`.
  */
 export function encodeProjectCwd(absoluteCwd: string): string {
-  return absoluteCwd.replace(/\//g, '-');
+  return absoluteCwd.replace(/^\\\\\?\\/, '').replace(/\\/g, '/').replace(/\//g, '-');
 }
 
 export interface ComputeSessionJsonlPathInput {

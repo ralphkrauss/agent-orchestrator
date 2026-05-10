@@ -401,7 +401,7 @@ Evidence from the latest clean-copy run:
 - Publish readiness check passed.
 - npm dist-tag resolution selected `latest`.
 - `pnpm audit --prod` reported no known vulnerabilities.
-- `npm pack --dry-run` reported 296 files, about 479.4 kB package size, and
+- `npm pack --dry-run` reported 296 files, about 479.8 kB package size, and
   about 2.4 MB unpacked size.
 - The temporary clean-copy directory was removed.
 - No `.tgz` artifact remained in the worktree after verification.

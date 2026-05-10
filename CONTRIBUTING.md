@@ -7,6 +7,7 @@ Thanks for helping improve Agent Orchestrator. This project is a local MCP serve
 - Node.js 22 or newer.
 - pnpm 10.30.3.
 - Git.
+- Just 1.44 or newer for repository-local dogfooding helpers.
 - Optional local CLIs for backend smoke testing: Codex, Claude Code, OpenCode.
 
 ## Setup

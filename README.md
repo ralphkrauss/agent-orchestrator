@@ -68,7 +68,9 @@ Backends:
 
 `missing` means the worker binary or SDK is not available. `auth_unknown` means the backend looks runnable, but the package cannot prove auth without asking that backend to make a model call.
 
-Add the MCP server to one client:
+Add the MCP server to one client. Persistent MCP client entries should pin a
+concrete package version so restarts use the same MCP surface; the examples
+below use `0.2.2`.
 
 ```json
 {
@@ -76,7 +78,7 @@ Add the MCP server to one client:
     "agent-orchestrator": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@ralphkrauss/agent-orchestrator@latest"]
+      "args": ["-y", "@ralphkrauss/agent-orchestrator@0.2.2"]
     }
   }
 }
@@ -127,6 +129,10 @@ See [docs/first-run.md](docs/first-run.md) for a complete first-run guide, commo
 
 ## MCP Client Config
 
+Persistent MCP client entries should pin a concrete package version. Use
+`@latest` for one-off diagnostics, and update pinned client config versions
+when intentionally upgrading.
+
 Claude Code `.mcp.json`:
 
 ```json
@@ -135,7 +141,7 @@ Claude Code `.mcp.json`:
     "agent-orchestrator": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@ralphkrauss/agent-orchestrator@latest"]
+      "args": ["-y", "@ralphkrauss/agent-orchestrator@0.2.2"]
     }
   }
 }
@@ -146,7 +152,7 @@ Codex `.codex/config.toml`:
 ```toml
 [mcp_servers.agent-orchestrator]
 command = "npx"
-args = ["-y", "@ralphkrauss/agent-orchestrator@latest"]
+args = ["-y", "@ralphkrauss/agent-orchestrator@0.2.2"]
 ```
 
 Cursor `.cursor/mcp.json`:
@@ -156,7 +162,7 @@ Cursor `.cursor/mcp.json`:
   "mcpServers": {
     "agent-orchestrator": {
       "command": "npx",
-      "args": ["-y", "@ralphkrauss/agent-orchestrator@latest"]
+      "args": ["-y", "@ralphkrauss/agent-orchestrator@0.2.2"]
     }
   }
 }
@@ -169,7 +175,7 @@ OpenCode `opencode.json`:
   "mcp": {
     "agent-orchestrator": {
       "type": "local",
-      "command": ["npx", "-y", "@ralphkrauss/agent-orchestrator@latest"]
+      "command": ["npx", "-y", "@ralphkrauss/agent-orchestrator@0.2.2"]
     }
   }
 }

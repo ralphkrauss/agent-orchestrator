@@ -11,6 +11,7 @@ import {
   loadAccountRegistry,
   upsertAccount,
 } from '../claude/accountRegistry.js';
+import { encodeProjectCwd } from '../claude/sessionCopy.js';
 
 let originalPath: string | undefined;
 let originalAnthropic: string | undefined;
@@ -188,7 +189,7 @@ async function setupFixture(): Promise<Fixture> {
 }
 
 async function encodeWorkerCwd(cwd: string): Promise<string> {
-  return (await realpath(cwd)).replace(/\//g, '-');
+  return encodeProjectCwd(await realpath(cwd));
 }
 
 describe('claude account-bound spawn env scrubbing (end-to-end through fake claude)', () => {

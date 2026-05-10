@@ -40,7 +40,9 @@ Common statuses:
 
 ## 2. Configure One MCP Client
 
-Use the package as an MCP stdio server:
+Use the package as an MCP stdio server. Persistent MCP client entries should
+pin a concrete package version so restarts use the same MCP surface; this guide
+uses `0.2.2`.
 
 ```json
 {
@@ -48,7 +50,7 @@ Use the package as an MCP stdio server:
     "agent-orchestrator": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@ralphkrauss/agent-orchestrator@latest"]
+      "args": ["-y", "@ralphkrauss/agent-orchestrator@0.2.2"]
     }
   }
 }

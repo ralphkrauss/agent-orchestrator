@@ -44,6 +44,8 @@ describe('encodeProjectCwd', () => {
     assert.equal(encodeProjectCwd('/'), '-');
     assert.equal(encodeProjectCwd('/foo'), '-foo');
     assert.equal(encodeProjectCwd('/a/b'), '-a-b');
+    assert.equal(encodeProjectCwd('C:\\Users\\ralph\\workspace'), 'C:-Users-ralph-workspace');
+    assert.equal(encodeProjectCwd('\\\\?\\C:\\Users\\ralph\\workspace'), 'C:-Users-ralph-workspace');
   });
 });
 
