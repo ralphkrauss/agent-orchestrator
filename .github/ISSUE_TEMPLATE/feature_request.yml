@@ -1,0 +1,57 @@
+name: Feature request
+description: Suggest an improvement or new capability.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please describe the workflow and constraints. Do not include secrets or private customer data.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to accomplish, and what is hard today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the behavior, command, MCP tool shape, or docs change you want.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - Codex backend
+        - Claude backend
+        - Cursor backend
+        - OpenCode harness
+        - Daemon lifecycle
+        - MCP contracts
+        - CLI
+        - Documentation
+        - Packaging / CI
+  - type: input
+    id: os
+    attributes:
+      label: Relevant OS
+      placeholder: "Linux, macOS, Windows, all"
+  - type: input
+    id: mcp_client
+    attributes:
+      label: Relevant MCP client
+      placeholder: "Claude Code, Codex, Cursor, OpenCode, other"
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility notes
+      description: Mention expected migration, security, or backward-compatibility concerns.

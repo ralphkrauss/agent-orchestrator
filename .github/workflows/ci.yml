@@ -13,12 +13,13 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    name: Build, Test, and Pack on Node ${{ matrix.node-version }}
-    runs-on: ubuntu-latest
+  verify:
+    name: Verify on ${{ matrix.os }} / Node ${{ matrix.node-version }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest]
         node-version: ['22', '24']
 
     steps:
@@ -56,3 +57,52 @@ jobs:
           ./node_modules/.bin/agent-orchestrator-opencode --help
           ./node_modules/.bin/agent-orchestrator-opencode --print-config >/dev/null
           ./node_modules/.bin/agent-orchestrator opencode --print-config >/dev/null
+
+  windows-smoke:
+    name: Windows Smoke on Node ${{ matrix.node-version }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['22', '24']
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Windows-focused tests
+        run: node --test dist/__tests__/backendInvocation.test.js dist/__tests__/daemonPaths.test.js dist/__tests__/monitorPin.test.js dist/__tests__/cliVersion.test.js
+
+      - name: Install packed tarball smoke test
+        shell: pwsh
+        run: |
+          $packageFile = npm pack --silent | Select-Object -Last 1
+          $tempDir = Join-Path $env:RUNNER_TEMP ([guid]::NewGuid().ToString())
+          New-Item -ItemType Directory -Path $tempDir | Out-Null
+          Push-Location $tempDir
+          npm init -y | Out-Null
+          npm install (Join-Path $env:GITHUB_WORKSPACE $packageFile) | Out-Null
+          .\node_modules\.bin\agent-orchestrator.cmd --help
+          .\node_modules\.bin\agent-orchestrator.cmd doctor --json
+          .\node_modules\.bin\agent-orchestrator-daemon.cmd --help
+          .\node_modules\.bin\agent-orchestrator-opencode.cmd --help
+          .\node_modules\.bin\agent-orchestrator-opencode.cmd --print-config | Out-Null
+          .\node_modules\.bin\agent-orchestrator.cmd opencode --print-config | Out-Null
+          Pop-Location

@@ -10,13 +10,13 @@ const DIR_MODE = 0o700;
 
 /**
  * Encode an absolute cwd into Claude Code's `projects/` subdirectory name
- * (D-COR4). Slashes become `-`; the leading slash becomes a leading `-`.
+ * (D-COR4). Path separators become `-`; the leading slash becomes a leading `-`.
  *
  * Pinned by the live on-disk path under
  * `<run_store>/claude/accounts/<name>/projects/...`.
  */
 export function encodeProjectCwd(absoluteCwd: string): string {
-  return absoluteCwd.replace(/\//g, '-');
+  return absoluteCwd.replace(/^\\\\\?\\/, '').replace(/\\/g, '/').replace(/\//g, '-');
 }
 
 export interface ComputeSessionJsonlPathInput {
@@ -94,17 +94,18 @@ export async function copySessionJsonlForRotation(input: CopySessionJsonlInput):
     return { ok: false, reason: 'unsafe_account_name', details: { account: input.newAccount, role: 'new' } };
   }
 
+  const projectCwd = await resolveProjectCwd(input.cwd);
   const sourcePath = computeSessionJsonlPath({
     accountsRoot: input.accountsRoot,
     account: input.priorAccount,
-    cwd: input.cwd,
+    cwd: projectCwd,
     sessionId: input.sessionId,
   });
   const priorAccountRoot = join(input.accountsRoot, input.priorAccount);
   const targetPath = computeSessionJsonlPath({
     accountsRoot: input.accountsRoot,
     account: input.newAccount,
-    cwd: input.cwd,
+    cwd: projectCwd,
     sessionId: input.sessionId,
   });
   const newAccountRoot = join(input.accountsRoot, input.newAccount);
@@ -251,6 +252,14 @@ export async function copySessionJsonlForRotation(input: CopySessionJsonlInput):
     copied_bytes: copiedBytes,
     copy_duration_ms: now() - startedAt,
   };
+}
+
+async function resolveProjectCwd(cwd: string): Promise<string> {
+  try {
+    return await fs.realpath(cwd);
+  } catch {
+    return cwd;
+  }
 }
 
 async function checkContainment(

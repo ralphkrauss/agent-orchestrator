@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
-import { mkdtemp, mkdir, writeFile, chmod, symlink, readFile, stat } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, chmod, symlink, readFile, realpath, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -44,6 +44,8 @@ describe('encodeProjectCwd', () => {
     assert.equal(encodeProjectCwd('/'), '-');
     assert.equal(encodeProjectCwd('/foo'), '-foo');
     assert.equal(encodeProjectCwd('/a/b'), '-a-b');
+    assert.equal(encodeProjectCwd('C:\\Users\\ralph\\workspace'), 'C:-Users-ralph-workspace');
+    assert.equal(encodeProjectCwd('\\\\?\\C:\\Users\\ralph\\workspace'), 'C:-Users-ralph-workspace');
   });
 });
 
@@ -73,6 +75,41 @@ describe('copySessionJsonlForRotation — happy path', () => {
     assert.equal(targetStat.mode & 0o777, 0o600);
     const written = await readFile(outcome.target_path, 'utf8');
     assert.equal(written, contents);
+  });
+
+  it('looks up project JSONL files using the cwd realpath seen by worker processes', {
+    skip: process.platform === 'win32'
+      ? 'directory symlink privileges vary on Windows; this covers POSIX/macOS cwd alias behavior'
+      : false,
+  }, async () => {
+    const accountsRoot = await newAccountsRoot();
+    const root = await mkdtemp(join(tmpdir(), 'claude-cwd-alias-'));
+    const physicalCwd = join(root, 'physical');
+    const aliasCwd = join(root, 'alias');
+    await mkdir(physicalCwd);
+    await symlink(physicalCwd, aliasCwd, 'dir');
+    const workerCwd = await realpath(aliasCwd);
+    const contents = '{"session":"realpath"}\n';
+    const sourcePath = await seedSourceJsonl({
+      accountsRoot,
+      account: 'A',
+      cwd: workerCwd,
+      sessionId: VALID_SESSION_ID,
+      contents,
+    });
+
+    const outcome = await copySessionJsonlForRotation({
+      accountsRoot,
+      priorAccount: 'A',
+      newAccount: 'B',
+      cwd: aliasCwd,
+      sessionId: VALID_SESSION_ID,
+    });
+
+    assert.equal(outcome.ok, true);
+    if (!outcome.ok) return;
+    assert.equal(outcome.source_path, sourcePath);
+    assert.equal(await readFile(outcome.target_path, 'utf8'), contents);
   });
 });
 

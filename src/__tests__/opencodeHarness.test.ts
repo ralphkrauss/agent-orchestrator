@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Writable } from 'node:stream';
@@ -249,7 +249,7 @@ describe('OpenCode orchestration harness', () => {
         argv: string[];
         config: { default_agent: string; agent: Record<string, { prompt: string; permission: Record<string, unknown> }> };
       };
-      assert.equal(invocation.cwd, root);
+      assert.equal(invocation.cwd, await realpath(root));
       assert.deepStrictEqual(invocation.argv, ['run', '--agent', 'agent-orchestrator', 'configure profiles']);
       assert.equal(invocation.config.default_agent, 'agent-orchestrator');
       assert.match(invocation.config.agent['agent-orchestrator']?.prompt ?? '', /Worker profiles manifest not found/);
