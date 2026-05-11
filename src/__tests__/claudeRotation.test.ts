@@ -150,6 +150,21 @@ process.stdin.on('end', () => {
     }));
     process.exit(1);
   }
+  if (prompt.includes('TRIGGER_HIT_LIMIT')) {
+    // Issue #55: emit only the structured-failure result event carrying the
+    // Claude CLI subscription-cap banner. No preceding type:'error' event so
+    // the banner detector in ClaudeBackend.parseEvent must be the path that
+    // classifies the run as rate_limit.
+    console.log(JSON.stringify({
+      type: 'result',
+      subtype: 'error',
+      is_error: true,
+      stop_reason: 'rate_limit_error',
+      result: "You've hit your limit · resets 12:20pm (UTC)",
+      session_id: sid
+    }));
+    process.exit(1);
+  }
   console.log(JSON.stringify({ type: 'assistant', session_id: sid, message: { content: [{ type: 'text', text: 'ok' }] } }));
   console.log(JSON.stringify({ type: 'result', subtype: 'success', result: 'ok', session_id: sid }));
 });
@@ -277,6 +292,88 @@ describe('claude rotation on rate_limit', () => {
     assert.equal(child.run_summary.requested_session_id, null);
 
     // Cooldown: prior account should be marked cooled-down.
+    const loaded = await loadAccountRegistry(paths);
+    assert.ok(loaded.ok);
+    if (loaded.ok) {
+      const work = loaded.file.accounts.find((entry) => entry.name === 'work');
+      assert.ok(work?.cooldown_until_ms && work.cooldown_until_ms > Date.now() - 1000);
+      assert.equal(work?.last_error_category, 'rate_limit');
+    }
+  });
+
+  it('rotates on Claude CLI subscription-cap banner without a preceding error event (issue #55)', async () => {
+    const fixture = await setupFixture();
+    const paths = accountRegistryPaths(fixture.home);
+    const { saveUserSecret } = await import('../auth/userSecrets.js');
+    const { accountSecretKey } = await import('../claude/accountValidation.js');
+    await saveUserSecret(accountSecretKey('work'), 'sk-work-key', { path: process.env.AGENT_ORCHESTRATOR_SECRETS_FILE });
+    await saveUserSecret(accountSecretKey('alt'), 'sk-alt-key', { path: process.env.AGENT_ORCHESTRATOR_SECRETS_FILE });
+    await upsertAccount(paths, { name: 'work', mode: 'api_env', secretKey: accountSecretKey('work') });
+    await upsertAccount(paths, { name: 'alt', mode: 'api_env', secretKey: accountSecretKey('alt') });
+
+    const start = await fixture.service.startRun({
+      backend: 'claude',
+      prompt: 'TRIGGER_HIT_LIMIT please',
+      cwd: fixture.cwd,
+      model: 'claude-opus-4-7',
+      claude_account: 'work',
+      claude_accounts: ['work', 'alt'],
+    });
+    assert.equal(start.ok, true, `startRun should succeed (got ${JSON.stringify(start)})`);
+    const parentId = start.ok ? (start as unknown as { run_id: string }).run_id : '';
+    const waited = await fixture.service.waitForRun({ run_id: parentId, wait_seconds: 5 });
+    assert.equal(waited.ok, true);
+    const parent = (await fixture.service.getRunStatus({ run_id: parentId })) as unknown as {
+      run_summary: {
+        metadata: Record<string, unknown>;
+        terminal_reason: string | null;
+        latest_error: { category: string; source: string; context?: Record<string, unknown> } | null;
+      };
+    };
+    // Category-based assertions: latest_error is the canonical
+    // category-bearing surface (WorkerResultSchema strips category from
+    // result.errors[]). The banner-driven rate_limit must win, and the
+    // process_exit synthetic must NOT have been promoted.
+    assert.equal(parent.run_summary.latest_error?.category, 'rate_limit');
+    assert.notEqual(parent.run_summary.latest_error?.category, 'process_exit');
+    assert.equal(parent.run_summary.latest_error?.source, 'backend_event');
+    assert.notEqual(parent.run_summary.latest_error?.source, 'process_exit');
+    assert.equal(parent.run_summary.latest_error?.context?.subkind, 'claude_cli_banner');
+    assert.equal(parent.run_summary.terminal_reason, 'backend_fatal_error');
+
+    const parentResult = await fixture.service.getRunResult({ run_id: parentId }) as unknown as {
+      result: { errors: { message: string }[] } | null;
+    };
+    const errors = parentResult.result?.errors ?? [];
+    assert.ok(errors.length > 0, 'parent must have at least one terminal error');
+    // The override path replaces the entire errors list with a single
+    // synthesised rate_limit entry; no process_exit synthetic must be
+    // prepended via `buildTerminalErrorList`.
+    assert.equal(errors.length, 1, 'override path must produce exactly one terminal error (the banner one)');
+    assert.equal(
+      errors.some((error) => error.message === 'worker process exited unsuccessfully'),
+      false,
+      'no synthetic process_exit error should be appended when the banner triggers the override path',
+    );
+    assert.ok(
+      errors.some((error) => error.message.includes("hit your limit")),
+      'parent result.errors must surface the banner message',
+    );
+
+    const rotationState = parent.run_summary.metadata.claude_rotation_state as { accounts: string[] } | undefined;
+    assert.deepStrictEqual(rotationState?.accounts, ['work', 'alt']);
+    assert.equal(parent.run_summary.metadata.claude_account_used, 'work');
+
+    const followup = await fixture.service.sendFollowup({ run_id: parentId, prompt: 'follow up after banner rotate' });
+    assert.equal(followup.ok, true, `sendFollowup should succeed (got ${JSON.stringify(followup)})`);
+    const childId = followup.ok ? (followup as unknown as { run_id: string }).run_id : '';
+    await fixture.service.waitForRun({ run_id: childId, wait_seconds: 5 });
+    const child = (await fixture.service.getRunStatus({ run_id: childId })) as unknown as {
+      run_summary: { metadata: Record<string, unknown>; terminal_context: Record<string, unknown> | null };
+    };
+    assert.equal(child.run_summary.metadata.claude_account_used, 'alt');
+    assert.equal((child.run_summary.terminal_context as { kind?: string } | null)?.kind, 'fresh_chat_after_rotation');
+
     const loaded = await loadAccountRegistry(paths);
     assert.ok(loaded.ok);
     if (loaded.ok) {

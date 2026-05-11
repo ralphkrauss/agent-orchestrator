@@ -114,6 +114,48 @@ describe('backend error classification', () => {
     assert.equal(serviceUnavailable.retryable, true);
   });
 
+  it('classifies the Claude CLI subscription-cap banner as rate_limit (issue #55)', () => {
+    const positives = [
+      "You've hit your limit · resets 12:20pm (UTC)",
+      "You've hit your limit · resets 14:00 (PT)",
+      "You've reached your limit",
+      "You’ve hit your limit",
+      "You've hit your usage limit",
+      "You've hit your rate limit",
+      "You've hit your monthly limit",
+      "You've hit your limit.",
+    ];
+    for (const message of positives) {
+      const error = classifyBackendError({
+        backend: 'claude',
+        source: 'backend_event',
+        message,
+      });
+      assert.equal(error.category, 'rate_limit', `expected rate_limit for ${JSON.stringify(message)}`);
+      assert.equal(error.retryable, true);
+      assert.equal(error.fatal, true);
+    }
+  });
+
+  it('rejects banner-shaped continuations the tail-anchor lookahead must exclude (F1)', () => {
+    const negatives = [
+      "You've hit your limit of 5 retries",
+      "You've hit your limit for the day",
+      "You've reached your limit (just kidding)",
+      "I hit a limit in my analysis",
+      "the loop's limit was 10",
+    ];
+    for (const message of negatives) {
+      const error = classifyBackendError({
+        backend: 'claude',
+        source: 'backend_event',
+        message,
+      });
+      assert.equal(error.category, 'unknown', `expected unknown for ${JSON.stringify(message)}`);
+      assert.equal(error.fatal, false);
+    }
+  });
+
   it('classifies suffixed structured protocol and availability errors with generic messages', () => {
     for (const type of ['invalid_request_error', 'bad_request_error', 'json_parse_error']) {
       const error = classifyBackendError({

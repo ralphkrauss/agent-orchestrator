@@ -364,13 +364,13 @@ Reviewer must confirm them before implementation can land:
 
 | Task ID | Title | Depends On | Status | Acceptance Criteria |
 |---|---|---|---|---|
-| T1 | Extend `classifyErrorCategory` rate-limit regex | — | pending | The rate-limit alternation in `src/backend/common.ts:214` is extended with the **tail-anchored** banner pattern from Decision 3. It matches all of: `You've hit your limit · resets 12:20pm (UTC)`, `You've hit your limit · resets 14:00 (PT)`, `You've reached your limit`, the curly-apostrophe variant `You’ve hit your limit`, `You've hit your usage limit`, `You've hit your rate limit`, `You've hit your monthly limit`, and `You've hit your limit.` (terminal period). It **does not match** continuations such as `You've hit your limit of 5 retries`, `You've hit your limit for the day`, or `You've hit your limit (just kidding)` — the tail-anchor lookahead rejects them. Existing rate-limit-positive cases (`429 rate limit exceeded`, `too many requests`) continue to match. No previously-`unknown` message regresses to a different category (spot-check the existing `backendErrorClassification.test.ts` cases). |
-| T2 | Synthesize a `RunError` from banner-bearing `result` events in `ClaudeBackend.parseEvent`, gated on structured failure | T1 | pending | `parseEvent` for a `type: 'result'` event checks **first** that at least one of: (a) `rec.is_error === true`; (b) `getString(rec.subtype)?.toLowerCase() === 'error'`; (c) a normalized stop-reason equal to `'rate_limit_error'`, where the stop-reason is computed exactly as `parseEvent` already does at `src/backend/claude.ts:138` — `getString(rec.stop_reason) ?? getString(rec.stopReason)` — then `.toLowerCase()`'d before comparison (both snake_case and camelCase variants must trigger the gate). If yes, the effective result text (the same string used for `parsed.resultEvent.summary`) is passed to `classifyBackendError({ backend: 'claude', source: 'backend_event', message: text, context: { banner: text, subkind: 'claude_cli_banner' } })`. If the resulting `category === 'rate_limit'`, the `RunError` is pushed onto `parsed.errors`. The `resultEvent.summary` value is unchanged so downstream summary rendering is preserved. When the structural gate refuses, `parsed.errors` is unchanged regardless of regex match. When the regex refuses, `parsed.errors` is unchanged. |
-| T3 | Unit-test the new classifier patterns | T1 | pending | `src/__tests__/backendErrorClassification.test.ts` gains a new `it()` (or extends the existing rate-limit one) asserting: (a) every positive sample listed in T1's acceptance criteria classifies to `{ category: 'rate_limit', retryable: true, fatal: true }`, including the second `resets`-clause variant `"You've hit your limit · resets 14:00 (PT)"` and the terminal-period variant `"You've hit your limit."`; (b) the **F1 negative cases** classify to `unknown`: `"You've hit your limit of 5 retries"`, `"You've hit your limit for the day"`, `"You've reached your limit (just kidding)"` — these prove the tail-anchor lookahead from Decision 3 rejects continuations other than the resets clause or terminal punctuation; (c) the existing generic negative cases (`"I hit a limit in my analysis"`, `"the loop's limit was 10"`) still classify to `unknown`. |
-| T4 | Unit-test `ClaudeBackend.parseEvent` banner synthesis and structured-failure gate | T2 | pending | A new test (file `src/__tests__/claudeBackendBannerDetection.test.ts` or appended to an existing Claude backend parser test) covers: (a) positive (issue-evidence shape) — `result` with `is_error: true, subtype: 'error', result: "You've hit your limit · resets 12:20pm (UTC)"` synthesises one error with the exact wire shape listed in In Scope; (b) positive (snake_case stop-reason variant) — `result` with `is_error: false, subtype: 'success', stop_reason: 'rate_limit_error', result: "You've reached your limit"` synthesises one rate_limit error (proves the stop-reason gate fires independently of `is_error`); (c) positive (camelCase stop-reason variant) — `result` with `is_error: false, subtype: 'success', stopReason: 'rate_limit_error', result: "You've hit your usage limit"` synthesises one rate_limit error (proves the normalised stop-reason extraction reads both casings, matching `src/backend/claude.ts:138`); (d) positive (alternate resets clause) — `result` with `is_error: true, subtype: 'error', result: "You've hit your limit · resets 14:00 (PT)"` synthesises one rate_limit error (proves the tail-anchor accepts the second concrete resets variant called out in Decision 3); (e) **negative — F1 (tightened regex)** — `result` with `is_error: true, subtype: 'error', result: "You've hit your limit of 5 retries"` synthesises **no** error: the structured-failure gate fires, but the tail-anchored regex from Decision 3 rejects the continuation `" of 5 retries"`. The test must explicitly assert `parsed.errors.length === 0` for this input. A camelCase-stop-reason variant of the same input (`is_error: false, stopReason: 'rate_limit_error', result: "You've hit your limit of 5 retries"`) MUST also synthesise no error, to prove that the regex tightening holds across every gate-firing path. This case is the regression test for finding F1 in `reviews/review-2026-05-11-plan.md`; (f) negative (gate refusal) — `result` with `subtype: 'success', is_error: false, stop_reason: 'end_turn', result: "You've hit your limit · resets 12:20pm (UTC)"` synthesises no error even though the banner regex matches: the structural gate refuses synthesis on successful runs; (g) negative (regex refusal on unrelated error) — `result` with `subtype: 'error', is_error: true, result: 'something else broke'` synthesises no error; (h) the `parsed.resultEvent.summary` value is the original banner/result text in all seven cases (parseEvent never rewrites it). |
-| T5 | End-to-end rotation test driven by the banner (asserts rotation happened, per Decision 13) | T1, T2, T3, T4 | pending | `src/__tests__/claudeRotation.test.ts`'s fake-claude script gains a `TRIGGER_HIT_LIMIT` branch that emits `{type:'system', subtype:'init', session_id:<sid>}` followed by `{type:'result', subtype:'error', is_error:true, stop_reason:'rate_limit_error', result:"You've hit your limit · resets 12:20pm (UTC)", session_id:<sid>}` and exits 1 — **without** a preceding `type:'error'` event. A new `it()` modelled on `claudeRotation.test.ts:238-287` uses `prompt: 'TRIGGER_HIT_LIMIT please'` for the parent and asserts that **rotation happened**: parent `latest_error.category === 'rate_limit'`; parent `latest_error.source === 'backend_event'`; parent `latest_error.context?.subkind === 'claude_cli_banner'`; parent `terminal_reason === 'backend_fatal_error'`; parent `result.errors` contains no entry with `category: 'process_exit'`; `claude_rotation_state.accounts === ['work','alt']`; parent `claude_account_used === 'work'`; after `send_followup`, child `claude_account_used === 'alt'` and child `terminal_context.kind === 'fresh_chat_after_rotation'`; on-disk `accounts.json` has `work.cooldown_until_ms > now - 1000` and `work.last_error_category === 'rate_limit'`. The test does **not** assert child-run success (Decision 13); child success is already covered for the structured-rate-limit path by the existing `claudeRotation.test.ts:238-287` test, so asserting it on the banner path adds no signal. |
-| T6 | Run repository quality gates | T1, T2, T3, T4, T5 | pending | `pnpm build` succeeds. `pnpm test` passes with the new tests visibly executing (capture pass counts and the names of the new `it()` blocks). `pnpm verify` succeeds end-to-end (build + tests + publish-readiness + audit + dist-tag + npm pack dry run). Evidence captured in the Execution Log. |
-| T7 | Update plan execution log and link evidence | T6 | pending | Each task's Execution Log entry is filled in with actual command output, the plan Status flips to `complete`, and the parent index `plan.md` Status mirrors that. |
+| T1 | Extend `classifyErrorCategory` rate-limit regex | — | complete | The rate-limit alternation in `src/backend/common.ts:214` is extended with the **tail-anchored** banner pattern from Decision 3. It matches all of: `You've hit your limit · resets 12:20pm (UTC)`, `You've hit your limit · resets 14:00 (PT)`, `You've reached your limit`, the curly-apostrophe variant `You’ve hit your limit`, `You've hit your usage limit`, `You've hit your rate limit`, `You've hit your monthly limit`, and `You've hit your limit.` (terminal period). It **does not match** continuations such as `You've hit your limit of 5 retries`, `You've hit your limit for the day`, or `You've hit your limit (just kidding)` — the tail-anchor lookahead rejects them. Existing rate-limit-positive cases (`429 rate limit exceeded`, `too many requests`) continue to match. No previously-`unknown` message regresses to a different category (spot-check the existing `backendErrorClassification.test.ts` cases). |
+| T2 | Synthesize a `RunError` from banner-bearing `result` events in `ClaudeBackend.parseEvent`, gated on structured failure | T1 | complete | `parseEvent` for a `type: 'result'` event checks **first** that at least one of: (a) `rec.is_error === true`; (b) `getString(rec.subtype)?.toLowerCase() === 'error'`; (c) a normalized stop-reason equal to `'rate_limit_error'`, where the stop-reason is computed exactly as `parseEvent` already does at `src/backend/claude.ts:138` — `getString(rec.stop_reason) ?? getString(rec.stopReason)` — then `.toLowerCase()`'d before comparison (both snake_case and camelCase variants must trigger the gate). If yes, the effective result text (the same string used for `parsed.resultEvent.summary`) is passed to `classifyBackendError({ backend: 'claude', source: 'backend_event', message: text, context: { banner: text, subkind: 'claude_cli_banner' } })`. If the resulting `category === 'rate_limit'`, the `RunError` is pushed onto `parsed.errors`. The `resultEvent.summary` value is unchanged so downstream summary rendering is preserved. When the structural gate refuses, `parsed.errors` is unchanged regardless of regex match. When the regex refuses, `parsed.errors` is unchanged. |
+| T3 | Unit-test the new classifier patterns | T1 | complete | `src/__tests__/backendErrorClassification.test.ts` gains a new `it()` (or extends the existing rate-limit one) asserting: (a) every positive sample listed in T1's acceptance criteria classifies to `{ category: 'rate_limit', retryable: true, fatal: true }`, including the second `resets`-clause variant `"You've hit your limit · resets 14:00 (PT)"` and the terminal-period variant `"You've hit your limit."`; (b) the **F1 negative cases** classify to `unknown`: `"You've hit your limit of 5 retries"`, `"You've hit your limit for the day"`, `"You've reached your limit (just kidding)"` — these prove the tail-anchor lookahead from Decision 3 rejects continuations other than the resets clause or terminal punctuation; (c) the existing generic negative cases (`"I hit a limit in my analysis"`, `"the loop's limit was 10"`) still classify to `unknown`. |
+| T4 | Unit-test `ClaudeBackend.parseEvent` banner synthesis and structured-failure gate | T2 | complete | A new test (file `src/__tests__/claudeBackendBannerDetection.test.ts` or appended to an existing Claude backend parser test) covers: (a) positive (issue-evidence shape) — `result` with `is_error: true, subtype: 'error', result: "You've hit your limit · resets 12:20pm (UTC)"` synthesises one error with the exact wire shape listed in In Scope; (b) positive (snake_case stop-reason variant) — `result` with `is_error: false, subtype: 'success', stop_reason: 'rate_limit_error', result: "You've reached your limit"` synthesises one rate_limit error (proves the stop-reason gate fires independently of `is_error`); (c) positive (camelCase stop-reason variant) — `result` with `is_error: false, subtype: 'success', stopReason: 'rate_limit_error', result: "You've hit your usage limit"` synthesises one rate_limit error (proves the normalised stop-reason extraction reads both casings, matching `src/backend/claude.ts:138`); (d) positive (alternate resets clause) — `result` with `is_error: true, subtype: 'error', result: "You've hit your limit · resets 14:00 (PT)"` synthesises one rate_limit error (proves the tail-anchor accepts the second concrete resets variant called out in Decision 3); (e) **negative — F1 (tightened regex)** — `result` with `is_error: true, subtype: 'error', result: "You've hit your limit of 5 retries"` synthesises **no** error: the structured-failure gate fires, but the tail-anchored regex from Decision 3 rejects the continuation `" of 5 retries"`. The test must explicitly assert `parsed.errors.length === 0` for this input. A camelCase-stop-reason variant of the same input (`is_error: false, stopReason: 'rate_limit_error', result: "You've hit your limit of 5 retries"`) MUST also synthesise no error, to prove that the regex tightening holds across every gate-firing path. This case is the regression test for finding F1 in `reviews/review-2026-05-11-plan.md`; (f) negative (gate refusal) — `result` with `subtype: 'success', is_error: false, stop_reason: 'end_turn', result: "You've hit your limit · resets 12:20pm (UTC)"` synthesises no error even though the banner regex matches: the structural gate refuses synthesis on successful runs; (g) negative (regex refusal on unrelated error) — `result` with `subtype: 'error', is_error: true, result: 'something else broke'` synthesises no error; (h) **negative (gate is not a classifier proxy)** — `result` events with `is_error: true` AND `stop_reason: 'rate_limit_error'` whose `result` text is generic rate-limit phrasing the classifier would otherwise catch (`"too many requests"`, `"simulated rate limit"`, `"429 rate limit exceeded"`, `"rate_limit_error"`) synthesise **no** error: `parsed.errors.length === 0`. This is the regression test for the second-round reviewer finding ("Gate is too permissive") and proves parseEvent gates on `matchesClaudeCliBanner` directly, not on `classifyBackendError(...).category === 'rate_limit'`. Across all 8 cases, `parsed.resultEvent.summary` is the original banner/result text (parseEvent never rewrites it). |
+| T5 | End-to-end rotation test driven by the banner (asserts rotation happened, per Decision 13) | T1, T2, T3, T4 | complete | `src/__tests__/claudeRotation.test.ts`'s fake-claude script gains a `TRIGGER_HIT_LIMIT` branch that emits `{type:'system', subtype:'init', session_id:<sid>}` followed by `{type:'result', subtype:'error', is_error:true, stop_reason:'rate_limit_error', result:"You've hit your limit · resets 12:20pm (UTC)", session_id:<sid>}` and exits 1 — **without** a preceding `type:'error'` event. A new `it()` modelled on `claudeRotation.test.ts:238-287` uses `prompt: 'TRIGGER_HIT_LIMIT please'` for the parent and asserts that **rotation happened**: parent `latest_error.category === 'rate_limit'`; parent `latest_error.source === 'backend_event'`; parent `latest_error.context?.subkind === 'claude_cli_banner'`; parent `terminal_reason === 'backend_fatal_error'`; parent `result.errors` contains no entry with `category: 'process_exit'`; `claude_rotation_state.accounts === ['work','alt']`; parent `claude_account_used === 'work'`; after `send_followup`, child `claude_account_used === 'alt'` and child `terminal_context.kind === 'fresh_chat_after_rotation'`; on-disk `accounts.json` has `work.cooldown_until_ms > now - 1000` and `work.last_error_category === 'rate_limit'`. The test does **not** assert child-run success (Decision 13); child success is already covered for the structured-rate-limit path by the existing `claudeRotation.test.ts:238-287` test, so asserting it on the banner path adds no signal. |
+| T6 | Run repository quality gates | T1, T2, T3, T4, T5 | complete | `pnpm build` succeeds. `pnpm test` passes with the new tests visibly executing (capture pass counts and the names of the new `it()` blocks). `pnpm verify` succeeds end-to-end (build + tests + publish-readiness + audit + dist-tag + npm pack dry run). Evidence captured in the Execution Log. |
+| T7 | Update plan execution log and link evidence | T6 | complete | Each task's Execution Log entry is filled in with actual command output, the plan Status flips to `complete`, and the parent index `plan.md` Status mirrors that. |
 
 ## Rule Candidates
 
@@ -400,66 +400,157 @@ These items were considered and deferred. None block landing v1.
 
 ## Quality Gates
 
-- [ ] `pnpm build` passes.
-- [ ] `pnpm test` passes, including the new unit and end-to-end tests.
-- [ ] `pnpm verify` passes end-to-end.
-- [ ] No regression in the existing rotation tests
+- [x] `pnpm build` passes.
+- [x] `pnpm test` passes, including the new unit and end-to-end tests.
+- [x] `pnpm verify` passes end-to-end.
+- [x] No regression in the existing rotation tests
       (`claudeRotation.test.ts`, `claudeRotationRace.test.ts`) — both
       continue to pass.
-- [ ] `RunErrorSourceSchema` and `RunTerminalReasonSchema` are **not**
+- [x] `RunErrorSourceSchema` and `RunTerminalReasonSchema` are **not**
       modified.
-- [ ] No new runtime dependency introduced.
-- [ ] Banner regex anchors on "you('|’|ʼ|`)ve (hit|reached) your ... limit"
+- [x] No new runtime dependency introduced.
+- [x] Banner regex anchors on "you('|’|ʼ|`)ve (hit|reached) your ... limit"
       **and** a tail-anchor lookahead requiring either the `· resets ...`
       clause or end-of-string with at most terminal punctuation (Decision 3,
       F1 fix). A grep through `src/__tests__/` confirms no pre-existing
       fixture string accidentally matches the new pattern.
-- [ ] Tail-anchor invariant proven: T3 asserts the classifier rejects
+- [x] Tail-anchor invariant proven: T3 asserts the classifier rejects
       `"You've hit your limit of 5 retries"` (→ `unknown`) and T4 case (e)
       asserts `ClaudeBackend.parseEvent` synthesises no `RunError` for an
       error-shaped result event carrying the same phrase. This closes
       finding F1 from the 2026-05-11 plan review.
-- [ ] `result.summary` text on the affected runs is preserved
+- [x] `result.summary` text on the affected runs is preserved
       byte-for-byte (no classifier-driven rewrite).
-- [ ] Structured-failure gate is provably enforced: T4 negative case #1
+- [x] Structured-failure gate is provably enforced: T4 negative case #1
       (success-shape result event with banner-shaped text) yields
       `parsed.errors.length === 0`.
-- [ ] No `process_exit` synthetic error appears in `result.errors` for
+- [x] No `process_exit` synthetic error appears in `result.errors` for
       banner-driven failures (asserted in T5).
 
 ## Execution Log
 
 ### T1: Extend `classifyErrorCategory` rate-limit regex
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** complete
+- **Evidence:** `src/backend/common.ts:204-217` defines a module-private
+  `CLAUDE_CLI_BANNER_REGEX` constant (the tail-anchored Decision-3 regex,
+  not exported) and exports a `matchesClaudeCliBanner(text: string):
+  boolean` helper alongside the existing classifier. The classifier's
+  rate-limit branch (`classifyErrorCategory`) tests the same constant
+  after the pre-existing `rate.?limit|too many requests|429`
+  alternation. Classifier and parser share this single source of truth so
+  the gate cannot drift.
+- **Notes:** Regex constant intentionally kept private; only the helper is
+  on the public surface. Test reuse goes through the helper.
 
 ### T2: Synthesize a `RunError` from banner-bearing `result` events in `ClaudeBackend.parseEvent`, gated on structured failure
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** complete
+- **Evidence:** `src/backend/claude.ts:135-176` runs the structured-failure
+  gate (`rec.is_error === true` OR `getString(rec.subtype)?.toLowerCase()
+  === 'error'` OR the normalized stop-reason
+  `(getString(rec.stop_reason) ?? getString(rec.stopReason))?.toLowerCase()
+  === 'rate_limit_error'` — mirroring the existing line-138 stop-reason
+  extraction), AND a direct `matchesClaudeCliBanner(trimmed)` check on
+  the result text. **The gate does not use the classifier's category as a
+  proxy** (a prior iteration did and was caught by review: the
+  classifier's rate-limit branch also matches generic phrasing like
+  `"too many requests"`, `"429"`, `"rate_limit_error"`, which would be
+  mis-tagged with `subkind: 'claude_cli_banner'`). When both predicates
+  hold, parseEvent calls `classifyBackendError({ source: 'backend_event',
+  context: { banner, subkind: 'claude_cli_banner' } })` and pushes the
+  result onto `parsed.errors` unconditionally — the gate already proved
+  it's a banner.
+- **Notes:** Both casings of stop-reason are read; the regex tightening
+  in T1 is what rejects the F1 continuation cases like
+  `"You've hit your limit of 5 retries"`.
 
 ### T3: Unit-test the new classifier patterns
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** complete
+- **Evidence:** `src/__tests__/backendErrorClassification.test.ts` gained
+  two new `it()` blocks. Positives include `"You've hit your limit ·
+  resets 12:20pm (UTC)"`, `"You've hit your limit · resets 14:00 (PT)"`,
+  curly-quote variant, `usage/rate/monthly limit`, terminal-period
+  variant. F1 negatives: `"You've hit your limit of 5 retries"`,
+  `"...for the day"`, `"...(just kidding)"`, plus the pre-existing
+  `"I hit a limit in my analysis"` / `"the loop's limit was 10"` cases.
+- **Notes:** Test pass output captured in T6 evidence.
 
 ### T4: Unit-test `ClaudeBackend.parseEvent` banner synthesis and structured-failure gate
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** complete
+- **Evidence:** `src/__tests__/claudeBackendBannerDetection.test.ts`
+  covers **8 cases**: (a) `is_error: true` banner synthesises one
+  rate_limit error with correct wire shape; (b) snake_case `stop_reason`
+  alone fires the gate; (c) camelCase `stopReason` alone fires the gate;
+  (d) alternate `· resets 14:00 (PT)` clause matches; (e) F1 regression —
+  `"You've hit your limit of 5 retries"` is rejected in both snake_case
+  and camelCase gate-firing variants (regex refuses); (f) gate refusal
+  on `subtype: 'success'` with banner-shaped text; (g) regex refusal on
+  unrelated error text; (h) **gate is not a classifier proxy** —
+  error-shaped result events whose `result` text is generic rate-limit
+  phrasing (`"too many requests"`, `"simulated rate limit"`,
+  `"429 rate limit exceeded"`, `"rate_limit_error"`) produce
+  `parsed.errors.length === 0` (no synthesis at all, not just no
+  `claude_cli_banner` subkind). Every case asserts
+  `parsed.resultEvent.summary` carries the original text byte-for-byte.
+- **Notes:** Case (h) is the regression test for the second-round
+  reviewer finding ("Gate is too permissive"). Assertion was
+  strengthened from "no banner-subkind entry" to
+  `parsed.errors.length === 0` per follow-up reviewer feedback.
 
 ### T5: End-to-end rotation test driven by the banner
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** complete
+- **Evidence:** `src/__tests__/claudeRotation.test.ts` fake-claude gained
+  a `TRIGGER_HIT_LIMIT` branch that emits **only** the
+  structured-failure `result` event (no preceding `type: 'error'` event)
+  carrying the banner, with `is_error: true`, `subtype: 'error'`,
+  `stop_reason: 'rate_limit_error'`. New test `rotates on Claude CLI
+  subscription-cap banner without a preceding error event (issue #55)`
+  asserts (category-based, against `meta.latest_error` since
+  `WorkerResultSchema` strips category from `result.errors[]`): parent
+  `latest_error.category === 'rate_limit'` AND `!== 'process_exit'`;
+  `latest_error.source === 'backend_event'` AND `!== 'process_exit'`;
+  `latest_error.context.subkind === 'claude_cli_banner'`;
+  `terminal_reason === 'backend_fatal_error'`. The result.errors list is
+  asserted to have length exactly 1 (override path doesn't prepend
+  process_exit) and to contain no `'worker process exited
+  unsuccessfully'` entry, with the banner message surfaced. Rotation
+  side-effects: rotation state preserved, parent used `work`, child after
+  `send_followup` used `alt` with `terminal_context.kind ===
+  'fresh_chat_after_rotation'`, on-disk `accounts.json` shows
+  `work.cooldown_until_ms > now-1000` and `last_error_category ===
+  'rate_limit'`.
+- **Notes:** Tests passes alongside the 6 existing rotation tests.
 
 ### T6: Run repository quality gates
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** complete
+- **Evidence (this iteration, captured 2026-05-11 against the current diff):**
+  - `pnpm build` — clean (tsc, no output).
+  - Focused `node --test dist/__tests__/backendErrorClassification.test.js
+    dist/__tests__/claudeBackendBannerDetection.test.js
+    dist/__tests__/claudeRotation.test.js`: **33 tests / 33 pass / 0
+    fail / 0 skipped**, duration ~5.59 s. The three suites are the 8
+    classifier cases (`backend error classification`), 8 banner-detection
+    cases (`ClaudeBackend.parseEvent — subscription-cap banner detection
+    (issue #55)`), and 17 rotation cases (env scrubbing + `claude
+    rotation on rate_limit` ×7 incl. the new banner-driven test + T-COR4
+    ×9).
+  - `pnpm test`: **565 tests / 563 pass / 2 skipped / 0 fail**, duration
+    ~29.66 s.
+  - `pnpm verify`: **565 tests / 563 pass / 2 skipped / 0 fail**, duration
+    ~35.64 s; total verify wall-clock ~53 s. Packs
+    `ralphkrauss-agent-orchestrator-0.2.2.tgz` (483.3 kB, 296 files) on
+    `npm pack --dry-run`.
+- **Notes:** No new dependencies were installed. The 2 skipped tests are
+  pre-existing skips unrelated to this change.
 
 ### T7: Update plan execution log and link evidence
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** complete
+- **Evidence:** This Execution Log block plus the Quality Gates checklist
+  above are stamped against the iteration whose final diff produced the
+  T6 numbers (matchesClaudeCliBanner-based gate, 8 parser cases, 17
+  rotation cases).
+- **Notes:** The plan index `plan.md` Status remains `planning` and the
+  sub-plan Status remains `planning` until the reviewer accepts the
+  implementation diff (per implement-plan workflow step 8: "Do NOT
+  commit or push yet — a reviewer will critique the diff first"). Task
+  statuses T1–T7 are individually `complete` because the work itself is
+  done; the parent plan status promotion is the reviewer's call.
