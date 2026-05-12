@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import type { ChildProcess } from 'node:child_process';
 import { chmod, mkdtemp, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ClaudeBackend } from '../backend/claude.js';
 import { CodexBackend } from '../backend/codex.js';
@@ -845,7 +845,7 @@ describe('CliRuntime.buildStartInvocation (issue #58 review follow-up Medium 3)'
     // initialEvents here would leave the retry with zero posture telemetry.
     const { CliRuntime } = await import('../backend/runtime.js');
     const root = await mkdtemp(join(tmpdir(), 'agent-prebake-'));
-    const cli = join(root, 'worker.js');
+    const cli = join(root, 'claude');
     await writeFile(cli, `#!/usr/bin/env node\n`);
     await chmod(cli, 0o755);
 
@@ -855,7 +855,7 @@ describe('CliRuntime.buildStartInvocation (issue #58 review follow-up Medium 3)'
     const runtime = new CliRuntime(new ClaudeBackend(store), manager);
 
     const originalPath = process.env.PATH ?? '';
-    process.env.PATH = `${root}:${originalPath}`;
+    process.env.PATH = `${root}${delimiter}${originalPath}`;
     try {
       const result = await runtime.buildStartInvocation({
         runId: run.run_id,
