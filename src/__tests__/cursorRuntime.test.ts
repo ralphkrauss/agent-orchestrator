@@ -830,10 +830,9 @@ describe('CursorSdkRuntime worker posture (issue #58 Decisions 7, 18)', () => {
     // event ('system' from cursor) so operators can correlate the spawn-time
     // posture with subsequent worker output.
     const sdkSystemIdx = stream.findIndex((event) => event.type === 'lifecycle' && (event.payload as { state?: string }).state !== 'worker_posture' && (event.payload as { agent_id?: string }).agent_id === 'bc-trusted');
-    if (sdkSystemIdx >= 0) {
-      const postureIdx = stream.indexOf(posture!);
-      assert.ok(postureIdx < sdkSystemIdx, 'worker_posture event must precede the first SDK system event');
-    }
+    assert.ok(sdkSystemIdx >= 0, 'expected at least one SDK lifecycle/system event');
+    const postureIdx = stream.indexOf(posture!);
+    assert.ok(postureIdx < sdkSystemIdx, 'worker_posture event must precede the first SDK system event');
   });
 
   it('restricted posture omits local.settingSources and emits the restricted posture event', async () => {
@@ -946,5 +945,56 @@ describe('CursorSdkRuntime worker posture (issue #58 Decisions 7, 18)', () => {
 
     assert.ok(resumeLocal, 'Agent.resume must receive local options');
     assert.deepStrictEqual(resumeLocal!.settingSources, ['all'], 'resume must inherit trusted settingSources from the parent');
+  });
+
+  it('issue #58 (review Major 5): worker_posture appendEvent failure disposes the agent and surfaces phase: append_event', async () => {
+    // This test uses a local agent double (not the shared fakeAgent helper)
+    // so it can count dispose invocations without growing the helper API for
+    // a single regression case — see the resolution map (option 2) for the
+    // rationale. If a future cursor failure path also needs dispose counting,
+    // promote a `disposeCalls` counter onto the shared helper instead.
+    class RejectingPostureStore extends RunStore {
+      override async appendEvent(
+        runId: string,
+        event: Parameters<RunStore['appendEvent']>[1],
+      ): ReturnType<RunStore['appendEvent']> {
+        if ((event.payload as { state?: string }).state === 'worker_posture') {
+          throw new Error('append worker_posture failed');
+        }
+        return super.appendEvent(runId, event);
+      }
+    }
+
+    let disposeCount = 0;
+    const run = fakeRun({ agentId: 'bc-append-fails', status: 'finished', result: 'ok', events: [] });
+    const countingAgent: CursorAgent = {
+      agentId: 'bc-append-fails',
+      async send() { return run; },
+      async [Symbol.asyncDispose]() { disposeCount += 1; },
+    } as CursorAgent;
+    const api: CursorAgentApi = {
+      async create() { return countingAgent; },
+      async resume() { return countingAgent; },
+    };
+
+    const home = await mkdtemp(join(tmpdir(), 'cursor-append-fail-'));
+    const store = new RejectingPostureStore(home);
+    const cursorRuntime = new CursorSdkRuntime(fakeAdapter(api), { store, env: { CURSOR_API_KEY: 'test-key' }, cancelDrainMs: 25 });
+    const runtimes = createBackendRegistry(store, { cursorRuntime });
+    const service = new OrchestratorService(store, runtimes);
+    await service.initialize();
+
+    const cwd = await mkdtemp(join(tmpdir(), 'cursor-append-fail-cwd-'));
+    const start = await service.startRun({ backend: 'cursor', prompt: 'go', cwd, model: 'composer-2', worker_posture: 'trusted' });
+    const runId = (start as { ok: true; run_id: string }).run_id;
+    await service.waitForRun({ run_id: runId, wait_seconds: 5 });
+
+    const result = await service.getRunResult({ run_id: runId });
+    const payload = result as { ok: true; result: { errors: { message: string; context?: { code?: string; phase?: string } }[] } };
+    const error = payload.result.errors[0];
+    assert.equal(error?.context?.code, 'SPAWN_FAILED');
+    assert.equal(error?.context?.phase, 'append_event');
+    assert.match(error?.message ?? '', /Failed to persist worker_posture lifecycle event/);
+    assert.equal(disposeCount, 1, 'cursor agent must be disposed exactly once when the posture append fails');
   });
 });

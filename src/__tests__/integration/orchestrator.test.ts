@@ -738,6 +738,76 @@ describe('agent orchestrator integration with mock CLIs', () => {
     assertInvalidInput(codexMax, /Codex reasoning_effort must be one of/);
   });
 
+  it('issue #58 (review Major 6): send_followup with worker_posture + incompatible model on Claude rejects with backend validation', async () => {
+    // Regression for the validation bypass: previously a follow-up that set
+    // `worker_posture` short-circuited the ternary before
+    // validateInheritedModelSettingsForBackend could check the merged
+    // settings, so a `worker_posture + model` follow-up on Claude could
+    // persist an invalid reasoning_effort/model pair. The fix runs the
+    // validator unconditionally for `parsed.data.model || backend === 'cursor'`
+    // against the merged settings (including the new posture).
+    const fixture = await createFixture();
+    const repo = await createGitRepo(fixture.root);
+    const service = await createService(fixture.home);
+
+    const parent = await service.startRun({
+      backend: 'claude',
+      prompt: 'hello',
+      cwd: repo,
+      model: 'claude-opus-4-7',
+      reasoning_effort: 'xhigh',
+    });
+    assert.equal(parent.ok, true);
+    const parentId = (parent as unknown as { run_id: string }).run_id;
+    await service.waitForRun({ run_id: parentId, wait_seconds: 5 });
+
+    // Parent's reasoning_effort='xhigh' is inherited. The follow-up overrides
+    // the model to claude-sonnet-4-6 (which does not support xhigh) and also
+    // toggles worker_posture; pre-fix this slipped past the validator.
+    const followup = await service.sendFollowup({
+      run_id: parentId,
+      prompt: 'rotate posture',
+      model: 'claude-sonnet-4-6',
+      worker_posture: 'restricted',
+    });
+    assertInvalidInput(followup, /Claude xhigh effort requires claude-opus-4-7/);
+  });
+
+  it('issue #58 (review Major 6): send_followup with worker_posture alone succeeds and persists the override', async () => {
+    // Happy-path guard: the validator pass-through must not regress
+    // posture-only follow-ups, where there is no model override and the
+    // parent's inherited settings should flow through unchanged except for
+    // the posture flip.
+    const fixture = await createFixture();
+    const repo = await createGitRepo(fixture.root);
+    const service = await createService(fixture.home);
+
+    const parent = await service.startRun({
+      backend: 'claude',
+      prompt: 'hello',
+      cwd: repo,
+      model: 'claude-opus-4-7',
+    });
+    assert.equal(parent.ok, true);
+    const parentId = (parent as unknown as { run_id: string }).run_id;
+    await service.waitForRun({ run_id: parentId, wait_seconds: 5 });
+
+    const followup = await service.sendFollowup({
+      run_id: parentId,
+      prompt: 'flip posture only',
+      worker_posture: 'restricted',
+    });
+    assert.equal(followup.ok, true);
+    const childId = (followup as unknown as { run_id: string }).run_id;
+    await service.waitForRun({ run_id: childId, wait_seconds: 5 });
+
+    const child = await service.getRunStatus({ run_id: childId });
+    const summary = child.ok
+      ? (child as unknown as { run_summary: { model_settings: { worker_posture: string } } }).run_summary
+      : null;
+    assert.equal(summary?.model_settings.worker_posture, 'restricted');
+  });
+
   it('records requested and observed backend session ids separately for resume auditing', async () => {
     const fixture = await createFixture();
     const repo = await createGitRepo(fixture.root);

@@ -60,7 +60,7 @@ Under `worker_posture: 'restricted'` (issue #31 v1 envelope; profile opt-in):
 > `codex exec resume --help` does not accept `--sandbox`; the daemon's shared
 > `sandboxArgs()` helper produces argv accepted by both `codex exec` and
 > `codex exec resume`.
-
+>
 > **Migration (issue #58):** existing profiles with explicit
 > `codex_network: 'workspace'` no longer emit `--ignore-user-config` under
 > the new `trusted` default. If you depended on the side effect of skipping
@@ -201,9 +201,10 @@ so user + project `config.toml` and the workspace network are both available.
 | `service_tier: 'fast'` / `'flex'` / unset           | no `--ignore-user-config`         | **includes `--ignore-user-config`**        | Set `codex_network: 'user-config'` to restore prior behavior, or `'workspace'` for codex-managed network-on, or move to `worker_posture: 'trusted'` for backend-native parity. |
 | `codex_network` set explicitly                      | per restricted mapping            | per restricted mapping                     | None — explicit value wins over the default.                                                                   |
 
-### Three concrete migration options (still restricted posture)
+### Migration options
 
-In increasing openness:
+Listed in increasing openness; the first option moves off restricted entirely,
+options 2-4 stay within restricted.
 
 1. **`worker_posture: 'trusted'`** (the new default since #58) — workers see
    user + project `config.toml` and the trusted-default sandbox. Closest to a

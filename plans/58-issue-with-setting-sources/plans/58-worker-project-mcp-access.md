@@ -4,7 +4,7 @@ Branch: `58-issue-with-setting-sources`
 Plan Slug: `58-worker-project-mcp-access`
 Parent Issue: #58
 Created: 2026-05-12
-Updated: 2026-05-12 (rev. 3 after `reviews/review-plan-rev2-2026-05-12.md`; rev. 2 after `reviews/review-plan-2026-05-12.md`)
+Updated: 2026-05-12 (rev. 4 applies PR #60 review follow-ups per `plans/58-issue-with-setting-sources/resolution-map.md`; rev. 3 after `reviews/review-plan-rev2-2026-05-12.md`; rev. 2 after `reviews/review-plan-2026-05-12.md`)
 Status: complete
 
 ## Context
@@ -401,3 +401,17 @@ To be revisited after implementation review. Review mappings:
 - **Status:** complete
 - **Evidence:** `pnpm verify` runs `pnpm build && pnpm test && node scripts/check-publish-ready.mjs && node scripts/resolve-publish-tag.mjs >/dev/null && pnpm audit --prod && npm pack --dry-run` and exits zero. Summary: `tests 577`, `pass 575`, `fail 0`, `skipped 2`; `[publish-ready] package metadata is ready for publish`; `[publish-tag] @ralphkrauss/agent-orchestrator@0.2.2 will publish with npm dist-tag latest`; `pnpm audit --prod` → "No known vulnerabilities found"; `npm pack --dry-run` produced `ralphkrauss-agent-orchestrator-0.2.2.tgz` successfully.
 - **Notes:** All quality gates pass; #58 closure rule met (all three backends ship trusted posture).
+
+### PR #60 review follow-up (2026-05-12)
+- **Status:** complete
+- **Resolution map:** `plans/58-issue-with-setting-sources/resolution-map.md` (7 fix items, 0 deferred).
+- **Evidence:**
+  - C1 (`docs/development/codex-backend.md:63`): replaced the blank line between two blockquotes with a `>` separator so MD028 no longer fires.
+  - C2 (`docs/development/codex-backend.md:204`): renamed `Three concrete migration options (still restricted posture)` to `Migration options` with an intro sentence noting that option 1 moves off restricted entirely and options 2–4 stay within restricted; the four list items are unchanged.
+  - C3 (`src/__tests__/cursorRuntime.test.ts:832-836`): asserted SDK-event presence first and compared `postureIdx < sdkSystemIdx` unconditionally so a future predicate drift cannot let the test pass silently.
+  - C4 (`src/__tests__/processManager.test.ts:773-778`): asserted `result.ok === true` first and ran the retry-shape checks unconditionally; the prior `if (result.ok)` branch could no-op silently.
+  - C5 (`src/backend/cursor/runtime.ts:229-251`): wrapped the post-`agent.send()` `worker_posture` `store.appendEvent` in `try { … } catch { … }` that calls `disposeAgentSafely(agent)` and returns `cursorSpawnFailure('Failed to persist worker_posture lifecycle event', error, { phase: 'append_event' })`. Added regression test `issue #58 (review Major 5): worker_posture appendEvent failure disposes the agent and surfaces phase: append_event` using a `RejectingPostureStore extends RunStore` and a local agent double that counts `dispose` invocations (option 2 from the resolution map — local double to avoid growing the shared `fakeAgent` API for a single regression case).
+  - C6 (`src/orchestratorService.ts:836-865`): folded the posture-only branch into the settings build (non-validating) and ran `validateInheritedModelSettingsForBackend` against the merged result whenever `parsed.data.model || backendName === 'cursor'`, threading `validated.value` through `childPosture` / `codexNormalized` / `persistedSettings`. Added two integration regressions in `src/__tests__/integration/orchestrator.test.ts` (immediately after the Claude effort-validation `rejects model settings that a backend cannot apply` test, around line 741): a `worker_posture + claude-sonnet-4-6` rejection that previously slipped past the validator, and a posture-only happy-path that still persists the override.
+  - C7 (`src/processManager.ts:240-262`): chained the `initialEvents` appends via `orderedInitialFlush = orderedInitialFlush.then(() => appendEventBuffered(...))` and appended `status: 'started'` only after the chain resolves, so `worker_posture` is guaranteed to land first even when `RunStore.appendEvent`'s `O_EXCL` filesystem lock loses the race. Added regression test `chains worker_posture before status:started so status:started cannot enter store.appendEvent until worker_posture resolves` in `src/__tests__/processManager.test.ts` using a `GatedAppendStore extends RunStore` that records `enterOrder` / `resolveOrder` and holds the `worker_posture` write inside `appendEvent`; the test asserts the in-flight invariant after two microtask ticks, then releases the gate and asserts both the in-memory order and the persisted on-disk sequence.
+- **Verification:** `pnpm build` clean. `node --test dist/__tests__/processManager.test.js dist/__tests__/cursorRuntime.test.js dist/__tests__/integration/orchestrator.test.js` all green (22 + 34 + 38 = 94 tests pass). Full `pnpm test`: `tests 588, pass 586, fail 0, skipped 2` (skip count unchanged from rev. 3).
+- **Notes:** Not committed in this pass per the implementer brief; commit/push and GitHub replies are deferred to the next step.

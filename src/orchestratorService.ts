@@ -837,14 +837,31 @@ export class OrchestratorService {
       ? modelSettingsForBackend(backendName, model, parsed.data.reasoning_effort, parsed.data.service_tier, inheritedCodexNetwork, inheritedWorkerPosture)
       : parsed.data.codex_network !== undefined
         ? patchCodexNetwork(parent.meta.model_settings, parsed.data.codex_network, inheritedWorkerPosture)
-        : parsed.data.worker_posture !== undefined
-          ? { ok: true as const, value: { ...parent.meta.model_settings, worker_posture: parsed.data.worker_posture } }
-          : parsed.data.model || backendName === 'cursor'
-            ? validateInheritedModelSettingsForBackend(backendName, model, parent.meta.model_settings)
-            : { ok: true as const, value: parent.meta.model_settings };
+        : {
+            ok: true as const,
+            value: parsed.data.worker_posture !== undefined
+              ? { ...parent.meta.model_settings, worker_posture: parsed.data.worker_posture }
+              : parent.meta.model_settings,
+          };
     if (!settings.ok) {
       releaseLock?.();
       return wrapErr(settings.error);
+    }
+    // Issue #58 review Major (Comment 6): the posture-only branch above
+    // intentionally skips backend validation so a follow-up that only flips
+    // worker_posture does not have to re-validate the parent's inherited
+    // settings. But if the follow-up *also* changes the model (or targets
+    // cursor), the merged settings must run through
+    // validateInheritedModelSettingsForBackend just like a non-posture
+    // model-changing follow-up does — otherwise a `worker_posture + model`
+    // override could persist an invalid claude reasoning_effort/model
+    // combination or an incomplete cursor setup.
+    const validated = parsed.data.model || backendName === 'cursor'
+      ? validateInheritedModelSettingsForBackend(backendName, model, settings.value)
+      : settings;
+    if (!validated.ok) {
+      releaseLock?.();
+      return wrapErr(validated.error);
     }
     // B2 (issue #31): normalize legacy parent records before persisting the
     // child. A legacy codex parent has model_settings.codex_network === null;
@@ -859,10 +876,10 @@ export class OrchestratorService {
     // restricted-only. Under trusted, codex_network=null is the *effective*
     // value (it means "trusted-default sandbox": workspace-write + network on)
     // and must persist as null so re-runs spawn with the trusted-default argv.
-    const childPosture: WorkerPosture = settings.value.worker_posture ?? 'trusted';
-    const codexNormalized = backendName === 'codex' && settings.value.codex_network === null && childPosture === 'restricted'
-      ? { ...settings.value, codex_network: 'isolated' as CodexNetwork, mode: 'normal' as const }
-      : settings.value;
+    const childPosture: WorkerPosture = validated.value.worker_posture ?? 'trusted';
+    const codexNormalized = backendName === 'codex' && validated.value.codex_network === null && childPosture === 'restricted'
+      ? { ...validated.value, codex_network: 'isolated' as CodexNetwork, mode: 'normal' as const }
+      : validated.value;
     const persistedSettings: RunModelSettings = codexNormalized.worker_posture === null
       ? { ...codexNormalized, worker_posture: 'trusted' as WorkerPosture }
       : codexNormalized;

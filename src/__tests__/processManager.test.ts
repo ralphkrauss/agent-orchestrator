@@ -743,6 +743,99 @@ process.stdin.on('end', () => {
   });
 });
 
+describe('ProcessManager initialEvents ordering (issue #58 review Major 7)', () => {
+  it('chains worker_posture before status:started so status:started cannot enter store.appendEvent until worker_posture resolves', async () => {
+    // The race fixed here lives in the non-buffered path (interceptor
+    // disengaged): both `appendEventBuffered` calls would previously fan
+    // out into `store.appendEvent` in the same tick and race for the
+    // filesystem run lock, so `status: started` could land before
+    // `worker_posture` in the events log. A naive call-order assertion does
+    // not catch this — the call sites are sequential, the race is inside
+    // `RunStore.appendEvent`. We use a gated store that holds the
+    // worker_posture write *inside* `appendEvent`; on patched code the
+    // chain blocks the second call until the first resolves, on unpatched
+    // code both calls enter together.
+    class GatedAppendStore extends RunStore {
+      readonly enterOrder: string[] = [];
+      readonly resolveOrder: string[] = [];
+      private postureGate: { promise: Promise<void>; resolve: () => void } | null = null;
+
+      installPostureGate(): void {
+        let resolveFn!: () => void;
+        const promise = new Promise<void>((resolve) => { resolveFn = resolve; });
+        this.postureGate = { promise, resolve: resolveFn };
+      }
+
+      releasePostureGate(): void {
+        this.postureGate?.resolve();
+        this.postureGate = null;
+      }
+
+      override async appendEvent(
+        runId: string,
+        event: Parameters<RunStore['appendEvent']>[1],
+      ): ReturnType<RunStore['appendEvent']> {
+        const payload = event.payload as { state?: string; status?: string };
+        const tag = payload.state ?? payload.status ?? '?';
+        this.enterOrder.push(tag);
+        if (tag === 'worker_posture' && this.postureGate) {
+          await this.postureGate.promise;
+        }
+        const result = await super.appendEvent(runId, event);
+        this.resolveOrder.push(tag);
+        return result;
+      }
+    }
+
+    const root = await mkdtemp(join(tmpdir(), 'agent-gated-order-'));
+    const cli = join(root, 'worker.js');
+    // Worker exits cleanly on stdin end without emitting any stdout/stderr
+    // so the events log contains only the orchestrator-issued lifecycle
+    // appends, keeping the enterOrder/resolveOrder assertions tight.
+    await writeFile(cli, `#!/usr/bin/env node\nprocess.stdin.on('data', () => {});\nprocess.stdin.on('end', () => { process.exit(0); });\n`);
+    await chmod(cli, 0o755);
+
+    const store = new GatedAppendStore(root);
+    const run = await store.createRun({ backend: 'claude', cwd: root });
+    const manager = new ProcessManager(store);
+
+    store.installPostureGate();
+    const managed = await manager.start(run.run_id, new ClaudeBackend(), {
+      command: cli,
+      args: [],
+      cwd: root,
+      stdinPayload: 'finish',
+      initialEvents: [{
+        type: 'lifecycle',
+        payload: { state: 'worker_posture', backend: 'claude', worker_posture: 'trusted' },
+      }],
+    });
+
+    // Yield two microtask ticks so the synchronous part of the spawn has
+    // settled and the chain's first `.then(...)` has scheduled the
+    // worker_posture append. On patched code, status:started must not have
+    // entered yet — it is queued behind the gated posture write.
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.deepStrictEqual(store.enterOrder, ['worker_posture'], 'status:started must NOT enter appendEvent while worker_posture is still in-flight');
+
+    store.releasePostureGate();
+    await managed.completion;
+
+    assert.deepStrictEqual(store.enterOrder, ['worker_posture', 'started']);
+    assert.deepStrictEqual(store.resolveOrder, ['worker_posture', 'started']);
+
+    // Belt-and-braces: the on-disk sequence must also reflect the ordering.
+    const loaded = await store.loadRun(run.run_id);
+    const events = loaded?.events ?? [];
+    const posture = events.find((event) => (event.payload as { state?: string }).state === 'worker_posture');
+    const started = events.find((event) => (event.payload as { status?: string }).status === 'started');
+    assert.ok(posture, 'worker_posture must reach the run event stream');
+    assert.ok(started, 'status:started must reach the run event stream');
+    assert.ok(posture.seq < started.seq, 'worker_posture must persist with a lower seq than status:started');
+  });
+});
+
 describe('CliRuntime.buildStartInvocation (issue #58 review follow-up Medium 3)', () => {
   it('preserves initialEvents on the retry invocation so a real retry spawn still emits exactly one worker_posture event', async () => {
     // The retry invocation may never spawn (pre-bake) OR may spawn (retry
@@ -770,12 +863,12 @@ describe('CliRuntime.buildStartInvocation (issue #58 review follow-up Medium 3)'
         prompt: 'hi',
         modelSettings: { reasoning_effort: null, service_tier: null, mode: null, codex_network: null, worker_posture: 'trusted' },
       });
-      if (result.ok) {
-        assert.ok(result.invocation.initialEvents, 'retry invocation must keep initialEvents so a real retry spawn emits posture telemetry');
-        assert.equal(result.invocation.initialEvents!.length, 1);
-        assert.equal((result.invocation.initialEvents![0]!.payload as { state?: string }).state, 'worker_posture');
-        assert.equal(result.invocation.earlyEventInterceptor, undefined, 'single-shot enforcement still holds');
-      }
+      assert.equal(result.ok, true, 'expected buildStartInvocation to succeed for retry-shape assertions');
+      if (!result.ok) return;
+      assert.ok(result.invocation.initialEvents, 'retry invocation must keep initialEvents so a real retry spawn emits posture telemetry');
+      assert.equal(result.invocation.initialEvents.length, 1);
+      assert.equal((result.invocation.initialEvents[0]!.payload as { state?: string }).state, 'worker_posture');
+      assert.equal(result.invocation.earlyEventInterceptor, undefined, 'single-shot enforcement still holds');
     } finally {
       process.env.PATH = originalPath;
     }

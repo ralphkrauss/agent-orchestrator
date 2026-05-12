@@ -226,17 +226,29 @@ export class CursorSdkRuntime implements WorkerRuntime {
     // (WORKER_BINARY_MISSING / SPAWN_FAILED from any of `available`,
     // `loadAgentApi`, `create`/`resume`, or `send`) emit zero events because
     // we return early above this point — review follow-up Medium 2 closed.
-    await this.options.store.appendEvent(input.runId, {
-      type: 'lifecycle',
-      payload: {
-        state: 'worker_posture',
-        backend: 'cursor',
-        worker_posture: workerPosture,
-        cursor: {
-          setting_sources: localOptions.settingSources ?? null,
+    try {
+      await this.options.store.appendEvent(input.runId, {
+        type: 'lifecycle',
+        payload: {
+          state: 'worker_posture',
+          backend: 'cursor',
+          worker_posture: workerPosture,
+          cursor: {
+            setting_sources: localOptions.settingSources ?? null,
+          },
         },
-      },
-    });
+      });
+    } catch (error) {
+      await disposeAgentSafely(agent);
+      return {
+        ok: false,
+        failure: cursorSpawnFailure(
+          'Failed to persist worker_posture lifecycle event',
+          error,
+          { phase: 'append_event' },
+        ),
+      };
+    }
 
     return {
       ok: true,
