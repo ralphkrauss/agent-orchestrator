@@ -46,6 +46,10 @@ export const WorkerProfileSchema = z.object({
   reasoning_effort: z.string().trim().min(1).optional(),
   service_tier: z.string().trim().min(1).optional(),
   codex_network: z.string().trim().min(1).optional(),
+  // Issue #58: optional manifest field; validated against `WorkerPostureSchema`
+  // at start-run time by `parseProfileModelSettings`. Stored as a plain string
+  // here to keep the manifest schema unaware of the orchestrator's RunModelSettings.
+  worker_posture: z.string().trim().min(1).optional(),
   description: z.string().trim().min(1).optional(),
   metadata: z.record(z.unknown()).optional(),
   claude_account: ClaudeAccountNameSchema.optional(),
@@ -108,7 +112,7 @@ export function createWorkerCapabilityCatalog(statusReport?: BackendStatusReport
         },
         notes: [
           'Models are user-defined; the backend validates CLI availability and supported settings.',
-          'codex_network controls network egress: isolated (default; --ignore-user-config, no network), workspace (network on, codex skips $CODEX_HOME/config.toml), user-config (codex reads $CODEX_HOME/config.toml verbatim).',
+          'worker_posture controls config/MCP visibility: trusted (default; codex loads user + project config.toml and MCP servers) vs restricted (opt-in; codex skips user config via --ignore-user-config). codex_network controls the codex sandbox/network shape inside the chosen posture: isolated (codex defaults; no network override), workspace (sandbox_workspace_write.network_access=true), user-config (codex defaults). Under trusted with codex_network unset, the daemon emits -c sandbox_mode="workspace-write" -c sandbox_workspace_write.network_access=true.',
         ],
       },
       {
@@ -252,6 +256,14 @@ function validateProfile(
   if (profile.variant && !capability.settings.variants.includes(profile.variant)) {
     errors.push(`profile ${profileId} uses unsupported variant ${profile.variant} for backend ${profile.backend}`);
   }
+  // Issue #58 review follow-up (Medium 2): validate worker_posture at
+  // inspection time so a hand-edited manifest with a typo lands as an
+  // `invalid_profiles` diagnostic in `list_worker_profiles` instead of
+  // surprising the caller at `start_run` time. Backend-agnostic — the same
+  // values apply to every backend.
+  if (profile.worker_posture && !(WORKER_POSTURE_VALUES as readonly string[]).includes(profile.worker_posture)) {
+    errors.push(`profile ${profileId} uses unsupported worker_posture ${profile.worker_posture}; expected one of ${WORKER_POSTURE_VALUES.join(', ')}`);
+  }
   errors.push(...validateBackendSpecificProfile(profileId, profile));
   if (profile.backend === 'claude' && knownClaudeAccounts) {
     if (profile.claude_account && !knownClaudeAccounts.has(profile.claude_account)) {
@@ -269,6 +281,11 @@ function validateProfile(
 }
 
 const CODEX_NETWORK_VALUES = ['isolated', 'workspace', 'user-config'] as const;
+
+// Issue #58: kept in sync with `WorkerPostureSchema` in `src/contract.ts`. The
+// harness layer can't import from `contract.ts` without pulling daemon types,
+// so the enum is restated here and validated above.
+const WORKER_POSTURE_VALUES = ['trusted', 'restricted'] as const;
 
 function validateBackendSpecificProfile(profileId: string, profile: WorkerProfile): string[] {
   if (profile.backend === 'codex') return [

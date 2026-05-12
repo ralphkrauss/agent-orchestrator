@@ -237,6 +237,17 @@ export class ProcessManager {
       return this.store.appendEvent(runId, event);
     };
 
+    // Issue #58: flush backend-supplied initial lifecycle events (e.g. the
+    // `worker_posture` event from Claude and Codex backends) BEFORE the
+    // `status: started` marker so operators see them at the head of the run
+    // event stream. Routed through `appendEventBuffered` so the D-COR-Resume
+    // interceptor still buffers them on a retry-eligible attempt.
+    if (invocation.initialEvents && invocation.initialEvents.length > 0) {
+      for (const initialEvent of invocation.initialEvents) {
+        trackPersistence(appendEventBuffered(initialEvent));
+      }
+    }
+
     trackPersistence(appendEventBuffered({
       type: 'lifecycle',
       payload: { status: 'started', pid: workerPid, pgid: workerPgid },

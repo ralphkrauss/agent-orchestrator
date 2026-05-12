@@ -250,11 +250,23 @@ export const CodexNetworkSchema = z.enum([
 ]);
 export type CodexNetwork = z.infer<typeof CodexNetworkSchema>;
 
+// Issue #58: worker posture controls whether worker runs get backend-native
+// parity with a manual launch ('trusted') or the orchestrator's curated
+// isolated envelope ('restricted'). The supervisor is always restricted and
+// ignores this field. See plans/58-issue-with-setting-sources for the full
+// per-backend mapping.
+export const WorkerPostureSchema = z.enum([
+  'trusted',
+  'restricted',
+]);
+export type WorkerPosture = z.infer<typeof WorkerPostureSchema>;
+
 const defaultRunModelSettings = {
   reasoning_effort: null,
   service_tier: null,
   mode: null,
   codex_network: null,
+  worker_posture: null,
 };
 
 export const RunModelSettingsSchema = z.object({
@@ -262,6 +274,10 @@ export const RunModelSettingsSchema = z.object({
   service_tier: ServiceTierSchema.nullable().optional().default(null),
   mode: z.string().nullable().optional().default(null),
   codex_network: CodexNetworkSchema.nullable().optional().default(null),
+  // Issue #58: nullable for backward compatibility with legacy run records.
+  // Read paths tolerate null; write paths on `start_run` / `send_followup`
+  // normalize to a concrete posture before persistence (default `'trusted'`).
+  worker_posture: WorkerPostureSchema.nullable().optional().default(null),
 }).default(defaultRunModelSettings);
 export type RunModelSettings = z.infer<typeof RunModelSettingsSchema>;
 
@@ -368,6 +384,9 @@ export const StartRunInputSchema = z.object({
   reasoning_effort: ReasoningEffortSchema.optional(),
   service_tier: ServiceTierSchema.optional(),
   codex_network: CodexNetworkSchema.optional(),
+  // Issue #58: direct-mode override for worker posture. Profile mode reads
+  // the field off the profile and rejects mixing (see superRefine below).
+  worker_posture: WorkerPostureSchema.optional(),
   metadata: z.record(z.unknown()).optional().default({}),
   idle_timeout_seconds: z.number().int().positive().optional(),
   execution_timeout_seconds: z.number().int().positive().optional(),
@@ -382,10 +401,10 @@ export const StartRunInputSchema = z.object({
     });
   }
 
-  if (input.profile && (input.backend || input.model || input.reasoning_effort || input.service_tier || input.codex_network)) {
+  if (input.profile && (input.backend || input.model || input.reasoning_effort || input.service_tier || input.codex_network || input.worker_posture)) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
-      message: 'Profile mode cannot be mixed with direct backend/model/reasoning_effort/service_tier/codex_network settings',
+      message: 'Profile mode cannot be mixed with direct backend/model/reasoning_effort/service_tier/codex_network/worker_posture settings',
       path: ['profile'],
     });
   }
@@ -446,6 +465,9 @@ export const UpsertWorkerProfileInputSchema = z.object({
   reasoning_effort: ReasoningEffortSchema.optional(),
   service_tier: ServiceTierSchema.optional(),
   codex_network: CodexNetworkSchema.optional(),
+  // Issue #58: declare the worker posture on the profile manifest. Optional;
+  // absence is normalized to `'trusted'` at run time.
+  worker_posture: WorkerPostureSchema.optional(),
   description: z.string().trim().min(1).optional(),
   metadata: z.record(z.unknown()).optional(),
   create_if_missing: z.boolean().optional().default(true),
@@ -492,6 +514,11 @@ export const SendFollowupInputSchema = z.object({
   reasoning_effort: ReasoningEffortSchema.optional(),
   service_tier: ServiceTierSchema.optional(),
   codex_network: CodexNetworkSchema.optional(),
+  // Issue #58: direct-mode follow-up may override the inherited posture only
+  // when the chain originated from direct mode; the orchestrator service
+  // rejects profile-mode-chain overrides at runtime, mirroring the existing
+  // codex_network rule.
+  worker_posture: WorkerPostureSchema.optional(),
   metadata: z.record(z.unknown()).optional().default({}),
   idle_timeout_seconds: z.number().int().positive().optional(),
   execution_timeout_seconds: z.number().int().positive().optional(),

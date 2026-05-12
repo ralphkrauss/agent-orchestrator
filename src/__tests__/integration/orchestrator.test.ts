@@ -217,6 +217,9 @@ describe('agent orchestrator integration with mock CLIs', () => {
     const repo = await createGitRepo(fixture.root);
     const service = await createService(fixture.home);
 
+    // Issue #58: pin worker_posture: 'restricted' so this test continues to
+    // exercise the v1 codex isolated argv shape (with --ignore-user-config).
+    // The new 'trusted' default has its own argv shape; covered separately.
     const start = await service.startRun({
       backend: 'codex',
       prompt: 'hello',
@@ -224,6 +227,7 @@ describe('agent orchestrator integration with mock CLIs', () => {
       model: 'gpt-5.2',
       reasoning_effort: 'xhigh',
       service_tier: 'fast',
+      worker_posture: 'restricted',
       metadata: {
         session_title: 'Model session',
         prompt_title: 'Initial model prompt',
@@ -262,14 +266,14 @@ describe('agent orchestrator integration with mock CLIs', () => {
     // Issue #31 (OD1=B locked): codex_network defaults to 'isolated' when the
     // direct-mode start_run does not set it; mode is derived from
     // codex_network ('isolated' => 'normal'), not from service_tier.
-    assert.deepStrictEqual(parent.ok && (parent as unknown as { run_summary: { model_settings: unknown } }).run_summary.model_settings, { reasoning_effort: 'xhigh', service_tier: 'fast', mode: 'normal', codex_network: 'isolated' });
-    assert.deepStrictEqual(childInherited.ok && (childInherited as unknown as { run_summary: { model_settings: unknown } }).run_summary.model_settings, { reasoning_effort: 'xhigh', service_tier: 'fast', mode: 'normal', codex_network: 'isolated' });
+    assert.deepStrictEqual(parent.ok && (parent as unknown as { run_summary: { model_settings: unknown } }).run_summary.model_settings, { reasoning_effort: 'xhigh', service_tier: 'fast', mode: 'normal', codex_network: 'isolated', worker_posture: 'restricted' });
+    assert.deepStrictEqual(childInherited.ok && (childInherited as unknown as { run_summary: { model_settings: unknown } }).run_summary.model_settings, { reasoning_effort: 'xhigh', service_tier: 'fast', mode: 'normal', codex_network: 'isolated', worker_posture: 'restricted' });
     // Inverse-bug regression sibling (P5): service_tier='normal' alone (no
     // codex_network override) under OD1=B still resolves through
     // codex_network='isolated' so mode='normal' and --ignore-user-config is
     // present, but for the new reason. service_tier='normal' continues to be
     // suppressed in serialization because it is the codex CLI default.
-    assert.deepStrictEqual(childOverridden.ok && (childOverridden as unknown as { run_summary: { model_settings: unknown } }).run_summary.model_settings, { reasoning_effort: 'medium', service_tier: null, mode: 'normal', codex_network: 'isolated' });
+    assert.deepStrictEqual(childOverridden.ok && (childOverridden as unknown as { run_summary: { model_settings: unknown } }).run_summary.model_settings, { reasoning_effort: 'medium', service_tier: null, mode: 'normal', codex_network: 'isolated', worker_posture: 'restricted' });
     assert.deepStrictEqual(
       parent.ok && (parent as unknown as { run_summary: { worker_invocation: { args: string[] } } }).run_summary.worker_invocation.args,
       ['exec', '--json', '--skip-git-repo-check', '--ignore-user-config', '--cd', repo, '--model', 'gpt-5.2', '-c', 'model_reasoning_effort="xhigh"', '-c', 'service_tier="fast"', '-'],
@@ -941,6 +945,9 @@ describe('agent orchestrator integration with mock CLIs', () => {
     const repo = await createGitRepo(fixture.root);
     const service = await createService(fixture.home);
 
+    // Pin restricted posture: this test verifies the issue #31 argv shape
+    // for codex_network='workspace', which under trusted no longer includes
+    // --ignore-user-config (issue #58 Decision 9).
     const start = await service.startRun({
       backend: 'codex',
       prompt: 'fetch zen',
@@ -948,6 +955,7 @@ describe('agent orchestrator integration with mock CLIs', () => {
       model: 'gpt-5.5',
       reasoning_effort: 'xhigh',
       codex_network: 'workspace',
+      worker_posture: 'restricted',
     });
     assert.equal(start.ok, true);
     const runId = start.ok ? (start as unknown as { run_id: string }).run_id : '';
@@ -976,7 +984,7 @@ describe('agent orchestrator integration with mock CLIs', () => {
       cwd: repo,
       codex_network: 'workspace',
     });
-    assertInvalidInput(rejected, /Profile mode cannot be mixed with direct backend\/model\/reasoning_effort\/service_tier\/codex_network settings/);
+    assertInvalidInput(rejected, /Profile mode cannot be mixed with direct backend\/model\/reasoning_effort\/service_tier\/codex_network\/worker_posture settings/);
   });
 
   it('issue #31 (T9): codex_network is rejected on non-codex direct-mode start_run', async () => {
@@ -999,12 +1007,16 @@ describe('agent orchestrator integration with mock CLIs', () => {
     const repo = await createGitRepo(fixture.root);
     const service = await createService(fixture.home);
 
+    // Pin restricted posture so this test's argv assertions (including
+    // --ignore-user-config under codex_network=isolated) continue to match
+    // the v1 codex argv shape.
     const start = await service.startRun({
       backend: 'codex',
       prompt: 'parent',
       cwd: repo,
       model: 'gpt-5.5',
       codex_network: 'workspace',
+      worker_posture: 'restricted',
     });
     const parentId = start.ok ? (start as unknown as { run_id: string }).run_id : '';
     await service.waitForRun({ run_id: parentId, wait_seconds: 5 });
@@ -1051,29 +1063,110 @@ describe('agent orchestrator integration with mock CLIs', () => {
     assertInvalidInput(rejected, /Profile-mode follow-ups cannot override codex_network/);
   });
 
-  it('issue #31 (T11 / C12): a codex run that defaulted codex_network emits exactly one non-blocking warning event', async () => {
+  it('issue #58 (review High): default trusted codex run emits the trusted-default sandbox argv (no --ignore-user-config) and persists codex_network: null', async () => {
     const fixture = await createFixture();
     const repo = await createGitRepo(fixture.root);
     const service = await createService(fixture.home);
 
-    const defaulted = await service.startRun({ backend: 'codex', prompt: 'no codex_network', cwd: repo, model: 'gpt-5.5' });
+    // Direct-mode codex run with neither codex_network nor worker_posture set.
+    // Trusted is the default; under trusted+absent codex_network the daemon
+    // must spawn with -c sandbox_mode="workspace-write" -c sandbox_workspace_write.network_access=true
+    // and persist codex_network: null on the run record (so the run's effective
+    // posture is unambiguously the trusted default).
+    const start = await service.startRun({ backend: 'codex', prompt: 'default trusted run', cwd: repo, model: 'gpt-5.5' });
+    const runId = start.ok ? (start as unknown as { run_id: string }).run_id : '';
+    await service.waitForRun({ run_id: runId, wait_seconds: 5 });
+
+    const status = await service.getRunStatus({ run_id: runId });
+    const summary = (status as unknown as { run_summary: { model_settings: { codex_network: string | null; worker_posture: string }; worker_invocation: { args: string[] } } }).run_summary;
+    assert.equal(summary.model_settings.worker_posture, 'trusted', 'default posture is trusted');
+    assert.equal(summary.model_settings.codex_network, null, 'trusted + absent codex_network persists as null');
+    const args = summary.worker_invocation.args;
+    assert.equal(args.includes('--ignore-user-config'), false, 'trusted must NOT emit --ignore-user-config');
+    assert.equal(args.includes('--sandbox'), false, 'shared sandboxArgs helper must NOT emit --sandbox (resume-unsafe)');
+    assert.ok(args.includes('-c'));
+    assert.ok(args.includes('sandbox_mode="workspace-write"'), 'trusted default includes sandbox_mode override');
+    assert.ok(args.includes('sandbox_workspace_write.network_access=true'), 'trusted default opens workspace network');
+  });
+
+  it('issue #58 (review High): profile-mode codex with no codex_network and no worker_posture spawns with the trusted-default argv', async () => {
+    const fixture = await createFixture();
+    const repo = await createGitRepo(fixture.root);
+    const service = await createService(fixture.home);
+    const profilesFile = join(fixture.root, 'trusted-profiles.json');
+    // Profile sets neither codex_network nor worker_posture: trusted default
+    // applies, and codex_network resolution leaves null on the run record.
+    await writeFile(profilesFile, JSON.stringify({
+      version: 1,
+      profiles: {
+        'codex-trusted-default': {
+          backend: 'codex',
+          model: 'gpt-5.5',
+          reasoning_effort: 'high',
+        },
+      },
+    }, null, 2));
+
+    const start = await service.startRun({ profile: 'codex-trusted-default', profiles_file: profilesFile, prompt: 'hello', cwd: repo });
+    const runId = start.ok ? (start as unknown as { run_id: string }).run_id : '';
+    await service.waitForRun({ run_id: runId, wait_seconds: 5 });
+
+    const status = await service.getRunStatus({ run_id: runId });
+    const summary = (status as unknown as { run_summary: { model_settings: { codex_network: string | null; worker_posture: string }; worker_invocation: { args: string[] } } }).run_summary;
+    assert.equal(summary.model_settings.worker_posture, 'trusted');
+    assert.equal(summary.model_settings.codex_network, null);
+    const args = summary.worker_invocation.args;
+    assert.equal(args.includes('--ignore-user-config'), false);
+    assert.ok(args.includes('sandbox_mode="workspace-write"'));
+    assert.ok(args.includes('sandbox_workspace_write.network_access=true'));
+  });
+
+  it('issue #31 (T11 / C12): a restricted codex run that defaulted codex_network emits exactly one non-blocking warning event', async () => {
+    const fixture = await createFixture();
+    const repo = await createGitRepo(fixture.root);
+    const service = await createService(fixture.home);
+
+    // Pin worker_posture: 'restricted' — issue #58 review follow-up suppresses
+    // the warning under trusted because the trusted default is the intended
+    // product direction, not a surprise breaking change. The warning still
+    // fires under restricted (preserves the pre-#58 OD1=B closed-by-default).
+    const defaulted = await service.startRun({ backend: 'codex', prompt: 'no codex_network', cwd: repo, model: 'gpt-5.5', worker_posture: 'restricted' });
     const defaultedId = defaulted.ok ? (defaulted as unknown as { run_id: string }).run_id : '';
     await service.waitForRun({ run_id: defaultedId, wait_seconds: 5 });
     const defaultedRun = await service.store.loadRun(defaultedId);
     const defaultedWarnings = (defaultedRun?.events ?? []).filter((event) => event.type === 'lifecycle' && (event.payload as { state?: string }).state === 'codex_network_defaulted');
-    assert.equal(defaultedWarnings.length, 1, 'exactly one warning event must fire when codex_network is defaulted');
+    assert.equal(defaultedWarnings.length, 1, 'exactly one warning event must fire when codex_network is defaulted under restricted');
     assert.match(String(defaultedWarnings[0]?.payload.warning ?? ''), /codex_network not set/);
     assert.match(String(defaultedWarnings[0]?.payload.warning ?? ''), /docs\/development\/codex-backend\.md/);
+    assert.equal((defaultedWarnings[0]?.payload as { worker_posture?: string }).worker_posture, 'restricted');
     // The warning must not block the run.
     assert.equal(defaultedRun?.meta.status, 'completed');
 
     // Explicit codex_network must NOT emit the warning.
-    const explicit = await service.startRun({ backend: 'codex', prompt: 'explicit', cwd: repo, model: 'gpt-5.5', codex_network: 'workspace' });
+    const explicit = await service.startRun({ backend: 'codex', prompt: 'explicit', cwd: repo, model: 'gpt-5.5', codex_network: 'workspace', worker_posture: 'restricted' });
     const explicitId = explicit.ok ? (explicit as unknown as { run_id: string }).run_id : '';
     await service.waitForRun({ run_id: explicitId, wait_seconds: 5 });
     const explicitRun = await service.store.loadRun(explicitId);
     const explicitWarnings = (explicitRun?.events ?? []).filter((event) => event.type === 'lifecycle' && (event.payload as { state?: string }).state === 'codex_network_defaulted');
     assert.equal(explicitWarnings.length, 0, 'no warning event must fire when codex_network is set explicitly');
+  });
+
+  it('issue #58 (review Medium 1): trusted codex with absent codex_network does NOT emit the codex_network_defaulted warning', async () => {
+    // Under trusted, the trusted-default sandbox (workspace-write + network on)
+    // is the intended product behavior. There is no explicit codex_network
+    // value that preserves the same argv, so an unsilenceable warning would
+    // be permanently noisy. The warning is therefore suppressed under
+    // trusted+absent.
+    const fixture = await createFixture();
+    const repo = await createGitRepo(fixture.root);
+    const service = await createService(fixture.home);
+
+    const trusted = await service.startRun({ backend: 'codex', prompt: 'trusted absent', cwd: repo, model: 'gpt-5.5' });
+    const trustedId = trusted.ok ? (trusted as unknown as { run_id: string }).run_id : '';
+    await service.waitForRun({ run_id: trustedId, wait_seconds: 5 });
+    const trustedRun = await service.store.loadRun(trustedId);
+    const warnings = (trustedRun?.events ?? []).filter((event) => event.type === 'lifecycle' && (event.payload as { state?: string }).state === 'codex_network_defaulted');
+    assert.equal(warnings.length, 0, 'trusted + absent codex_network must NOT emit a defaulted warning');
   });
 
   it('issue #31 (T11 / C12): profile-mode codex run that omits codex_network names the profile in the warning', async () => {
@@ -1145,7 +1238,10 @@ describe('agent orchestrator integration with mock CLIs', () => {
       model_source: 'explicit',
       session_id: 'codex-session-1',
       observed_session_id: 'codex-session-1',
-      model_settings: { reasoning_effort: 'high', service_tier: null, mode: null, codex_network: null },
+      // worker_posture: 'restricted' pins the issue #31 argv shape the
+      // test's assertions encode. The legacy-null normalization path for
+      // codex_network is what this test exercises.
+      model_settings: { reasoning_effort: 'high', service_tier: null, mode: null, codex_network: null, worker_posture: 'restricted' },
     });
     await service.store.markTerminal(legacy.run_id, 'completed', [], {
       status: 'completed',
@@ -1163,6 +1259,7 @@ describe('agent orchestrator integration with mock CLIs', () => {
     const childMeta = await service.store.loadMeta(childId);
     assert.equal(childMeta.model_settings.codex_network, 'isolated', 'codex follow-up must persist the effective isolated default, not legacy null');
     assert.equal(childMeta.model_settings.mode, 'normal', 'mode breadcrumb must be re-derived from the resolved codex_network');
+    assert.equal(childMeta.model_settings.worker_posture, 'restricted', 'restricted posture inherits from the legacy parent');
     assert.ok(childMeta.worker_invocation?.args.includes('--ignore-user-config'));
   });
 
@@ -1301,6 +1398,9 @@ async function createGitRepo(root: string): Promise<string> {
 }
 
 async function writeProfilesFile(path: string, model: string, reasoningEffort: string): Promise<void> {
+  // Issue #58: pin worker_posture: 'restricted' so the codex argv assertions
+  // in callers continue to match the v1 shape (with --ignore-user-config).
+  // Trusted codex argv is covered by `backendInvocation.test.ts`.
   await writeFile(path, JSON.stringify({
     version: 1,
     profiles: {
@@ -1308,6 +1408,7 @@ async function writeProfilesFile(path: string, model: string, reasoningEffort: s
         backend: 'codex',
         model,
         reasoning_effort: reasoningEffort,
+        worker_posture: 'restricted',
       },
     },
   }, null, 2));

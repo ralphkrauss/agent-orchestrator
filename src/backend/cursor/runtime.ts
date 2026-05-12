@@ -3,6 +3,7 @@ import type {
   RunError,
   RunMeta,
   RunStatus,
+  WorkerPosture,
   WorkerResult,
 } from '../../contract.js';
 import { WorkerResultSchema } from '../../contract.js';
@@ -164,17 +165,31 @@ export class CursorSdkRuntime implements WorkerRuntime {
       };
     }
 
+    // Issue #58 Decision 7: under 'trusted' posture (the new default), pass
+    // `local.settingSources: ['all']` so the SDK loads every ambient Cursor
+    // settings layer (project / user / team / mdm / plugins). Under
+    // 'restricted' posture, omit `settingSources` so the SDK's pre-#58
+    // behavior is preserved verbatim (no ambient settings loaded by the
+    // shim). `[all]` is the SDK-documented forward-compatible primitive;
+    // adding more SettingSource values later does not require code changes
+    // here.
+    const workerPosture: WorkerPosture = input.modelSettings.worker_posture ?? 'trusted';
+    const localOptions: { cwd: string; settingSources?: ('all')[] } = { cwd: input.cwd };
+    if (workerPosture === 'trusted') {
+      localOptions.settingSources = ['all'];
+    }
+
     let agent: CursorAgent;
     try {
       agent = sessionId
         ? await agentApi.resume(sessionId, {
             apiKey,
-            local: { cwd: input.cwd },
+            local: localOptions,
           })
         : await agentApi.create({
             apiKey,
             model: input.model ? { id: input.model } : undefined,
-            local: { cwd: input.cwd },
+            local: localOptions,
           });
     } catch (error) {
       return {
@@ -201,6 +216,27 @@ export class CursorSdkRuntime implements WorkerRuntime {
         failure: cursorSpawnFailure('Failed to send prompt to cursor agent', error, { phase: 'send' }),
       };
     }
+
+    // Issue #58 Decision 18: emit the worker_posture lifecycle event after
+    // the SDK actually accepted the prompt (Agent.create / Agent.resume +
+    // agent.send both resolved) and BEFORE the drain loop in
+    // `createCursorHandle` appends any SDK stream events. Cursor doesn't use
+    // `WorkerInvocation` (no `ProcessManager.start()` path), so the event
+    // goes through `store.appendEvent()` directly. Pre-spawn failures
+    // (WORKER_BINARY_MISSING / SPAWN_FAILED from any of `available`,
+    // `loadAgentApi`, `create`/`resume`, or `send`) emit zero events because
+    // we return early above this point — review follow-up Medium 2 closed.
+    await this.options.store.appendEvent(input.runId, {
+      type: 'lifecycle',
+      payload: {
+        state: 'worker_posture',
+        backend: 'cursor',
+        worker_posture: workerPosture,
+        cursor: {
+          setting_sources: localOptions.settingSources ?? null,
+        },
+      },
+    });
 
     return {
       ok: true,

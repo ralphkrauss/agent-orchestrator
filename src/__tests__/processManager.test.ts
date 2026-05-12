@@ -704,3 +704,80 @@ describe("applyEnvPolicy", () => {
   });
 });
 
+
+describe('ProcessManager initialEvents flush (issue #58 Decision 10 / T-Telemetry)', () => {
+  it('flushes WorkerInvocation.initialEvents before the status:started lifecycle marker on actual spawn', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-initialevents-'));
+    const cli = join(root, 'worker.js');
+    await writeFile(cli, `#!/usr/bin/env node
+process.stdin.on('data', () => {});
+process.stdin.on('end', () => {
+  console.log(JSON.stringify({ type: 'result', subtype: 'success', result: 'done', session_id: 'session-1' }));
+  process.exit(0);
+});
+`);
+    await chmod(cli, 0o755);
+
+    const store = new RunStore(root);
+    const run = await store.createRun({ backend: 'claude', cwd: root });
+    const manager = new ProcessManager(store);
+    const managed = await manager.start(run.run_id, new ClaudeBackend(), {
+      command: cli,
+      args: [],
+      cwd: root,
+      stdinPayload: 'finish',
+      initialEvents: [{
+        type: 'lifecycle',
+        payload: { state: 'worker_posture', backend: 'claude', worker_posture: 'trusted' },
+      }],
+    });
+
+    await managed.completion;
+    const loaded = await store.loadRun(run.run_id);
+    const lifecycleEvents = (loaded?.events ?? []).filter((event) => event.type === 'lifecycle');
+    const posture = lifecycleEvents.find((event) => (event.payload as { state?: string }).state === 'worker_posture');
+    const started = lifecycleEvents.find((event) => (event.payload as { status?: string }).status === 'started');
+    assert.ok(posture, 'worker_posture event must reach the run event stream');
+    assert.ok(started, 'status:started lifecycle marker must follow');
+    assert.ok(posture.seq < started.seq, 'worker_posture must precede status:started');
+  });
+});
+
+describe('CliRuntime.buildStartInvocation (issue #58 review follow-up Medium 3)', () => {
+  it('preserves initialEvents on the retry invocation so a real retry spawn still emits exactly one worker_posture event', async () => {
+    // The retry invocation may never spawn (pre-bake) OR may spawn (retry
+    // fires). When it spawns, its initialEvents are what carry the
+    // worker_posture telemetry — the first attempt's posture event was
+    // dropped along with the cancelled-attempt event buffer. Stripping
+    // initialEvents here would leave the retry with zero posture telemetry.
+    const { CliRuntime } = await import('../backend/runtime.js');
+    const root = await mkdtemp(join(tmpdir(), 'agent-prebake-'));
+    const cli = join(root, 'worker.js');
+    await writeFile(cli, `#!/usr/bin/env node\n`);
+    await chmod(cli, 0o755);
+
+    const store = new RunStore(root);
+    const run = await store.createRun({ backend: 'claude', cwd: root });
+    const manager = new ProcessManager(store);
+    const runtime = new CliRuntime(new ClaudeBackend(store), manager);
+
+    const originalPath = process.env.PATH ?? '';
+    process.env.PATH = `${root}:${originalPath}`;
+    try {
+      const result = await runtime.buildStartInvocation({
+        runId: run.run_id,
+        cwd: root,
+        prompt: 'hi',
+        modelSettings: { reasoning_effort: null, service_tier: null, mode: null, codex_network: null, worker_posture: 'trusted' },
+      });
+      if (result.ok) {
+        assert.ok(result.invocation.initialEvents, 'retry invocation must keep initialEvents so a real retry spawn emits posture telemetry');
+        assert.equal(result.invocation.initialEvents!.length, 1);
+        assert.equal((result.invocation.initialEvents![0]!.payload as { state?: string }).state, 'worker_posture');
+        assert.equal(result.invocation.earlyEventInterceptor, undefined, 'single-shot enforcement still holds');
+      }
+    } finally {
+      process.env.PATH = originalPath;
+    }
+  });
+});

@@ -791,3 +791,160 @@ describe('CursorSdkRuntime finalize artifacts and timeout/cancel error synthesis
     assert.match(payload.run_summary.latest_error?.message ?? '', /cancelled by user/i);
   });
 });
+
+describe('CursorSdkRuntime worker posture (issue #58 Decisions 7, 18)', () => {
+  it('trusted posture passes local.settingSources: ["all"] to Agent.create and emits a worker_posture lifecycle event', async () => {
+    const events: CursorSdkMessage[] = [
+      { type: 'system', agent_id: 'bc-trusted', run_id: 'run-1' },
+    ];
+    const run = fakeRun({ agentId: 'bc-trusted', status: 'finished', result: 'ok', events });
+    const agent = fakeAgent('bc-trusted', run);
+    let capturedLocal: { cwd?: string; settingSources?: string[] } | undefined;
+    const api: CursorAgentApi = {
+      async create(options) {
+        capturedLocal = options.local as { cwd?: string; settingSources?: string[] } | undefined;
+        return agent;
+      },
+      async resume() { return agent; },
+    };
+
+    const { service } = await createServiceWith(fakeAdapter(api));
+    const cwd = await mkdtemp(join(tmpdir(), 'cursor-trusted-'));
+    const start = await service.startRun({ backend: 'cursor', prompt: 'go', cwd, model: 'composer-2', worker_posture: 'trusted' });
+    assert.equal(start.ok, true);
+    const runId = (start as { ok: true; run_id: string }).run_id;
+    await service.waitForRun({ run_id: runId, wait_seconds: 5 });
+
+    assert.ok(capturedLocal, 'Agent.create must receive local options');
+    assert.deepStrictEqual(capturedLocal!.settingSources, ['all'], 'trusted posture must request all ambient SettingSource layers');
+
+    const eventsResp = await service.getRunEvents({ run_id: runId });
+    const stream = (eventsResp as { ok: true; events: { type: string; payload: Record<string, unknown> }[] }).events;
+    const posture = stream.find((event) => event.type === 'lifecycle' && event.payload.state === 'worker_posture');
+    assert.ok(posture, 'cursor worker must emit a worker_posture lifecycle event');
+    assert.equal(posture!.payload.backend, 'cursor');
+    assert.equal(posture!.payload.worker_posture, 'trusted');
+    const cursorPayload = posture!.payload.cursor as Record<string, unknown>;
+    assert.deepStrictEqual(cursorPayload.setting_sources, ['all']);
+    // Issue #58 Decision 18: posture event lands before the first SDK stream
+    // event ('system' from cursor) so operators can correlate the spawn-time
+    // posture with subsequent worker output.
+    const sdkSystemIdx = stream.findIndex((event) => event.type === 'lifecycle' && (event.payload as { state?: string }).state !== 'worker_posture' && (event.payload as { agent_id?: string }).agent_id === 'bc-trusted');
+    if (sdkSystemIdx >= 0) {
+      const postureIdx = stream.indexOf(posture!);
+      assert.ok(postureIdx < sdkSystemIdx, 'worker_posture event must precede the first SDK system event');
+    }
+  });
+
+  it('restricted posture omits local.settingSources and emits the restricted posture event', async () => {
+    const events: CursorSdkMessage[] = [
+      { type: 'system', agent_id: 'bc-restricted', run_id: 'run-1' },
+    ];
+    const run = fakeRun({ agentId: 'bc-restricted', status: 'finished', result: 'ok', events });
+    const agent = fakeAgent('bc-restricted', run);
+    let capturedLocal: { cwd?: string; settingSources?: string[] } | undefined;
+    const api: CursorAgentApi = {
+      async create(options) {
+        capturedLocal = options.local as { cwd?: string; settingSources?: string[] } | undefined;
+        return agent;
+      },
+      async resume() { return agent; },
+    };
+
+    const { service } = await createServiceWith(fakeAdapter(api));
+    const cwd = await mkdtemp(join(tmpdir(), 'cursor-restricted-'));
+    const start = await service.startRun({ backend: 'cursor', prompt: 'go', cwd, model: 'composer-2', worker_posture: 'restricted' });
+    const runId = (start as { ok: true; run_id: string }).run_id;
+    await service.waitForRun({ run_id: runId, wait_seconds: 5 });
+
+    assert.ok(capturedLocal, 'Agent.create must still receive local options for cwd');
+    assert.equal(capturedLocal!.settingSources, undefined, 'restricted posture must NOT request ambient SettingSource layers');
+
+    const eventsResp = await service.getRunEvents({ run_id: runId });
+    const stream = (eventsResp as { ok: true; events: { type: string; payload: Record<string, unknown> }[] }).events;
+    const posture = stream.find((event) => event.type === 'lifecycle' && event.payload.state === 'worker_posture');
+    assert.ok(posture);
+    assert.equal(posture!.payload.worker_posture, 'restricted');
+    const cursorPayload = posture!.payload.cursor as Record<string, unknown>;
+    assert.equal(cursorPayload.setting_sources, null);
+  });
+
+  it('pre-spawn failure (WORKER_BINARY_MISSING) does NOT emit a worker_posture event', async () => {
+    // Decision 18 invariant: the event lands only after Agent.create / resume
+    // succeed. A missing SDK fails before that, so the run's event stream must
+    // contain zero worker_posture events.
+    const { service } = await createServiceWith(unavailableAdapter('Cannot find module @cursor/sdk'));
+    const cwd = await mkdtemp(join(tmpdir(), 'cursor-prespawn-'));
+    const start = await service.startRun({ backend: 'cursor', prompt: 'go', cwd, model: 'composer-2', worker_posture: 'trusted' });
+    const runId = (start as { ok: true; run_id: string }).run_id;
+    await service.waitForRun({ run_id: runId, wait_seconds: 5 });
+
+    const eventsResp = await service.getRunEvents({ run_id: runId });
+    const stream = (eventsResp as { ok: true; events: { type: string; payload: Record<string, unknown> }[] }).events;
+    const postureCount = stream.filter((event) => event.type === 'lifecycle' && event.payload.state === 'worker_posture').length;
+    assert.equal(postureCount, 0, 'pre-spawn failures must not emit worker_posture telemetry');
+  });
+
+  it('issue #58 (review Medium 2): agent.send() failure does NOT emit a worker_posture event', async () => {
+    // Regression: previously the runtime appended worker_posture immediately
+    // after Agent.create() succeeded, before calling agent.send(). A send()
+    // failure then returned SPAWN_FAILED to the orchestrator but the run's
+    // event stream already contained a worker_posture event — false telemetry
+    // for a worker that never accepted a prompt. The fix moves the append to
+    // after agent.send() returns successfully.
+    const sendError = new Error('send refused');
+    const agent: CursorAgent = {
+      agentId: 'bc-send-fails',
+      async send() {
+        throw sendError;
+      },
+      async [Symbol.asyncDispose]() { /* no-op */ },
+    } as CursorAgent;
+    const api: CursorAgentApi = {
+      async create() { return agent; },
+      async resume() { return agent; },
+    };
+
+    const { service } = await createServiceWith(fakeAdapter(api));
+    const cwd = await mkdtemp(join(tmpdir(), 'cursor-send-failure-'));
+    const start = await service.startRun({ backend: 'cursor', prompt: 'go', cwd, model: 'composer-2', worker_posture: 'trusted' });
+    const runId = (start as { ok: true; run_id: string }).run_id;
+    await service.waitForRun({ run_id: runId, wait_seconds: 5 });
+
+    const eventsResp = await service.getRunEvents({ run_id: runId });
+    const stream = (eventsResp as { ok: true; events: { type: string; payload: Record<string, unknown> }[] }).events;
+    const postureCount = stream.filter((event) => event.type === 'lifecycle' && event.payload.state === 'worker_posture').length;
+    assert.equal(postureCount, 0, 'agent.send() failure must NOT leave a worker_posture event in the run stream');
+  });
+
+  it('Agent.resume receives the same settingSources value as Agent.create (resume parity)', async () => {
+    // SDK docs note inline mcpServers are not persisted across resume; we
+    // pass settingSources on resume so file-backed ambient settings reload.
+    const events: CursorSdkMessage[] = [
+      { type: 'system', agent_id: 'bc-resume', run_id: 'run-1' },
+    ];
+    const run = fakeRun({ agentId: 'bc-resume', status: 'finished', result: 'ok', events });
+    const agent = fakeAgent('bc-resume', run);
+    let resumeLocal: { settingSources?: string[] } | undefined;
+    const api: CursorAgentApi = {
+      async create() { return agent; },
+      async resume(_sessionId, options) {
+        resumeLocal = options?.local as { settingSources?: string[] } | undefined;
+        return agent;
+      },
+    };
+
+    const { service } = await createServiceWith(fakeAdapter(api));
+    const cwd = await mkdtemp(join(tmpdir(), 'cursor-resume-trusted-'));
+    const parent = await service.startRun({ backend: 'cursor', prompt: 'go', cwd, model: 'composer-2', worker_posture: 'trusted' });
+    const parentId = (parent as { ok: true; run_id: string }).run_id;
+    await service.waitForRun({ run_id: parentId, wait_seconds: 5 });
+
+    const followup = await service.sendFollowup({ run_id: parentId, prompt: 'continue' });
+    const followupId = (followup as { ok: true; run_id: string }).run_id;
+    await service.waitForRun({ run_id: followupId, wait_seconds: 5 });
+
+    assert.ok(resumeLocal, 'Agent.resume must receive local options');
+    assert.deepStrictEqual(resumeLocal!.settingSources, ['all'], 'resume must inherit trusted settingSources from the parent');
+  });
+});

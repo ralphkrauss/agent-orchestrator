@@ -171,7 +171,7 @@ function orchestrationPrompt(input: OpenCodeHarnessConfigInput): string {
     '',
     'Profiles manifest guidance:',
     '- You may create or update only the writable profiles manifest path when the user asks you to configure profiles.',
-    '- Keep profiles provider-agnostic: profile ids map to backend, model, variant, reasoning effort, service tier, codex_network (codex-only network egress posture; defaults to isolated when unset), description, and metadata.',
+    '- Keep profiles provider-agnostic: profile ids map to backend, model, variant, reasoning effort, service tier, worker_posture (issue #58 — controls config/MCP visibility: trusted (default) loads project/user MCP and config; restricted is the orchestrator-curated isolated envelope), codex_network (codex-only sandbox/network shape, independent of worker_posture), description, and metadata.',
     '- Use list_worker_profiles with profiles_file to inspect the live profile manifest before choosing workers.',
     '- For normal worker starts, call start_run with profile and profiles_file using the writable profiles manifest path.',
     '- Use direct backend/model/reasoning_effort/service_tier in start_run only when the user explicitly requests a one-off direct model or when live profile resolution is broken.',
@@ -239,6 +239,7 @@ function formatProfiles(profiles: ValidatedWorkerProfiles | undefined): string {
         profile.variant ? `variant=${profile.variant}` : null,
         profile.reasoning_effort ? `reasoning_effort=${profile.reasoning_effort}` : null,
         profile.service_tier ? `service_tier=${profile.service_tier}` : null,
+        workerPostureLine(profile),
         codexNetworkLine(profile),
       ].filter(Boolean).join(', ');
       return `- ${profile.id}: ${settings}${profile.description ? `; ${profile.description}` : ''}`;
@@ -246,14 +247,28 @@ function formatProfiles(profiles: ValidatedWorkerProfiles | undefined): string {
     .join('\n');
 }
 
+// Issue #58: render the effective worker_posture for every profile so the
+// supervisor sees whether each profile launches workers under the trusted
+// (backend-native, default) or restricted (isolated, opt-in) envelope.
+function workerPostureLine(profile: { worker_posture?: string }): string {
+  if (profile.worker_posture) return `worker_posture=${profile.worker_posture}`;
+  return 'worker_posture=trusted (default)';
+}
+
 // Issue #31 / B1: render the *effective* codex_network on codex profiles so
-// the supervisor sees the resolved posture (and the OD1=B default of
-// 'isolated') in the prompt, even when the manifest does not set it. Non-codex
-// profiles continue to render identically to today (no codex_network line).
-function codexNetworkLine(profile: { backend: string; codex_network?: string }): string | null {
+// the supervisor sees the resolved posture in the prompt, even when the
+// manifest does not set it. Non-codex profiles render no codex_network line.
+//
+// Issue #58 follow-up: the "default" depends on worker_posture. Under
+// restricted, unset codex_network resolves to 'isolated'. Under trusted,
+// unset codex_network resolves to the trusted-default sandbox (workspace-write
+// with network on; persisted as null). Display both branches honestly.
+function codexNetworkLine(profile: { backend: string; codex_network?: string; worker_posture?: string }): string | null {
   if (profile.backend !== 'codex') return null;
   if (profile.codex_network) return `codex_network=${profile.codex_network}`;
-  return 'codex_network=isolated (default)';
+  return profile.worker_posture === 'restricted'
+    ? 'codex_network=isolated (default for restricted)'
+    : 'codex_network=workspace-write+network (trusted default)';
 }
 
 function formatCatalog(catalog: WorkerCapabilityCatalog): string {
