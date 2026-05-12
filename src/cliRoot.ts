@@ -18,7 +18,7 @@ Usage:
   agent-orchestrator status       Show daemon status
   agent-orchestrator status --json
   agent-orchestrator runs [--json] [--prompts]
-  agent-orchestrator watch [--interval-ms <ms>] [--limit <n>]
+  agent-orchestrator watch [--interval-ms <ms>] [--limit <n>] [--recent-events <n>]
   agent-orchestrator start
   agent-orchestrator stop [--force]
   agent-orchestrator restart [--force]
@@ -31,7 +31,7 @@ Standalone daemon alias:
   agent-orchestrator-daemon status --verbose
   agent-orchestrator-daemon status --json
   agent-orchestrator-daemon runs [--json] [--prompts]
-  agent-orchestrator-daemon watch [--interval-ms <ms>] [--limit <n>]
+  agent-orchestrator-daemon watch [--interval-ms <ms>] [--limit <n>] [--recent-events <n>]
   agent-orchestrator-daemon start
   agent-orchestrator-daemon stop [--force]
   agent-orchestrator-daemon restart [--force]

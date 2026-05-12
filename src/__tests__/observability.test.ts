@@ -253,4 +253,76 @@ describe('observability snapshot builder', () => {
     assert.equal(snapshot.sessions[0]?.workspace.repository_name, 'agent-orchestrator');
     assert.equal(snapshot.sessions[0]?.workspace.label, 'agent-orchestrator:4-add-observability*');
   });
+
+  it('groups workers by live orchestrator id and archives historical orchestrators', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-observe-'));
+    const store = new RunStore(root);
+    await store.createRun({
+      backend: 'codex',
+      cwd: root,
+      prompt: 'Implement the live watch pane.',
+      metadata: { orchestrator_id: 'orch-live' },
+      display: { session_title: 'Live watch', session_summary: null, prompt_title: 'Live worker', prompt_summary: null },
+    });
+    const completed = await store.createRun({
+      backend: 'codex',
+      cwd: root,
+      prompt: 'Write tests for live watch.',
+      metadata: { orchestrator_id: 'orch-live' },
+      display: { session_title: 'Live watch', session_summary: null, prompt_title: 'Completed worker', prompt_summary: null },
+    });
+    await store.markTerminal(completed.run_id, 'completed');
+    const archived = await store.createRun({
+      backend: 'claude',
+      cwd: root,
+      prompt: 'Old worker prompt.',
+      metadata: { orchestrator_id: 'orch-archived' },
+      display: { session_title: 'Archived watch', session_summary: null, prompt_title: 'Archived worker', prompt_summary: null },
+    });
+    await store.markTerminal(archived.run_id, 'completed');
+
+    const snapshot = await buildObservabilitySnapshot(store, {
+      limit: 50,
+      includePrompts: true,
+      recentEventLimit: 5,
+      daemonPid: null,
+      backendStatus: null,
+      liveOrchestrators: [{
+        record: {
+          id: 'orch-live',
+          client: 'claude',
+          label: 'Live watch',
+          cwd: root,
+          display: { tmux_pane: '%1', tmux_window_id: '@1', base_title: 'Live watch', host: 'host' },
+          registered_at: '2026-05-02T00:00:00.000Z',
+          last_supervisor_event_at: '2026-05-02T00:00:01.000Z',
+        },
+        status: {
+          state: 'in_progress',
+          supervisor_turn_active: true,
+          waiting_for_user: false,
+          running_child_count: 1,
+          failed_unacked_count: 0,
+        },
+      }],
+    });
+
+    const liveGroup = snapshot.orchestrators.find((group) => group.orchestrator_id === 'orch-live');
+    assert.ok(liveGroup);
+    assert.equal(liveGroup?.live, true);
+    assert.equal(liveGroup?.status?.state, 'in_progress');
+    assert.equal(liveGroup?.worker_count, 2);
+    assert.equal(liveGroup?.running_count, 1);
+    assert.deepStrictEqual(liveGroup?.workers.map((worker) => worker.title), ['Live worker', 'Completed worker']);
+    assert.equal(liveGroup?.workers.find((worker) => worker.run_id === completed.run_id)?.status, 'completed');
+
+    const archivedGroup = snapshot.orchestrators.find((group) => group.orchestrator_id === 'orch-archived');
+    assert.ok(archivedGroup);
+    assert.equal(archivedGroup?.live, false);
+    assert.equal(archivedGroup?.status, null);
+    assert.equal(archivedGroup?.label, 'Archived watch');
+    assert.equal(archivedGroup?.workers[0]?.title, 'Archived worker');
+
+    assert.equal(snapshot.orchestrators[0]?.orchestrator_id, 'orch-live');
+  });
 });
