@@ -205,46 +205,46 @@ none
 ## Execution Log
 
 ### T1: Extend parser
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed
+- **Evidence:** `src/claude/launcher.ts` — added `AppendSystemPromptCandidates` and `disableAppendSystemPrompt` fields on `ParsedClaudeLauncherArgs`; parser handles `--append-system-prompt`, `--append-system-prompt-file`, `--no-append-system-prompt`, plus env vars `AGENT_ORCHESTRATOR_CLAUDE_APPEND_SYSTEM_PROMPT[_FILE]`. CLI inline + CLI file conflict and env inline + env file conflict return precise symmetric errors **only when `--no-append-system-prompt` is not set** — the escape hatch (Decision 9) bypasses both conflict checks. File paths resolve against the resolved target cwd.
+- **Notes:** Per code-review revision: `--no-append-system-prompt` is the escape hatch and unconditionally produces `source = 'none'` even when both CLI flags or both env vars are set; per Decision 9 the combination is intentionally NOT an error. Empty `AGENT_ORCHESTRATOR_CLAUDE_APPEND_SYSTEM_PROMPT[_FILE]` env values are treated as **unset** (fall through to the next precedence step) — explicit suppression uses `--no-append-system-prompt`.
 
 ### T2: Resolver helper
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed
+- **Evidence:** `src/claude/appendPrompt.ts` — new file. Pure `resolveSupervisorAppendPrompt()`, the `AppendSource` discriminator, `LoadedAppendContent`, `AppendPromptError`, `SUPERVISOR_APPEND_PROMPT_BYTE_CAP = 64 * 1024`, `SUPERVISOR_APPEND_PROMPT_DELIMITER`, and `CONVENTION_APPEND_PROMPT_RELATIVE_PATH = '.agents/orchestrator/system-prompt.md'`. Decoder strips a leading UTF-8 BOM, applies `trimEnd`, preserves CRLF, returns `text: null` when the result is empty/whitespace-only.
+- **Notes:** Oversize check is byte-based, applied after BOM strip but before trim. Boundary: 65 536 accepted, 65 537 rejected.
 
 ### T3: Plumb into config
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed
+- **Evidence:** `src/claude/config.ts` — `ClaudeHarnessConfigInput.userAppendSystemPrompt?` added (optional). `ClaudeHarnessConfig` gains `userSystemPromptSource`, `userSystemPromptPath`, `userSystemPromptAppend`. Existing `appendSystemPrompt?: string` is unchanged. `buildSupervisorSystemPrompt` appends the literal delimiter `\n\n---\n# User-supplied supervisor prompt\n\n` plus user text only when the user text is a non-empty string. When absent/empty the full prompt is byte-identical to today's output (asserted by `produces a byte-identical baseline when text is null or absent`).
+- **Notes:** none
 
 ### T4: Loader + envelope builder wiring
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed
+- **Evidence:** `src/claude/appendPrompt.ts` — `probeConventionAppendPromptFile()` runs only the lstat regular-file guard for the convention path (returns `regular | absent | skipped-non-regular | error`, no file body read). `readAppendPromptFile()` reads bytes and returns typed `missing-file` / `read-failed` errors. `loadAppendPromptSource()` is retained as a thin back-compat composition. `src/claude/launcher.ts` — `resolveAppendSystemPromptForEnvelope()` now (1) short-circuits on `--no-append-system-prompt` with zero disk I/O, (2) always lstat-probes the convention path, (3) computes the winning source from inputs alone via `selectAppendWinnerFromInputs()`, and (4) reads only the body of the winning file source. Preempted lower-precedence file sources (missing, oversize, unreadable) are never opened, so they cannot block a higher-precedence source. `BuiltClaudeEnvelope` gains `userSystemPromptSource`, `userSystemPromptPath`, `userSystemPromptAppend`, and the single `conventionSkipNotice` channel (covers both the precedence-skip and the lstat non-regular-file skip). Spawn args list is unchanged — still one `--append-system-prompt-file <envelope-file>`.
+- **Notes:** Per code-review revision: precedence is applied **before** any body read. CLI/env-named symlinks remain read as-is; the lstat guard is convention-only. Empty env-var values are filtered at the parser layer, so the resolver only sees genuine "set" / "unset" states.
 
 ### T5: --print-config + help + stderr notice
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed
+- **Evidence:** `src/claude/launcher.ts` — `runClaudeLauncher` writes `built.conventionSkipNotice` to `io.stderr` (with a trailing newline) exactly once if non-null, both for precedence-skip and lstat-skip. `--print-config` now emits `# user system prompt source <tag>` always (with the `none` sentinel and `(empty)` annotation when applicable), `# user system prompt path <path>` for file sources, and `# user system prompt (append) <text>` above `# settings.json` when the resolved text is non-empty (via `formatUserSystemPromptSections`). Help text documents the three flags, both env vars, the convention path, the precedence rule, the 64 KB cap, and the reminder that `--append-system-prompt[-file]` after `--` is forbidden.
+- **Notes:** `runClaudeLauncher` also catches `buildClaudeEnvelope` errors (oversize/missing-file/read-failed) and writes the typed message to `io.stderr` with exit code 1.
 
 ### T6: Passthrough help alignment
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed
+- **Evidence:** `src/claude/passthrough.ts` — rejection message for `--append-system-prompt(-file)` after `--` now names the launcher flag and the env var, e.g. `Use the launcher flag \`agent-orchestrator claude --append-system-prompt ...\` (before --) or the AGENT_ORCHESTRATOR_CLAUDE_APPEND_SYSTEM_PROMPT[_FILE] env var instead.` No allowlist/denylist semantics change.
+- **Notes:** none
 
 ### T7: Tests
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed
+- **Evidence:** `src/__tests__/claudeAppendPrompt.test.ts` — 48 tests covering: parser acceptance + exact-string conflict messages, parser path resolution against the resolved target cwd (test "resolves --append-system-prompt-file and env-file paths against the resolved target cwd, not defaultCwd/process.cwd"), empty-env-var-is-unset, `--no-append-system-prompt` overriding both conflicts; resolver precedence + decoding; byte-cap boundary with exact error string; multibyte UTF-8 byte-boundary test (final codepoint `…` = 3 bytes); BOM/trim/CRLF; `buildSupervisorSystemPrompt` baseline byte-equality + append-present; envelope writes one concatenated `system-prompt.md` and spawn args remain exactly one `--append-system-prompt-file`; hooks/`settings.json` byte equality with vs without append; convention load + silent absent; precedence-skip stderr fires exactly once via `runClaudeLauncher`; missing CLI/env file failures; oversize CLI file failure; `(empty)` annotation; `none` sentinel; symlink/directory convention skip with lstat notice; CLI-named and env-named symlinks read as-is (lstat guard is convention-only); higher-precedence wins despite missing/oversize/unreadable lower-precedence file (three new tests); `--no-append-system-prompt` suppression of each of CLI inline, CLI file, env inline, env file, convention file plus both conflict combinations (seven new tests). Existing `src/__tests__/claudeHarness.test.ts` (35 tests) continues to pass unchanged.
+- **Notes:** Test file written as a new sibling to keep `claudeHarness.test.ts` focused. Conflict error strings, oversize error string, and path-resolution assertions use exact equality (not regex matching) so the contract surface is locked.
 
 ### T8: Docs
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed
+- **Evidence:** `docs/development/mcp-tooling.md` — new "Customizing the Claude supervisor system prompt (append-only)" subsection right after the `--print-config --cwd` example. Covers the three surfaces, precedence, append-only semantics, 64 KB cap, convention path, lstat guard, and the harness-allowlist-is-authoritative guarantee. `agent-orchestrator claude --help` text updated in T5. `docs/reference.md` does not list supervisor flags so no change needed.
+- **Notes:** AGENTS.md "Local Claude Tmux Smoke Testing" intentionally not touched per plan note (no smoke checklist change required).
 
 ### T9: pnpm verify
-- **Status:** pending
-- **Evidence:** pending
-- **Notes:** pending
+- **Status:** completed
+- **Evidence:** `pnpm install --frozen-lockfile` succeeded. `pnpm verify` exit code 0. `pnpm build` OK; `pnpm test` `tests 600 / pass 598 / fail 0 / skipped 2`; `[publish-ready] package metadata is ready for publish`; `[publish-tag] @ralphkrauss/agent-orchestrator@0.2.2 will publish with npm dist-tag latest`; `pnpm audit --prod` `No known vulnerabilities found`; `npm pack --dry-run` produced `ralphkrauss-agent-orchestrator-0.2.2.tgz` (package size 497.6 kB, 300 files).
+- **Notes:** The 2 skipped tests are pre-existing platform skips and unrelated to this change. No `.agents/` content was touched, so `node scripts/sync-ai-workspace.mjs` was not required.

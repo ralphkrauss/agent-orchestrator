@@ -14,6 +14,7 @@ import {
 } from './permission.js';
 import { buildMonitorBashCommand, type ResolvedMonitorPin } from './monitorPin.js';
 import type { ResolvedClaudeSkill } from './skills.js';
+import { SUPERVISOR_APPEND_PROMPT_DELIMITER, type AppendSource } from './appendPrompt.js';
 
 export interface ClaudeHarnessConfigInput {
   targetCwd: string;
@@ -36,6 +37,18 @@ export interface ClaudeHarnessConfigInput {
   orchestratorId?: string;
   /** Embed Remote Control settings keys when true (Decision 12). */
   remoteControl?: boolean;
+  /**
+   * Resolved user-supplied supervisor prompt append (issue #56).
+   * When `text` is a non-empty string, `buildSupervisorSystemPrompt` appends
+   * the literal delimiter followed by the user text after the harness prompt.
+   * When omitted or when `text` is null/empty, the supervisor prompt is
+   * byte-identical to the no-append baseline.
+   */
+  userAppendSystemPrompt?: {
+    source: AppendSource;
+    path: string | null;
+    text: string | null;
+  };
 }
 
 export interface ClaudeMcpConfig {
@@ -55,6 +68,12 @@ export interface ClaudeHarnessConfig {
   settings: ClaudeSupervisorSettings;
   mcpConfig: ClaudeMcpConfig;
   monitorPin: ResolvedMonitorPin;
+  /** Source tag for the user-supplied supervisor prompt (issue #56). */
+  userSystemPromptSource: AppendSource;
+  /** Resolved path for file-backed user append sources; null otherwise. */
+  userSystemPromptPath: string | null;
+  /** Decoded user append text; null when no append is in effect or text is empty/whitespace-only. */
+  userSystemPromptAppend: string | null;
 }
 
 export function buildClaudeHarnessConfig(input: ClaudeHarnessConfigInput): ClaudeHarnessConfig {
@@ -83,11 +102,15 @@ export function buildClaudeHarnessConfig(input: ClaudeHarnessConfigInput): Claud
       },
     },
   };
+  const userAppend = input.userAppendSystemPrompt;
   return {
     systemPrompt: buildSupervisorSystemPrompt(input),
     settings,
     mcpConfig,
     monitorPin: input.monitorPin,
+    userSystemPromptSource: userAppend?.source ?? 'none',
+    userSystemPromptPath: userAppend?.path ?? null,
+    userSystemPromptAppend: userAppend?.text ?? null,
   };
 }
 
@@ -115,7 +138,7 @@ export {
 function buildSupervisorSystemPrompt(input: ClaudeHarnessConfigInput): string {
   const allowedMcpTools = claudeOrchestratorMcpToolAllowList();
   const monitorPin = input.monitorPin;
-  return [
+  const harness = [
     'You are the Agent Orchestrator supervisor running inside a restricted Claude Code launch.',
     '',
     'Hard isolation contract:',
@@ -202,6 +225,11 @@ function buildSupervisorSystemPrompt(input: ClaudeHarnessConfigInput): string {
     'Embedded orchestration workflow instructions:',
     formatEmbeddedOrchestrationSkills(input.orchestrationSkills),
   ].join('\n');
+  const userText = input.userAppendSystemPrompt?.text;
+  if (typeof userText === 'string' && userText.length > 0) {
+    return `${harness}${SUPERVISOR_APPEND_PROMPT_DELIMITER}${userText}`;
+  }
+  return harness;
 }
 
 function formatProfileDiagnostics(profiles: ValidatedWorkerProfiles | undefined, diagnostics: string[]): string {

@@ -29,11 +29,26 @@ import {
   CLAUDE_MCP_SERVER_NAME,
   stringifyClaudeMcpConfig,
 } from './config.js';
+import {
+  CONVENTION_APPEND_PROMPT_RELATIVE_PATH,
+  probeConventionAppendPromptFile,
+  readAppendPromptFile,
+  resolveSupervisorAppendPrompt,
+  type AppendSource,
+  type LoadedAppendContent,
+} from './appendPrompt.js';
 import { discoverClaudeSurface, summarizeReport, type ClaudeSurfaceReport } from './discovery.js';
 import { buildClaudeAllowedToolsList, CLAUDE_SUPERVISOR_BUILTIN_TOOLS, stringifyClaudeSupervisorSettings } from './permission.js';
 import { resolveMonitorPin } from './monitorPin.js';
 import { validateClaudePassthroughArgs } from './passthrough.js';
 import { curateOrchestrateSkills, mirrorClaudeProjectSkills } from './skills.js';
+
+export interface AppendSystemPromptCandidates {
+  cliInline: string | null;
+  cliFile: string | null;
+  envInline: string | null;
+  envFile: string | null;
+}
 
 export interface ParsedClaudeLauncherArgs {
   cwd: string;
@@ -50,6 +65,8 @@ export interface ParsedClaudeLauncherArgs {
   remoteControl: boolean;
   remoteControlSessionNamePrefix: string | null;
   orchestratorLabel: string | null;
+  appendCandidates: AppendSystemPromptCandidates;
+  disableAppendSystemPrompt: boolean;
 }
 
 export function parseClaudeLauncherArgs(
@@ -78,6 +95,9 @@ export function parseClaudeLauncherArgs(
   let remoteControl = false;
   let remoteControlSessionNamePrefix: string | null = null;
   let orchestratorLabel: string | null = null;
+  let cliAppendInline: string | null = null;
+  let cliAppendFile: string | null = null;
+  let disableAppendSystemPrompt = false;
 
   try {
     for (let index = 0; index < ownArgs.length; index += 1) {
@@ -107,6 +127,12 @@ export function parseClaudeLauncherArgs(
         remoteControlSessionNamePrefix = readOptionValue(ownArgs, ++index, arg);
       } else if (arg === '--orchestrator-label') {
         orchestratorLabel = readOptionValue(ownArgs, ++index, arg);
+      } else if (arg === '--append-system-prompt') {
+        cliAppendInline = readOptionValue(ownArgs, ++index, arg);
+      } else if (arg === '--append-system-prompt-file') {
+        cliAppendFile = readOptionValue(ownArgs, ++index, arg);
+      } else if (arg === '--no-append-system-prompt') {
+        disableAppendSystemPrompt = true;
       } else {
         return { ok: false, error: `Unknown option: ${arg}. Pass Claude arguments after --.` };
       }
@@ -115,12 +141,39 @@ export function parseClaudeLauncherArgs(
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
 
+  // --no-append-system-prompt is the explicit escape hatch (Decision 9). When
+  // set, it forces source = 'none' and suppresses every other source, so it
+  // MUST short-circuit the CLI inline+file and env inline+file conflict
+  // checks. Otherwise an operator could not use the escape hatch to override
+  // a misconfigured environment (e.g., both CI-injected env vars set, or both
+  // CLI flags supplied in a debug script).
+  const envAppendInlineRaw = stringOrNullEnv(env.AGENT_ORCHESTRATOR_CLAUDE_APPEND_SYSTEM_PROMPT);
+  const envAppendFileRaw = stringOrNullEnv(env.AGENT_ORCHESTRATOR_CLAUDE_APPEND_SYSTEM_PROMPT_FILE);
+  if (!disableAppendSystemPrompt) {
+    if (cliAppendInline !== null && cliAppendFile !== null) {
+      return {
+        ok: false,
+        error: 'Cannot combine --append-system-prompt and --append-system-prompt-file. Choose one or use --no-append-system-prompt to disable both.',
+      };
+    }
+    if (envAppendInlineRaw !== null && envAppendFileRaw !== null) {
+      return {
+        ok: false,
+        error: 'Cannot combine AGENT_ORCHESTRATOR_CLAUDE_APPEND_SYSTEM_PROMPT and AGENT_ORCHESTRATOR_CLAUDE_APPEND_SYSTEM_PROMPT_FILE. Set one or use --no-append-system-prompt to disable both.',
+      };
+    }
+  }
+  const envAppendInline = envAppendInlineRaw;
+  const envAppendFile = envAppendFileRaw;
+
   const resolvedCwd = resolve(defaultCwd, cwd);
   const defaultProfilesPath = defaultWorkerProfilesFile(env);
   const resolvedProfilesFile = resolve(resolvedCwd, profilesFile ?? defaultProfilesPath);
   const resolvedSkillsPath = resolve(resolvedCwd, skillsPath ?? '.agents/skills');
   const defaultStateDir = join(env.AGENT_ORCHESTRATOR_HOME || resolveStoreRoot(), 'claude-supervisor');
   const resolvedStateDir = resolve(defaultCwd, stateDir ?? defaultStateDir);
+  const resolvedCliAppendFile = cliAppendFile !== null ? resolve(resolvedCwd, cliAppendFile) : null;
+  const resolvedEnvAppendFile = envAppendFile !== null ? resolve(resolvedCwd, envAppendFile) : null;
   return {
     ok: true,
     value: {
@@ -138,8 +191,25 @@ export function parseClaudeLauncherArgs(
       remoteControl,
       remoteControlSessionNamePrefix,
       orchestratorLabel,
+      appendCandidates: {
+        cliInline: cliAppendInline,
+        cliFile: resolvedCliAppendFile,
+        envInline: envAppendInline,
+        envFile: resolvedEnvAppendFile,
+      },
+      disableAppendSystemPrompt,
     },
   };
+}
+
+// An empty AGENT_ORCHESTRATOR_CLAUDE_APPEND_SYSTEM_PROMPT[_FILE] value is
+// treated as **unset** so an empty inherited env var falls through to the
+// next precedence step. To force suppression, use --no-append-system-prompt
+// explicitly. Whitespace-only inline values keep their source tag and are
+// reported as `(empty)` by --print-config.
+function stringOrNullEnv(value: string | undefined): string | null {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  return value;
 }
 
 export interface ClaudeLauncherIo {
@@ -167,6 +237,10 @@ export interface BuiltClaudeEnvelope {
   spawnArgs: string[];
   spawnEnv: NodeJS.ProcessEnv;
   cleanup: () => Promise<void>;
+  userSystemPromptSource: AppendSource;
+  userSystemPromptPath: string | null;
+  userSystemPromptAppend: string | null;
+  conventionSkipNotice: string | null;
 }
 
 export async function runClaudeLauncher(
@@ -229,17 +303,26 @@ export async function runClaudeLauncher(
   const orchestratorId = ulid();
   const display = captureSupervisorDisplay(env, options);
 
-  const built = await buildClaudeEnvelope({
-    options,
-    env,
-    catalog,
-    profilesResult,
-    orchestratorId,
-    remoteControl: options.remoteControl,
-    display,
-  });
+  let built: BuiltClaudeEnvelope;
+  try {
+    built = await buildClaudeEnvelope({
+      options,
+      env,
+      catalog,
+      profilesResult,
+      orchestratorId,
+      remoteControl: options.remoteControl,
+      display,
+    });
+  } catch (error) {
+    io.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    return 1;
+  }
+  if (built.conventionSkipNotice) {
+    io.stderr.write(`${built.conventionSkipNotice}\n`);
+  }
   if (options.printConfig) {
-    io.stdout.write(`# system prompt\n${built.systemPrompt}\n\n# settings.json\n${built.settingsContent}\n# mcp.json\n${built.mcpConfigContent}\n# launch cwd\n${built.launchCwd}\n# runtime skills root\n${built.userSkillsRoot}\n# runtime skills\n${built.userSkillNames.join(', ') || 'none'}\n# spawn args\n${JSON.stringify(built.spawnArgs)}\n# orchestrator id\n${orchestratorId}\n# orchestrator label\n${orchestratorLabelFor(options)}\n# remote control\n${options.remoteControl ? 'enabled' : 'disabled'}\n# display\n${JSON.stringify(display)}\n`);
+    io.stdout.write(`# system prompt\n${built.systemPrompt}\n\n${formatUserSystemPromptSections(built)}# settings.json\n${built.settingsContent}\n# mcp.json\n${built.mcpConfigContent}\n# launch cwd\n${built.launchCwd}\n# runtime skills root\n${built.userSkillsRoot}\n# runtime skills\n${built.userSkillNames.join(', ') || 'none'}\n# spawn args\n${JSON.stringify(built.spawnArgs)}\n# orchestrator id\n${orchestratorId}\n# orchestrator label\n${orchestratorLabelFor(options)}\n# remote control\n${options.remoteControl ? 'enabled' : 'disabled'}\n# display\n${JSON.stringify(display)}\n`);
     await built.cleanup();
     return 0;
   }
@@ -397,10 +480,39 @@ Options:
                                      Forwarded to Claude as --remote-control-session-name-prefix.
   --orchestrator-label <name>        Label written to the orchestrator record's display.base_title and
                                      surfaced to user status hooks. Defaults to basename(cwd).
+  --append-system-prompt <text>      Append <text> to the supervisor system prompt after the harness
+                                     contract. Append-only; the harness-owned isolation contract, MCP
+                                     allowlist, and embedded orchestrate-* instructions stay intact.
+  --append-system-prompt-file <path> Append the contents of <path> to the supervisor system prompt.
+                                     Path is resolved against the resolved target cwd. Max 64 KB after
+                                     a leading UTF-8 BOM is stripped (trailing whitespace is trimmed).
+  --no-append-system-prompt          Suppress every append source for this launch: CLI flag, env vars,
+                                     and the convention file under .agents/orchestrator/system-prompt.md.
   --print-discovery                  Print the Claude binary compatibility report and exit.
   --print-config                     Print the generated supervisor envelope (system prompt, settings, mcp, runtime skills) and exit.
   --help
   --version [--json]                 Print agent-orchestrator-claude version and exit. Use \`-- --version\` to forward to the wrapped Claude binary.
+
+Supervisor prompt customization (append-only):
+  Precedence (top wins):
+    1. --no-append-system-prompt              (forces "none"; suppresses all below)
+    2. --append-system-prompt <text>          (cli-inline)
+    3. --append-system-prompt-file <path>     (cli-file)
+    4. AGENT_ORCHESTRATOR_CLAUDE_APPEND_SYSTEM_PROMPT        (env-inline)
+    5. AGENT_ORCHESTRATOR_CLAUDE_APPEND_SYSTEM_PROMPT_FILE   (env-file)
+    6. <resolved-cwd>/.agents/orchestrator/system-prompt.md  (convention file; opt-in by presence)
+  CLI inline and CLI file together is a parse error; the same applies to the
+  two env vars together. --no-append-system-prompt overrides those checks
+  (the escape hatch always wins and produces "none"). Empty env-var values
+  are treated as unset and fall through to the next precedence step. When a
+  higher-precedence source preempts a present convention file, a single-line
+  stderr notice names the skipped path. A
+  convention file that is a symlink, directory, or other non-regular file is
+  refused with a stderr notice and treated as absent. The wire-level tool
+  allowlist (--tools / --allowed-tools / --permission-mode dontAsk) is the
+  authoritative tool gate regardless of any user prompt text. Reminder:
+  --append-system-prompt[-file] *after* \`--\` is forbidden by the passthrough
+  validator because the harness owns that Claude flag.
 
 Passthrough after --:
   Allowed Claude flags: --print, -p, --output-format, --input-format, --include-partial-messages,
@@ -423,6 +535,8 @@ Environment fallbacks:
   AGENT_ORCHESTRATOR_CLAUDE_SKILLS_PATH
   AGENT_ORCHESTRATOR_CLAUDE_STATE_DIR
   AGENT_ORCHESTRATOR_CLAUDE_BIN
+  AGENT_ORCHESTRATOR_CLAUDE_APPEND_SYSTEM_PROMPT       (env-inline supervisor prompt append)
+  AGENT_ORCHESTRATOR_CLAUDE_APPEND_SYSTEM_PROMPT_FILE  (env-file supervisor prompt append)
 `;
 }
 
@@ -477,6 +591,7 @@ export async function buildClaudeEnvelope(input: {
     await writeFile(inlineManifestPath, inlineContent, { mode: 0o600 });
     manifestPath = inlineManifestPath;
   }
+  const appendOutcome = await resolveAppendSystemPromptForEnvelope(options);
   const config = buildClaudeHarnessConfig({
     targetCwd: options.cwd,
     manifestPath,
@@ -492,6 +607,11 @@ export async function buildClaudeEnvelope(input: {
     monitorPin,
     orchestratorId: input.orchestratorId,
     remoteControl: input.remoteControl,
+    userAppendSystemPrompt: {
+      source: appendOutcome.source,
+      path: appendOutcome.path,
+      text: appendOutcome.text,
+    },
   });
   const settingsPath = join(envelopeDir, 'settings.json');
   const userSettingsPath = join(stateClaudeConfigDir, 'settings.json');
@@ -546,7 +666,115 @@ export async function buildClaudeEnvelope(input: {
     spawnArgs,
     spawnEnv,
     cleanup,
+    userSystemPromptSource: config.userSystemPromptSource,
+    userSystemPromptPath: config.userSystemPromptPath,
+    userSystemPromptAppend: config.userSystemPromptAppend,
+    conventionSkipNotice: appendOutcome.conventionSkipNotice,
   };
+}
+
+async function resolveAppendSystemPromptForEnvelope(
+  options: ParsedClaudeLauncherArgs,
+): Promise<{
+  source: AppendSource;
+  path: string | null;
+  text: string | null;
+  conventionSkipNotice: string | null;
+}> {
+  // --no-append-system-prompt short-circuits before any probe or read. No
+  // disk I/O happens here, matching the escape-hatch semantics.
+  if (options.disableAppendSystemPrompt) {
+    return { source: 'none', path: null, text: null, conventionSkipNotice: null };
+  }
+  const candidates = options.appendCandidates;
+  const conventionPath = resolve(options.cwd, CONVENTION_APPEND_PROMPT_RELATIVE_PATH);
+
+  // Step 1: lstat-probe the convention path always so a higher-precedence
+  // source can fire the precedence-skip notice, and so a non-regular
+  // convention file emits the lstat skip notice without ever reading its
+  // bytes. CLI/env file bodies are NOT read in this step.
+  const probe = await probeConventionAppendPromptFile(conventionPath);
+  let lstatSkipNotice: string | null = null;
+  let conventionFilePresent = false;
+  if (probe.kind === 'regular') {
+    conventionFilePresent = true;
+  } else if (probe.kind === 'skipped-non-regular') {
+    lstatSkipNotice = probe.notice;
+  } else if (probe.kind === 'error') {
+    throw new Error(probe.error.message);
+  }
+
+  // Step 2: determine the winning source from inputs alone (no I/O). This is
+  // exactly the precedence rule the resolver applies.
+  const winner = selectAppendWinnerFromInputs({
+    cliInline: candidates.cliInline,
+    cliFile: candidates.cliFile,
+    envInline: candidates.envInline,
+    envFile: candidates.envFile,
+    conventionFilePresent,
+  });
+
+  // Step 3: only read the body of the winning file source. A preempted
+  // missing/oversize/unreadable lower-precedence source must NOT fail the
+  // launch.
+  let cliFileLoaded: LoadedAppendContent | undefined;
+  let envFileLoaded: LoadedAppendContent | undefined;
+  let conventionLoaded: LoadedAppendContent | undefined;
+  if (winner === 'cli-file' && candidates.cliFile !== null) {
+    const result = await readAppendPromptFile({ kind: 'cli-file', source: 'cli-file', path: candidates.cliFile });
+    if (result.kind === 'error') throw new Error(result.error.message);
+    if (result.kind === 'loaded') cliFileLoaded = { bytes: result.bytes, path: result.path };
+  } else if (winner === 'env-file' && candidates.envFile !== null) {
+    const result = await readAppendPromptFile({ kind: 'env-file', source: 'env-file', path: candidates.envFile });
+    if (result.kind === 'error') throw new Error(result.error.message);
+    if (result.kind === 'loaded') envFileLoaded = { bytes: result.bytes, path: result.path };
+  } else if (winner === 'convention-file') {
+    const result = await readAppendPromptFile({ kind: 'convention-file', source: 'convention-file', path: conventionPath });
+    if (result.kind === 'error') throw new Error(result.error.message);
+    if (result.kind === 'loaded') conventionLoaded = { bytes: result.bytes, path: result.path };
+  }
+
+  // Step 4: hand the bytes (only for the winner) to the pure resolver, which
+  // applies the BOM/trim/CRLF policy and the byte-cap check.
+  const resolved = resolveSupervisorAppendPrompt({
+    cliInlineText: candidates.cliInline,
+    cliFilePath: candidates.cliFile,
+    envInlineText: candidates.envInline,
+    envFilePath: candidates.envFile,
+    conventionFilePath: conventionPath,
+    conventionFilePresent,
+    disable: false,
+    loaded: {
+      cliFile: cliFileLoaded,
+      envFile: envFileLoaded,
+      convention: conventionLoaded,
+    },
+  });
+  if (!resolved.ok) {
+    throw new Error(resolved.error.message);
+  }
+  const notice = lstatSkipNotice ?? resolved.value.conventionSkipNotice;
+  return {
+    source: resolved.value.source,
+    path: resolved.value.path,
+    text: resolved.value.text,
+    conventionSkipNotice: notice,
+  };
+}
+
+function selectAppendWinnerFromInputs(input: {
+  cliInline: string | null;
+  cliFile: string | null;
+  envInline: string | null;
+  envFile: string | null;
+  conventionFilePresent: boolean;
+}): AppendSource {
+  if (input.cliInline !== null) return 'cli-inline';
+  if (input.cliFile !== null) return 'cli-file';
+  if (input.envInline !== null) return 'env-inline';
+  if (input.envFile !== null) return 'env-file';
+  if (input.conventionFilePresent) return 'convention-file';
+  return 'none';
 }
 
 export function buildClaudeSpawnArgs(input: {
@@ -713,6 +941,24 @@ async function resetClaudeProjectDiscoverySurface(envelopeDir: string): Promise<
 function sanitizePathSegment(value: string): string {
   const sanitized = value.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
   return sanitized.slice(0, 48) || 'workspace';
+}
+
+function formatUserSystemPromptSections(built: BuiltClaudeEnvelope): string {
+  const source = built.userSystemPromptSource;
+  const path = built.userSystemPromptPath;
+  const text = built.userSystemPromptAppend;
+  const isFileSource = source === 'cli-file' || source === 'env-file' || source === 'convention-file';
+  const sourceTag = source !== 'none' && (text === null || text.length === 0)
+    ? `${source} (empty)`
+    : source;
+  let out = `# user system prompt source\n${sourceTag}\n`;
+  if (isFileSource && path) {
+    out += `# user system prompt path\n${path}\n`;
+  }
+  if (typeof text === 'string' && text.length > 0) {
+    out += `# user system prompt (append)\n${text}\n\n`;
+  }
+  return out;
 }
 
 function readOptionValue(args: readonly string[], index: number, option: string): string {

@@ -56,6 +56,12 @@ export function validateClaudePassthroughArgs(args: readonly string[]): Passthro
     if (!arg.startsWith('-')) continue;
     const flag = arg.includes('=') ? arg.slice(0, arg.indexOf('=')) : arg;
     if (FORBIDDEN_FLAGS.has(flag)) {
+      if (flag === '--append-system-prompt' || flag === '--append-system-prompt-file') {
+        return {
+          ok: false,
+          error: `Claude orchestration mode rejects ${flag} after --: the harness owns this surface. Use the launcher flag \`agent-orchestrator claude ${flag} ...\` (before --) or the AGENT_ORCHESTRATOR_CLAUDE_APPEND_SYSTEM_PROMPT[_FILE] env var instead.`,
+        };
+      }
       return { ok: false, error: `Claude orchestration mode rejects ${flag}: the harness owns this surface.` };
     }
     if (!ALLOWED_FLAG_TOKENS.has(flag)) {
