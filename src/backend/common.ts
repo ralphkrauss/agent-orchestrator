@@ -192,6 +192,30 @@ export function classifyBackendError(input: {
   };
 }
 
+/**
+ * Issue #55 — Claude CLI subscription-cap banner regex. Anchored on the
+ * narrow `you've (hit|reached) your ... limit` phrasing with a mandatory
+ * tail-anchor lookahead requiring either the `· resets ...` clause or
+ * end-of-string with at most one terminal punctuation. The lookahead
+ * explicitly rejects continuations like `"your limit of 5 retries"`,
+ * `"...for the day"`, `"...(just kidding)"` (finding F1 from the 2026-05-11
+ * plan review). The classifier and `ClaudeBackend.parseEvent` share this
+ * single source of truth so the gate cannot drift from the classifier.
+ */
+const CLAUDE_CLI_BANNER_REGEX = /\byou(?:'|ʼ|’|`)ve\s+(?:hit|reached)\s+your\s+(?:usage\s+|rate\s+|monthly\s+)?limit\b(?=\s*(?:[·•]\s*resets\b|[.!?…]?\s*$))/i;
+
+/**
+ * Whether a string matches the Claude CLI subscription-cap banner
+ * specifically (Decision 3). This is the parseEvent gate — using the
+ * classifier's `category === 'rate_limit'` result would over-match, because
+ * the classifier's rate-limit branch also catches generic phrasing like
+ * `too many requests` / `429` / `rate_limit_error`, none of which are the
+ * subscription-cap banner.
+ */
+export function matchesClaudeCliBanner(text: string): boolean {
+  return CLAUDE_CLI_BANNER_REGEX.test(text);
+}
+
 function classifyErrorCategory(
   message: string,
   context: Record<string, unknown> | undefined,
@@ -212,6 +236,12 @@ function classifyErrorCategory(
 
   if (/\b(auth|authentication|unauthorized|unauthorised|credential|api key|login)\b/.test(haystack)) return 'auth';
   if (/\b(rate.?limit|too many requests|429)\b/.test(haystack)) return 'rate_limit';
+  // Issue #55: Claude CLI subscription-cap banner ("You've hit your limit ·
+  // resets HH:MM (TZ)"). Tail-anchored so continuations like
+  // "your limit of 5 retries" / "for the day" / "(just kidding)" do not
+  // misfire. Shared with `matchesClaudeCliBanner` so the parse-time gate and
+  // the classifier never drift.
+  if (CLAUDE_CLI_BANNER_REGEX.test(haystack)) return 'rate_limit';
   if (/\b(quota|insufficient_quota|billing|credit|credits)\b/.test(haystack)) return 'quota';
   if (/\b(invalid.?model|unknown model|model .*not found|model .*does not exist|model .*not supported|unsupported model)\b/.test(haystack)) return 'invalid_model';
   if (/\b(permission denied|access denied|not allowed|policy|forbidden)\b/.test(haystack)) return 'permission';

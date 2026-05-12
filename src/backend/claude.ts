@@ -2,7 +2,7 @@ import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { RunStore } from '../runStore.js';
 import type { BackendStartInput, ParsedBackendEvent, WorkerInvocation } from './WorkerBackend.js';
-import { BaseBackend, commandFromToolInput, emptyParsedEvent, errorFromEvent, extractText, getRecord, getString, invocation, pathFromToolInput } from './common.js';
+import { BaseBackend, classifyBackendError, commandFromToolInput, emptyParsedEvent, errorFromEvent, extractText, getRecord, getString, invocation, matchesClaudeCliBanner, pathFromToolInput } from './common.js';
 
 /**
  * Worker-side Claude settings written per run.
@@ -133,12 +133,49 @@ export class ClaudeBackend extends BaseBackend {
     }
 
     if (lowerType === 'result') {
+      const summary = getString(rec.result) ?? getString(rec.summary) ?? '';
       parsed.resultEvent = {
-        summary: getString(rec.result) ?? getString(rec.summary) ?? '',
+        summary,
         stopReason: getString(rec.stop_reason) ?? getString(rec.stopReason) ?? getString(rec.subtype) ?? 'complete',
         raw,
       };
       parsed.events.push({ type: 'lifecycle', payload: { state: 'result_event', raw } });
+
+      // Issue #55: Claude CLI subscription-cap banner detection. Two
+      // conditions must both hold before we synthesise a fatal rate_limit
+      // error:
+      //   (1) The event carries at least one structured-failure signal
+      //       (`is_error === true`, `subtype === 'error'`, or normalized
+      //       `stop_reason`/`stopReason === 'rate_limit_error'`) — mirrors
+      //       the existing snake_case + camelCase tolerance at the
+      //       resultEvent.stopReason extraction above.
+      //   (2) The tail-anchored banner regex (Decision 3, F1 fix) matches
+      //       the trimmed result text.
+      // We gate directly on the banner regex via `matchesClaudeCliBanner`,
+      // NOT on `classifyBackendError(...).category === 'rate_limit'` —
+      // the classifier's rate-limit branch also catches generic phrasing
+      // like `too many requests` / `429` / `rate_limit_error`, none of
+      // which is the subscription-cap banner. Using the classifier as the
+      // gate would mis-tag those with `context.subkind:
+      // 'claude_cli_banner'`. Synthesised fatal errors route through
+      // `recordObservedError` and trigger `cancel('failed', { reason:
+      // 'backend_fatal_error', ... })`, so the run's terminal_reason
+      // matches the structured rate_limit path.
+      const normalizedStopReason = (getString(rec.stop_reason) ?? getString(rec.stopReason))?.toLowerCase();
+      const subtypeLower = getString(rec.subtype)?.toLowerCase();
+      const structuredFailure = rec.is_error === true
+        || subtypeLower === 'error'
+        || normalizedStopReason === 'rate_limit_error';
+      const trimmed = summary.trim();
+      if (structuredFailure && trimmed && matchesClaudeCliBanner(trimmed)) {
+        const error = classifyBackendError({
+          backend: this.name,
+          source: 'backend_event',
+          message: trimmed,
+          context: { banner: trimmed, subkind: 'claude_cli_banner' },
+        });
+        parsed.errors.push(error);
+      }
     }
 
     return parsed;
