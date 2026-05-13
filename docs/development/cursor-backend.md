@@ -69,11 +69,16 @@ Other deferred areas:
 | `model` | Required. Pass a Cursor-side model id (e.g. `composer-2`). Resume calls thread per-run model overrides through `SendOptions.model`. |
 | `reasoning_effort` | Rejected with `INVALID_INPUT`. The SDK exposes per-model parameter discovery (`Cursor.models.list()`) which is deferred. |
 | `service_tier` | Rejected with `INVALID_INPUT`. |
+| `worker_posture` | Optional; defaults to `'trusted'`. Under `'trusted'`, `Agent.create` and `Agent.resume` receive `local.settingSources: ['all']` so the SDK loads every ambient settings layer (project, user, team, MDM, plugins). Under `'restricted'`, the shim omits `settingSources` and the SDK falls back to its pre-#58 in-process defaults. |
 
 Profiles in the worker profiles manifest follow the same rules: cursor
 profiles must declare `model`, must omit `reasoning_effort` and
 `service_tier`, and must not declare a `variant` (catalog declares
 `variants: []`).
+
+`worker_posture` is a backend-agnostic field — see
+[`mcp-tooling.md`](mcp-tooling.md#workers-and-project-mcp-servers) for the
+per-backend mapping and the trust-boundary documentation.
 
 ## Sessions and resume
 

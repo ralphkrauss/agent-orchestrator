@@ -109,6 +109,14 @@ export class CliRuntime implements WorkerRuntime {
       // Single-shot enforcement (D-COR-Resume-Layer): the retry invocation
       // itself never carries an interceptor, regardless of caller intent.
       invocation.earlyEventInterceptor = undefined;
+      // Issue #58 review follow-up (Medium 3): keep `initialEvents` on the
+      // retry invocation. `ProcessManager`'s `executeAttempt` only flushes
+      // them at an actual spawn — a pre-baked invocation that never spawns
+      // produces zero telemetry naturally. If the retry fires, the first
+      // attempt's posture event was dropped along with the cancelled
+      // attempt's event buffer (intentional, per D-COR-Resume), so the
+      // retry attempt's own `initialEvents` is what makes the run end with
+      // exactly one posture event in `events.jsonl`.
       return { ok: true, invocation };
     } catch (error) {
       return {

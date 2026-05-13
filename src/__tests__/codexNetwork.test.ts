@@ -117,7 +117,7 @@ describe('issue #31 codex_network schema and contracts', () => {
     });
     assert.equal(rejected.success, false);
     assert.ok(!rejected.success && rejected.error.issues.some((issue) =>
-      /Profile mode cannot be mixed with direct backend\/model\/reasoning_effort\/service_tier\/codex_network settings/.test(issue.message)));
+      /Profile mode cannot be mixed with direct backend\/model\/reasoning_effort\/service_tier\/codex_network\/worker_posture settings/.test(issue.message)));
   });
 
   it('OD2=B (T9): StartRunInputSchema accepts codex_network in direct mode for codex', () => {
@@ -172,13 +172,15 @@ describe('issue #31 supervisor system-prompt formatters (B1 / T13)', () => {
       manifestPath: '/repo/.agents/orchestration/profiles.json',
     });
     const agent = config.agent['agent-orchestrator'] as { prompt: string };
-    // Defaulted codex profile renders the OD1=B effective default in the prompt.
-    assert.match(agent.prompt, /codex-default: backend=codex, model=gpt-5\.5, codex_network=isolated \(default\)/);
+    // Issue #58: defaulted codex profile under the trusted default posture
+    // renders worker_posture=trusted (default) and codex_network=trusted default.
+    assert.match(agent.prompt, /codex-default: backend=codex, model=gpt-5\.5, worker_posture=trusted \(default\), codex_network=workspace-write\+network \(trusted default\)/);
     // Explicit codex profiles render the manifest value verbatim.
     assert.match(agent.prompt, /codex-explicit-workspace:[^\n]*codex_network=workspace/);
     assert.match(agent.prompt, /codex-explicit-user-config:[^\n]*codex_network=user-config/);
-    // Claude profile must NOT get a codex_network line.
+    // Claude profile must NOT get a codex_network line; must still get a worker_posture line.
     assert.doesNotMatch(agent.prompt, /claude-no-network:[^\n]*codex_network=/);
+    assert.match(agent.prompt, /claude-no-network:[^\n]*worker_posture=trusted \(default\)/);
     // Catalog renders network_modes for codex.
     assert.match(agent.prompt, /- codex \(Codex CLI\)[^\n]*\n[^\n]*\n[^\n]*\n[^\n]*\n {2}network_modes=isolated, workspace, user-config/);
     // No network_modes line for claude (negative regression).
@@ -205,9 +207,12 @@ describe('issue #31 supervisor system-prompt formatters (B1 / T13)', () => {
       mcpCliPath: '/opt/agent-orchestrator/dist/cli.js',
       monitorPin,
     });
-    assert.match(config.systemPrompt, /codex-default:[^\n]*codex_network=isolated \(default\)/);
+    // Issue #58: trusted-posture default codex profile renders the trusted-default codex_network text.
+    assert.match(config.systemPrompt, /codex-default:[^\n]*worker_posture=trusted \(default\)/);
+    assert.match(config.systemPrompt, /codex-default:[^\n]*codex_network=workspace-write\+network \(trusted default\)/);
     assert.match(config.systemPrompt, /codex-explicit-workspace:[^\n]*codex_network=workspace/);
     assert.doesNotMatch(config.systemPrompt, /claude-no-network:[^\n]*codex_network=/);
+    assert.match(config.systemPrompt, /claude-no-network:[^\n]*worker_posture=trusted \(default\)/);
     assert.match(config.systemPrompt, / {2}network_modes=isolated, workspace, user-config/);
   });
 });
@@ -224,7 +229,7 @@ describe('issue #31 observability dedup (T5 / P6)', () => {
       observed_session_id: 'session-a',
       model: 'gpt-5.5',
       model_source: 'explicit',
-      model_settings: { reasoning_effort: 'high', service_tier: null, mode: null, codex_network: 'isolated' },
+      model_settings: { reasoning_effort: 'high', service_tier: null, mode: null, codex_network: 'isolated', worker_posture: null },
     });
     await store.createRun({
       backend: 'codex',
@@ -234,7 +239,7 @@ describe('issue #31 observability dedup (T5 / P6)', () => {
       observed_session_id: 'session-a',
       model: 'gpt-5.5',
       model_source: 'explicit',
-      model_settings: { reasoning_effort: 'high', service_tier: null, mode: null, codex_network: 'workspace' },
+      model_settings: { reasoning_effort: 'high', service_tier: null, mode: null, codex_network: 'workspace', worker_posture: null },
     });
 
     const snapshot = await buildObservabilitySnapshot(store, {

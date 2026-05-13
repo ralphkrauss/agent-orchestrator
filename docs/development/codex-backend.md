@@ -34,7 +34,19 @@ value is a non-empty string.
 `codex_network` is a codex-only profile field with three values. Each value
 maps to a specific argv shape that controls whether codex reads
 `$CODEX_HOME/config.toml` and whether bash-tool network egress inside the
-worker sandbox is allowed.
+worker sandbox is allowed. **The exact argv depends on `worker_posture`**
+(issue #58); the table below has one row per posture × value.
+
+Under `worker_posture: 'trusted'` (the default since issue #58):
+
+| `codex_network`  | Argv added to `codex exec` (and `codex exec resume`)             | Persisted `model_settings.codex_network` | Effect                                                                                                                                  |
+|------------------|------------------------------------------------------------------|------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------|
+| absent / unset   | `-c sandbox_mode="workspace-write" -c sandbox_workspace_write.network_access=true` | `null` (intentionally — distinguishes the trusted-default from explicit `'isolated'`) | Workspace-write sandbox with network on. Codex loads user + project `config.toml`. Matches a manual `codex exec` from the project. |
+| `isolated`       | (no sandbox flags)                                               | `'isolated'` | Codex defaults apply. Codex still loads user + project `config.toml`.                                                                  |
+| `workspace`      | `-c sandbox_workspace_write.network_access=true`                 | `'workspace'` | Workspace-write network enabled. Codex loads user + project `config.toml`. **No `--ignore-user-config`** — see migration note below.   |
+| `user-config`    | (no flags)                                                       | `'user-config'` | Codex defaults apply. Codex reads user + project `config.toml`.                                                                        |
+
+Under `worker_posture: 'restricted'` (issue #31 v1 envelope; profile opt-in):
 
 | `codex_network`  | Argv added to `codex exec`                                               | Effect                                                                                                                                             |
 |------------------|--------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -42,15 +54,34 @@ worker sandbox is allowed.
 | `workspace`      | `--ignore-user-config -c sandbox_workspace_write.network_access=true`    | Codex skips `$CODEX_HOME/config.toml`; bash sandbox network is granted via the explicit codex CLI override. Deterministic across machines.         |
 | `user-config`    | (no flags added)                                                         | Codex reads `$CODEX_HOME/config.toml` verbatim and honors whatever sandbox / network policy lives there. Per-machine; can be non-deterministic.    |
 
-> Per `codex exec --help` on codex-cli 0.128.0, `--ignore-user-config`
-> "skips `$CODEX_HOME/config.toml`". This is the precise effect — the wording
-> in this doc matches the codex CLI's own help text to avoid drift.
+> Per `codex exec --help` on codex-cli 0.130.0, `--ignore-user-config`
+> "skips `$CODEX_HOME/config.toml`". The trusted-posture argv uses
+> `-c sandbox_mode="workspace-write"` (not `--sandbox`) because
+> `codex exec resume --help` does not accept `--sandbox`; the daemon's shared
+> `sandboxArgs()` helper produces argv accepted by both `codex exec` and
+> `codex exec resume`.
+>
+> **Migration (issue #58):** existing profiles with explicit
+> `codex_network: 'workspace'` no longer emit `--ignore-user-config` under
+> the new `trusted` default. If you depended on the side effect of skipping
+> `$CODEX_HOME/config.toml`, set `worker_posture: 'restricted'` on the
+> profile to preserve the pre-#58 argv.
 
 ### Default
 
 When a codex profile (or a direct-mode `start_run`) does **not** set
-`codex_network`, the daemon resolves it to `'isolated'`. This default is
-**uniform for every codex profile**, regardless of `service_tier`.
+`codex_network`, the daemon's resolution depends on `worker_posture`
+(issue #58):
+
+- **`worker_posture: 'trusted'` (the default since #58)** — the run record
+  persists `codex_network: null` and the worker spawns with
+  `-c sandbox_mode="workspace-write" -c sandbox_workspace_write.network_access=true`.
+  No `--ignore-user-config`; user + project `config.toml` load normally.
+  This null value is intentional and distinct from explicit `'isolated'`
+  (which would emit no sandbox flags at all).
+- **`worker_posture: 'restricted'` (opt-in)** — the daemon resolves to
+  `'isolated'`, matching the pre-#58 OD1=B uniform default. Used by callers
+  that want the closed-by-default envelope.
 
 ### Where to set it
 
@@ -97,18 +128,26 @@ When a codex profile (or a direct-mode `start_run`) does **not** set
 
 ## Per-Run Warning
 
-When a codex worker run starts and `codex_network` was not set explicitly on
-the profile or on the direct-mode `start_run` argument, the daemon emits a
-single non-blocking lifecycle event into the run's event log:
+When a `worker_posture: 'restricted'` codex worker run starts and
+`codex_network` was not set explicitly on the profile or on the direct-mode
+`start_run` argument, the daemon emits a single non-blocking lifecycle event
+into the run's event log:
 
 ```text
-agent-orchestrator codex_network not set on <profile or direct-mode run>; defaulting to 'isolated' (no network access). Set codex_network explicitly to silence this warning. See docs/development/codex-backend.md for migration.
+agent-orchestrator codex_network not set on <profile or direct-mode run> (worker_posture=restricted); defaulting to 'isolated' (no network access, --ignore-user-config). Set codex_network explicitly to silence this warning, or move the profile to worker_posture: 'trusted' to opt into backend-native parity. See docs/development/codex-backend.md for migration.
 ```
 
+Issue #58 review follow-up: under the default `worker_posture: 'trusted'`,
+this warning is **suppressed**. The trusted default (workspace-write sandbox
++ network on; `codex_network` persisted as `null`) is the intended product
+direction, not a surprise breaking change. The warning still fires for
+`worker_posture: 'restricted'` runs that omit `codex_network`, since those
+preserve the issue #31 closed-by-default isolated argv.
+
 The warning never blocks the run. It is per-run (so silencing the warning by
-setting `codex_network` on a profile silences it for every subsequent run on
-that profile) and it surfaces alongside any failing tool calls so users
-hitting the breaking change can correlate.
+setting `codex_network` on a restricted profile silences it for every
+subsequent run on that profile) and it surfaces alongside any failing tool
+calls so users hitting the breaking change can correlate.
 
 The warning is emitted as a `lifecycle` event with payload
 `state: 'codex_network_defaulted'`. The full warning text lives on the event
@@ -119,62 +158,82 @@ event log directly).
 
 ## Migration: BREAKING (codex)
 
-> **Affected releases:** the locked OD1 = B decision in issue #31 (2026-05-05)
-> changes the codex backend's default network egress posture from
-> "honor `~/.codex/config.toml`" to `'isolated'` for every codex profile that
-> does not set `codex_network` explicitly.
+> **Affected releases:** two breaking changes affect codex profile defaults.
+>
+> 1. Issue #31 (locked 2026-05-05): when `worker_posture: 'restricted'` and
+>    `codex_network` is omitted, the daemon now resolves to `'isolated'`
+>    (instead of "honor `~/.codex/config.toml`"). This is the change documented
+>    in the migration table below; it still applies under restricted posture.
+> 2. Issue #58 (this release): `worker_posture` now defaults to `'trusted'`,
+>    which loads user + project `config.toml` and emits the trusted-default
+>    sandbox argv (workspace-write + network on) when `codex_network` is
+>    omitted. **Most operators do not need the #31 migration anymore** because
+>    the trusted default closely matches the pre-#31 manual-run experience.
+>    Set `worker_posture: 'restricted'` explicitly to opt into the #31
+>    closed-by-default envelope described below.
 
-### Who is affected
+### Who is affected (restricted posture, post-#58)
 
 A codex profile that:
 
 1. Has `backend: 'codex'`, **and**
-2. Has `service_tier` set to `'fast'` or `'flex'`, **or** has no
-   `service_tier` set, **and**
+2. Has `worker_posture: 'restricted'` (explicit since #58), **and**
 3. Relies on `~/.codex/config.toml` for network access (the most common shape
    today is `[sandbox_workspace_write]\nnetwork_access = true`), **and**
 4. Does not yet set `codex_network`.
 
-After upgrade, that profile passes `--ignore-user-config` to `codex exec`, so
-codex stops reading `~/.codex/config.toml`, so the user's network allowlist is
-no longer applied, so bash tools inside the worker that rely on outbound HTTP
-(`gh api`, `curl`, `npm install` from a private registry, etc.) will fail.
+Under restricted with no `codex_network`, that profile passes
+`--ignore-user-config` to `codex exec`, so codex stops reading
+`~/.codex/config.toml`, so the user's network allowlist is no longer applied,
+so bash tools inside the worker that rely on outbound HTTP (`gh api`, `curl`,
+`npm install` from a private registry, etc.) will fail.
 
-### Migration table
+Under `worker_posture: 'trusted'` (the default since #58), no `codex_network`
+emits the trusted-default sandbox (`-c sandbox_mode="workspace-write" -c
+sandbox_workspace_write.network_access=true`) without `--ignore-user-config`,
+so user + project `config.toml` and the workspace network are both available.
 
-| Existing profile shape                              | Today's argv                      | Argv after upgrade with no manifest change | Required action                                                                                                |
+### Migration table (restricted posture)
+
+| Existing restricted profile shape                   | Today's argv                      | Argv after upgrade with no manifest change | Required action                                                                                                |
 |-----------------------------------------------------|-----------------------------------|--------------------------------------------|----------------------------------------------------------------------------------------------------------------|
 | `service_tier: 'normal'`                            | includes `--ignore-user-config`   | includes `--ignore-user-config`            | **None — same posture.** Pre-fetch external data in the supervisor when needed.                                |
-| `service_tier: 'fast'`                              | no `--ignore-user-config`         | **includes `--ignore-user-config`**        | Set `codex_network: 'user-config'` to restore prior behavior, or `'workspace'` for codex-managed network-on.   |
-| `service_tier: 'flex'`                              | no `--ignore-user-config`         | **includes `--ignore-user-config`**        | Same as above.                                                                                                  |
-| `service_tier` unset                                | no `--ignore-user-config`         | **includes `--ignore-user-config`**        | Same as above.                                                                                                  |
-| `codex_network` set explicitly                      | per C3 mapping                    | per C3 mapping                             | None — explicit value wins over the default.                                                                   |
+| `service_tier: 'fast'` / `'flex'` / unset           | no `--ignore-user-config`         | **includes `--ignore-user-config`**        | Set `codex_network: 'user-config'` to restore prior behavior, or `'workspace'` for codex-managed network-on, or move to `worker_posture: 'trusted'` for backend-native parity. |
+| `codex_network` set explicitly                      | per restricted mapping            | per restricted mapping                     | None — explicit value wins over the default.                                                                   |
 
-### Three concrete migration options
+### Migration options
 
-In increasing security cost:
+Listed in increasing openness; the first option moves off restricted entirely,
+options 2-4 stay within restricted.
 
-1. **`codex_network: 'user-config'`** — keep today's behavior verbatim. Codex
-   continues to read `~/.codex/config.toml`. This is the closest to a no-op
-   migration and is the recommended default for users who relied on the legacy
-   posture.
-2. **`codex_network: 'workspace'`** — use the codex CLI's own network
-   override. Network is on; sandbox is deterministic across machines.
-3. **`codex_network: 'isolated'`** (the new default) — keep network closed.
-   Recommended for review-only or implementation profiles that do not need
-   outbound HTTP. Combine with the supervisor-side pre-fetch pattern (see
-   `orchestrate-resolve-pr-comments`) for skills that need to fetch external
-   data.
+1. **`worker_posture: 'trusted'`** (the new default since #58) — workers see
+   user + project `config.toml` and the trusted-default sandbox. Closest to a
+   manual `codex exec` run. Recommended unless you specifically need the
+   closed-by-default envelope.
+2. **`codex_network: 'user-config'`** — keep the pre-#31 behavior verbatim
+   under restricted. Codex continues to read `~/.codex/config.toml`.
+3. **`codex_network: 'workspace'`** — under restricted, this still emits
+   `--ignore-user-config` but adds the codex CLI's own network override. Use
+   when you want deterministic codex config but workspace-write network on.
+4. **`codex_network: 'isolated'`** (the restricted default since #31) — keep
+   network closed and user config skipped. Recommended for review-only or
+   implementation profiles that do not need outbound HTTP. Combine with the
+   supervisor-side pre-fetch pattern (see `orchestrate-resolve-pr-comments`).
 
 ### Why this changed
 
-Previously, codex network egress was an unintended side effect of
+Originally (pre-#31), codex network egress was an unintended side effect of
 `service_tier: 'normal'`: the daemon mapped that to an internal `mode='normal'`
 flag, which then triggered `--ignore-user-config`. Profiles with `service_tier`
 set to anything else (or unset) silently honored `~/.codex/config.toml`. Users
 who only knew about `service_tier` could not predict whether their codex
-config was being applied. Decoupling network egress from speed-tier and making
-the posture explicit (and uniform) closes that foot-gun.
+config was being applied. Issue #31 decoupled network egress from speed-tier
+and made the posture explicit and uniform under restricted.
+
+Issue #58 then reframed the contract again: workers default to backend-native
+parity (`worker_posture: 'trusted'`) with a manual run, and the curated
+restricted envelope is opt-in. Most operators no longer need to migrate
+because the trusted default matches what they would have gotten manually.
 
 ## Recommended Patterns
 
