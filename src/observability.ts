@@ -25,7 +25,7 @@ import {
 } from './contract.js';
 import type { RunStore } from './runStore.js';
 
-const observabilityPromptTextCharLimit = 8_000;
+export const observabilityPromptTextCharLimit = 8_000;
 const observabilityResponseSummaryCharLimit = 8_000;
 const observabilityEventPayloadCharLimit = 2_000;
 const observabilityEventJsonByteLimit = 4_096;
@@ -100,10 +100,14 @@ async function buildPrompt(
     title,
     summary: meta.display.prompt_summary,
     preview,
-    text: includePrompt ? truncateText(promptText, observabilityPromptTextCharLimit) : null,
+    text: includePrompt ? truncateObservabilityPromptText(promptText) : null,
     path: promptInfo.exists ? path : null,
     bytes: promptInfo.bytes,
   };
+}
+
+export function truncateObservabilityPromptText(value: string | null): string | null {
+  return truncateText(value, observabilityPromptTextCharLimit);
 }
 
 async function buildResponse(store: RunStore, runId: string, events: EventSummary): Promise<ObservabilityResponse> {

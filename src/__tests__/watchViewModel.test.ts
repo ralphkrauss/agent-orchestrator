@@ -90,6 +90,29 @@ describe('watch view model', () => {
     assert.doesNotMatch(plain, /Worker final message \[completed\]/);
   });
 
+  it('hydrates selected timeline prompt text without requiring full prompts in the snapshot', () => {
+    const envelope = sampleEnvelope();
+    const child = envelope.snapshot.runs.find((item) => item.run.run_id === 'run-child')!;
+    child.prompt.preview = 'The resolution-map reviewer answered the three Rev...';
+    child.prompt.text = null;
+
+    const model = buildWatchViewModel(envelope);
+    let state = clampWatchDashboardState(createWatchDashboardState(), model);
+    state = selectWatchSidebarItem(state, model, 1);
+
+    const promptTextByRunId = new Map([[
+      'run-child',
+      [
+        'The resolution-map reviewer answered the three review questions.',
+        '',
+        'This tail is beyond the preview and must remain visible in watch.',
+      ].join('\n'),
+    ]]);
+    const plain = stripAnsi(selectedWatchTranscriptLines(model, state, 80, promptTextByRunId).join('\n'));
+    assert.match(plain, /This tail is beyond the preview/);
+    assert.doesNotMatch(plain, /three Rev\.\.\./);
+  });
+
   it('gives workers stable names and renders the orchestrator selection as an overview', () => {
     const model = buildWatchViewModel(sampleEnvelope());
     const conversation = model.live[0]?.conversations[0];

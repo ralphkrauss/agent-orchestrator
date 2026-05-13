@@ -99,6 +99,7 @@ export type WatchTranscriptTone =
 
 export interface WatchTranscriptBlock {
   id: string;
+  runId: string | null;
   actor: WatchTranscriptActor;
   label: string;
   title: string;
@@ -507,17 +508,26 @@ export function selectedWatchSidebarItem(model: WatchViewModel, state: WatchDash
   return watchSidebarItems(model, clamped).find((item) => item.id === clamped.selectedId) ?? null;
 }
 
-export function selectedWatchTranscriptLines(model: WatchViewModel, state: WatchDashboardState, width: number): string[] {
+export function selectedWatchTranscriptLines(
+  model: WatchViewModel,
+  state: WatchDashboardState,
+  width: number,
+  promptTextByRunId?: ReadonlyMap<string, string>,
+): string[] {
   const item = selectedWatchSidebarItem(model, state);
   if (!item) return renderTranscriptBlocks([emptyTranscriptBlock()], width);
-  return renderTranscriptBlocks(selectedWatchTranscriptBlocks(model, state), width);
+  return renderTranscriptBlocks(selectedWatchTranscriptBlocks(model, state, promptTextByRunId), width);
 }
 
-export function selectedWatchTranscriptBlocks(model: WatchViewModel, state: WatchDashboardState): WatchTranscriptBlock[] {
+export function selectedWatchTranscriptBlocks(
+  model: WatchViewModel,
+  state: WatchDashboardState,
+  promptTextByRunId?: ReadonlyMap<string, string>,
+): WatchTranscriptBlock[] {
   const item = selectedWatchSidebarItem(model, state);
   if (!item) return [emptyTranscriptBlock()];
   if (item.kind === 'orchestrator') return renderOrchestratorOverviewBlocks(item.orchestrator);
-  return renderConversationTranscriptBlocks(item.conversation!);
+  return hydratePromptBlocks(renderConversationTranscriptBlocks(item.conversation!), promptTextByRunId);
 }
 
 export function renderMarkdownToAnsi(markdown: string, width: number): string[] {
@@ -844,6 +854,7 @@ function turnsForRun(run: ObservabilityRun, followUp: boolean, round: number): W
 function renderConversationTranscriptBlocks(conversation: WatchConversation): WatchTranscriptBlock[] {
   const blocks: WatchTranscriptBlock[] = [{
     id: `${conversation.id}:summary`,
+    runId: null,
     actor: 'system',
     label: 'Worker Chat',
     title: `${conversation.workerName} timeline`,
@@ -863,6 +874,7 @@ function renderOrchestratorOverviewBlocks(orchestrator: WatchOrchestrator): Watc
   const generatedAt = maxIso([orchestrator.generatedAt, orchestrator.updatedAt]);
   const blocks: WatchTranscriptBlock[] = [{
     id: `${orchestrator.id}:overview`,
+    runId: null,
     actor: 'system',
     label: 'Session',
     title: orchestrator.label,
@@ -884,6 +896,7 @@ function renderOrchestratorOverviewBlocks(orchestrator: WatchOrchestrator): Watc
     const limited = orchestrator.workerCount > 0;
     blocks.push({
       id: `${orchestrator.id}:empty`,
+      runId: null,
       actor: 'system',
       label: 'Workers',
       title: limited ? 'Worker details outside current limit' : 'No worker conversations yet',
@@ -909,6 +922,7 @@ function renderOrchestratorOverviewBlocks(orchestrator: WatchOrchestrator): Watc
     const duration = formatDurationBetween(conversation.latestRunStartedAt || conversation.createdAt, durationEnd);
     blocks.push({
       id: `${conversation.id}:overview`,
+      runId: null,
       actor: conversation.status === 'running' ? 'worker' : 'result',
       label: conversation.workerName,
       title: overviewStatusTitle(conversation.status, duration),
@@ -1024,6 +1038,7 @@ function formatDurationMs(ms: number): string {
 function transcriptBlockFromTurn(turn: WatchTranscriptEvent): WatchTranscriptBlock {
   const base = {
     id: turn.id,
+    runId: turn.runId,
     title: turn.title,
     timestamp: turn.ts ? formatTimestamp(turn.ts) : null,
     status: turn.status ?? null,
@@ -1073,6 +1088,19 @@ function transcriptBlockFromTurn(turn: WatchTranscriptEvent): WatchTranscriptBlo
   };
 }
 
+function hydratePromptBlocks(blocks: WatchTranscriptBlock[], promptTextByRunId: ReadonlyMap<string, string> | undefined): WatchTranscriptBlock[] {
+  if (!promptTextByRunId || promptTextByRunId.size === 0) return blocks;
+  let changed = false;
+  const hydrated = blocks.map((block) => {
+    if (block.actor !== 'supervisor' || !block.runId) return block;
+    const promptText = promptTextByRunId.get(block.runId);
+    if (!promptText || promptText === block.body) return block;
+    changed = true;
+    return { ...block, body: promptText };
+  });
+  return changed ? hydrated : blocks;
+}
+
 function renderTranscriptBlocks(blocks: WatchTranscriptBlock[], width: number): string[] {
   const lines: string[] = [];
   for (const block of blocks) {
@@ -1091,6 +1119,7 @@ function renderTranscriptBlocks(blocks: WatchTranscriptBlock[], width: number): 
 function emptyTranscriptBlock(): WatchTranscriptBlock {
   return {
     id: 'empty',
+    runId: null,
     actor: 'system',
     label: 'Watch',
     title: 'No sessions',

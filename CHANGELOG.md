@@ -4,6 +4,16 @@ This project uses npm dist-tags as documented in `PUBLISHING.md`: prereleases pu
 
 ## Unreleased
 
+## 0.2.7 - 2026-05-13
+
+### Fixed
+
+- Fixed `agent-orchestrator watch` timeline prompts so selecting a worker
+  lazily loads the bounded full prompt text from the local store instead of
+  showing only the truncated preview.
+- Kept watch refreshes lightweight by leaving full prompt text out of the base
+  snapshot and hydrating only the selected worker conversation.
+
 ## 0.2.6 - 2026-05-13
 
 ### Fixed

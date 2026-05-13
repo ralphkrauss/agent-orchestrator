@@ -8,7 +8,7 @@ import { daemonPaths } from './paths.js';
 import { checkDaemonVersion } from '../daemonVersion.js';
 import { formatVersionOutput, getPackageVersion } from '../packageMetadata.js';
 import { RunStore, type PruneRunsResult } from '../runStore.js';
-import { buildObservabilitySnapshot, type LiveOrchestratorSnapshot } from '../observability.js';
+import { buildObservabilitySnapshot, truncateObservabilityPromptText, type LiveOrchestratorSnapshot } from '../observability.js';
 import { getBackendStatus } from '../diagnostics.js';
 import { formatSnapshot, type SnapshotEnvelope } from './observabilityFormat.js';
 import type { ObservabilitySnapshot, OrchestratorError } from '../contract.js';
@@ -169,6 +169,7 @@ async function runs(argv: readonly string[]): Promise<void> {
 async function watch(argv: readonly string[]): Promise<void> {
   const intervalMs = readPositiveIntOption(argv, '--interval-ms') ?? 1_000;
   const options = snapshotOptionsFromArgs(argv, { includePrompts: false, limit: 50, recentEventLimit: 0 });
+  const watchStore = new RunStore(paths.home);
   const readWatchSnapshot = async () => {
     try {
       return await readWatchSnapshotFromStore(options);
@@ -198,6 +199,7 @@ async function watch(argv: readonly string[]): Promise<void> {
   await runWatchTui({
     initialEnvelope: await readWatchSnapshot(),
     readSnapshot: readWatchSnapshot,
+    readPromptText: async (runId) => truncateObservabilityPromptText(await watchStore.readPrompt(runId)),
     intervalMs,
     stdin: process.stdin,
     stdout: process.stdout,

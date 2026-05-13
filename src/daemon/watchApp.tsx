@@ -21,6 +21,7 @@ import {
 interface RunWatchTuiOptions {
   initialEnvelope: SnapshotEnvelope;
   readSnapshot: () => Promise<SnapshotEnvelope>;
+  readPromptText?: (runId: string) => Promise<string | null>;
   intervalMs: number;
   stdin?: NodeJS.ReadStream;
   stdout?: NodeJS.WriteStream;
@@ -35,6 +36,7 @@ const SCREEN_EXIT_SEQUENCE = '\x1b[?1049l';
 interface WatchAppProps {
   initialEnvelope: SnapshotEnvelope;
   readSnapshot: () => Promise<SnapshotEnvelope>;
+  readPromptText?: (runId: string) => Promise<string | null>;
   intervalMs: number;
   stdin?: NodeJS.ReadStream;
   stdout?: NodeJS.WriteStream;
@@ -65,6 +67,7 @@ export async function runWatchTui(options: RunWatchTuiOptions): Promise<void> {
       <WatchApp
         initialEnvelope={options.initialEnvelope}
         readSnapshot={options.readSnapshot}
+        readPromptText={options.readPromptText}
         intervalMs={options.intervalMs}
         stdin={stdin}
         stdout={stdout}
@@ -89,11 +92,14 @@ export async function runWatchTui(options: RunWatchTuiOptions): Promise<void> {
   }
 }
 
-export function WatchApp({ initialEnvelope, readSnapshot, intervalMs, stdin, stdout, onQuit }: WatchAppProps): React.ReactElement {
+type PromptTextCache = Record<string, string | null>;
+
+export function WatchApp({ initialEnvelope, readSnapshot, readPromptText, intervalMs, stdin, stdout, onQuit }: WatchAppProps): React.ReactElement {
   const { exit } = useApp();
   const { columns, rows } = useWindowSize();
   const [envelope, setEnvelope] = useState(initialEnvelope);
   const [state, setState] = useState<WatchDashboardState>(() => createWatchDashboardState());
+  const [promptTextByRunId, setPromptTextByRunId] = useState<PromptTextCache>({});
   const [mouseCapture, setMouseCapture] = useState(() => Boolean(stdout?.isTTY));
   const model = useMemo(() => buildWatchViewModel(envelope), [envelope]);
   const clamped = clampWatchDashboardState(state, model);
@@ -107,7 +113,16 @@ export function WatchApp({ initialEnvelope, readSnapshot, intervalMs, stdin, std
   const transcriptHeight = Math.max(1, bodyHeight - 2);
   const selectedItem = useMemo(() => selectedWatchSidebarItem(model, clamped), [model, clamped.mode, clamped.selectedId]);
   const mainSurface = selectedItem?.kind === 'conversation' ? 'chat' : 'overview';
-  const transcriptBlocks = useMemo(() => selectedWatchTranscriptBlocks(model, clamped), [model, clamped.mode, clamped.selectedId]);
+  const selectedRunIdKey = selectedItem?.kind === 'conversation' ? selectedItem.conversation!.runIds.join('\0') : '';
+  const promptTextMap = useMemo(() => {
+    const hydrated = new Map<string, string>();
+    for (const runId of runIdsFromKey(selectedRunIdKey)) {
+      const text = promptTextByRunId[runId];
+      if (typeof text === 'string' && text.trim()) hydrated.set(runId, text);
+    }
+    return hydrated;
+  }, [promptTextByRunId, selectedRunIdKey]);
+  const transcriptBlocks = useMemo(() => selectedWatchTranscriptBlocks(model, clamped, promptTextMap), [model, clamped.mode, clamped.selectedId, promptTextMap]);
   const transcriptRows = useMemo(() => transcriptRowsFromBlocks(transcriptBlocks, mainContentWidth, mainSurface), [transcriptBlocks, mainContentWidth, mainSurface]);
   const transcriptMaxScroll = Math.max(0, transcriptRows.length - transcriptHeight);
   const visibleTranscript = useMemo(
@@ -123,6 +138,35 @@ export function WatchApp({ initialEnvelope, readSnapshot, intervalMs, stdin, std
     if (!stdout?.isTTY) return;
     stdout.write(mouseCapture ? MOUSE_ENABLE_SEQUENCE : MOUSE_DISABLE_SEQUENCE);
   }, [stdout, mouseCapture]);
+
+  useEffect(() => {
+    const selectedRunIds = runIdsFromKey(selectedRunIdKey);
+    if (!readPromptText || selectedRunIds.length === 0) {
+      setPromptTextByRunId((current) => Object.keys(current).length === 0 ? current : {});
+      return;
+    }
+
+    const missingRunIds = selectedRunIds.filter((runId) => promptTextByRunId[runId] === undefined);
+    if (missingRunIds.length === 0) {
+      setPromptTextByRunId((current) => prunePromptTextCache(current, selectedRunIds));
+      return;
+    }
+
+    let cancelled = false;
+    void Promise.all(missingRunIds.map(async (runId): Promise<readonly [string, string | null]> => {
+      try {
+        return [runId, await readPromptText(runId)];
+      } catch {
+        return [runId, null];
+      }
+    })).then((entries) => {
+      if (cancelled) return;
+      setPromptTextByRunId((current) => mergeSelectedPromptTextCache(current, selectedRunIds, entries));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [readPromptText, selectedRunIdKey, promptTextByRunId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -269,6 +313,45 @@ function plainSidebarText(value: string): string {
 
 function stripAnsiForDisplay(value: string): string {
   return value.replaceAll(/\x1b\[[0-9;]*m/g, '');
+}
+
+function runIdsFromKey(key: string): string[] {
+  return key ? key.split('\0') : [];
+}
+
+function prunePromptTextCache(current: PromptTextCache, selectedRunIds: readonly string[]): PromptTextCache {
+  const selected = new Set(selectedRunIds);
+  const next: PromptTextCache = {};
+  for (const runId of selectedRunIds) {
+    if (current[runId] !== undefined) next[runId] = current[runId] ?? null;
+  }
+  return promptTextCacheEqual(current, next, selected) ? current : next;
+}
+
+function mergeSelectedPromptTextCache(
+  current: PromptTextCache,
+  selectedRunIds: readonly string[],
+  entries: readonly (readonly [string, string | null])[],
+): PromptTextCache {
+  const selected = new Set(selectedRunIds);
+  const next: PromptTextCache = {};
+  for (const runId of selectedRunIds) {
+    if (current[runId] !== undefined) next[runId] = current[runId] ?? null;
+  }
+  for (const [runId, text] of entries) {
+    if (selected.has(runId)) next[runId] = text;
+  }
+  return promptTextCacheEqual(current, next, selected) ? current : next;
+}
+
+function promptTextCacheEqual(current: PromptTextCache, next: PromptTextCache, selected: ReadonlySet<string>): boolean {
+  const currentKeys = Object.keys(current);
+  const nextKeys = Object.keys(next);
+  if (currentKeys.length !== nextKeys.length) return false;
+  for (const key of currentKeys) {
+    if (!selected.has(key) || current[key] !== next[key]) return false;
+  }
+  return true;
 }
 
 function MainPane({
