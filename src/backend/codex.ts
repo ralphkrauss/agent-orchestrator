@@ -1,3 +1,4 @@
+import type { WorkerEvent, WorkerPosture } from '../contract.js';
 import type { BackendStartInput, ParsedBackendEvent, WorkerInvocation } from './WorkerBackend.js';
 import { BaseBackend, commandFromToolInput, emptyParsedEvent, errorFromEvent, extractText, getRecord, getString, invocation, pathFromToolInput } from './common.js';
 
@@ -6,7 +7,7 @@ export class CodexBackend extends BaseBackend {
   readonly binary = 'codex';
 
   async start(input: BackendStartInput): Promise<WorkerInvocation> {
-    return invocation(this.binary, [
+    const inv = invocation(this.binary, [
       'exec',
       '--json',
       '--skip-git-repo-check',
@@ -17,10 +18,12 @@ export class CodexBackend extends BaseBackend {
       ...modelSettingsArgs(input.modelSettings),
       '-',
     ], input);
+    inv.initialEvents = [postureEvent(input.modelSettings)];
+    return inv;
   }
 
   async resume(sessionId: string, input: BackendStartInput): Promise<WorkerInvocation> {
-    return invocation(this.binary, [
+    const inv = invocation(this.binary, [
       'exec',
       'resume',
       '--json',
@@ -31,6 +34,8 @@ export class CodexBackend extends BaseBackend {
       sessionId,
       '-',
     ], input);
+    inv.initialEvents = [postureEvent(input.modelSettings)];
+    return inv;
   }
 
   parseEvent(raw: unknown): ParsedBackendEvent {
@@ -142,21 +147,80 @@ function modelArgs(model: string | null | undefined): string[] {
 }
 
 function sandboxArgs(settings: BackendStartInput['modelSettings']): string[] {
-  // Per docs/development/codex-backend.md (issue #31):
-  // - 'isolated'    => --ignore-user-config (codex skips $CODEX_HOME/config.toml)
-  // - 'workspace'   => --ignore-user-config + -c sandbox_workspace_write.network_access=true
-  // - 'user-config' => no flags (codex reads $CODEX_HOME/config.toml verbatim)
-  // The legacy `mode === 'normal'` path is retired; the orchestrator service
-  // resolves codex_network and the codex backend reads only that field.
+  // Per docs/development/codex-backend.md.
+  //
+  // Issue #58 Decision 9: decouple config-source from sandbox/network posture.
+  //   - worker_posture controls whether --ignore-user-config is emitted.
+  //   - codex_network controls only the sandbox/network argv.
+  //
+  // Argv shape, by posture × codex_network:
+  //
+  // trusted + absent     -> -c sandbox_mode="workspace-write" -c sandbox_workspace_write.network_access=true
+  // trusted + 'workspace'-> -c sandbox_workspace_write.network_access=true
+  // trusted + 'isolated' -> (no flags; codex defaults apply)
+  // trusted + 'user-config' -> (no flags)
+  //
+  // restricted + absent or 'isolated' -> --ignore-user-config
+  // restricted + 'workspace'          -> --ignore-user-config -c sandbox_workspace_write.network_access=true
+  // restricted + 'user-config'        -> (no flags)
+  //
+  // All `-c key=value` overrides are accepted by both `codex exec` and
+  // `codex exec resume`. `--sandbox` is start-only and is NOT used here so
+  // start/resume keep sharing this helper (issue #58 Decision 6 — review
+  // rev. 2 F1).
+  const workerPosture: WorkerPosture = settings.worker_posture ?? 'trusted';
+
+  if (workerPosture === 'trusted') {
+    if (settings.codex_network === 'workspace') {
+      return ['-c', 'sandbox_workspace_write.network_access=true'];
+    }
+    if (settings.codex_network === 'isolated' || settings.codex_network === 'user-config') {
+      return [];
+    }
+    // Absent (or legacy null) under trusted: open the workspace network
+    // posture by default. Matches what a developer running `codex exec`
+    // in the project sees under workspace-write with network on.
+    return ['-c', 'sandbox_mode="workspace-write"', '-c', 'sandbox_workspace_write.network_access=true'];
+  }
+
+  // Restricted posture: preserve today's argv shapes verbatim (issue #31).
   if (settings.codex_network === 'workspace') {
     return ['--ignore-user-config', '-c', 'sandbox_workspace_write.network_access=true'];
   }
   if (settings.codex_network === 'user-config') return [];
-  if (settings.codex_network === 'isolated') return ['--ignore-user-config'];
-  // Defensive: settings should always carry an explicit codex_network for codex
-  // runs after orchestratorService resolution. Fall back to the safer closed
-  // posture if a legacy run record is replayed without the field.
+  // 'isolated', absent, or legacy null → closed posture.
   return ['--ignore-user-config'];
+}
+
+function postureEvent(settings: BackendStartInput['modelSettings']): Omit<WorkerEvent, 'seq' | 'ts'> {
+  // Issue #58 Decision 11: one spawn-time lifecycle event per worker so
+  // `get_run_events` answers "what posture did this codex worker use?".
+  // The payload records both the resolved posture and the codex-side
+  // effective flags so operators can correlate with the actual argv.
+  const workerPosture: WorkerPosture = settings.worker_posture ?? 'trusted';
+  const args = sandboxArgs(settings);
+  const ignoreUserConfig = args.includes('--ignore-user-config');
+  const sandboxMode = workerPosture === 'trusted'
+    && (settings.codex_network === undefined
+      || settings.codex_network === null
+      || settings.codex_network === 'workspace')
+    ? 'workspace-write'
+    : null;
+  const networkAccess = args.some((arg) => arg === 'sandbox_workspace_write.network_access=true');
+  return {
+    type: 'lifecycle',
+    payload: {
+      state: 'worker_posture',
+      backend: 'codex',
+      worker_posture: workerPosture,
+      codex: {
+        ignore_user_config: ignoreUserConfig,
+        sandbox: sandboxMode,
+        network_access: networkAccess,
+        codex_network: settings.codex_network ?? null,
+      },
+    },
+  };
 }
 
 function modelSettingsArgs(settings: BackendStartInput['modelSettings']): string[] {

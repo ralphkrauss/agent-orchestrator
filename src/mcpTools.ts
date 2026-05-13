@@ -37,7 +37,12 @@ export const tools = [
         codex_network: {
           type: 'string',
           enum: ['isolated', 'workspace', 'user-config'],
-          description: 'Codex-only network egress posture. isolated (default): --ignore-user-config; codex skips $CODEX_HOME/config.toml; no network. workspace: --ignore-user-config plus -c sandbox_workspace_write.network_access=true; network on. user-config: codex reads $CODEX_HOME/config.toml verbatim. Direct mode only; profile mode rejects this field.',
+          description: 'Codex-only sandbox / network egress shape. Independent axis from worker_posture (issue #58 review follow-up). Under worker_posture=trusted: isolated => codex defaults (no sandbox flags); workspace => -c sandbox_workspace_write.network_access=true; user-config => codex defaults; unset => trusted-default (-c sandbox_mode="workspace-write" with network on). Under worker_posture=restricted: isolated (default) and workspace add --ignore-user-config; user-config adds no flags. Direct mode only; profile mode rejects this field.',
+        },
+        worker_posture: {
+          type: 'string',
+          enum: ['trusted', 'restricted'],
+          description: 'Worker access posture (issue #58). Controls config/MCP visibility, independent of codex_network. trusted (default): worker gets backend-native parity with a manual run — Claude loads project/user/local setting-sources and enableAllProjectMcpServers; Codex loads user + project config.toml (no --ignore-user-config); Cursor loads all ambient SDK settingSources. restricted: orchestrator-curated isolated envelope (the pre-#58 closed-by-default behavior). Supervisor envelope ignores this field. Direct mode only; profile mode rejects this field.',
         },
         metadata: { type: 'object', additionalProperties: true },
         idle_timeout_seconds: {
@@ -116,7 +121,12 @@ export const tools = [
         codex_network: {
           type: 'string',
           enum: ['isolated', 'workspace', 'user-config'],
-          description: 'Codex-only profile field. Controls codex network egress: isolated (default; --ignore-user-config; no network), workspace (network on; codex skips $CODEX_HOME/config.toml), user-config (codex reads $CODEX_HOME/config.toml verbatim). When omitted, codex profiles default to isolated (issue #31, BREAKING).',
+          description: 'Codex-only profile field. Independent of worker_posture. Controls the codex sandbox/network shape only. Effective argv depends on the chosen worker_posture (issue #58): under trusted, isolated/user-config keep codex defaults, workspace adds -c sandbox_workspace_write.network_access=true, and an unset value emits the trusted-default sandbox (workspace-write with network on); under restricted, isolated (default) and workspace add --ignore-user-config, and user-config adds no flags.',
+        },
+        worker_posture: {
+          type: 'string',
+          enum: ['trusted', 'restricted'],
+          description: 'Worker access posture (issue #58). Controls config/MCP visibility, independent of codex_network. trusted (default): backend-native parity with a manual run — loads project/user MCP and config. restricted: orchestrator-curated isolated envelope (pre-#58 closed-by-default). Valid for every backend; the supervisor envelope ignores this field.',
         },
         description: { type: 'string' },
         metadata: { type: 'object', additionalProperties: true },
@@ -288,6 +298,11 @@ export const tools = [
           type: 'string',
           enum: ['isolated', 'workspace', 'user-config'],
           description: 'Codex-only network egress posture override for this follow-up. Omit to inherit the parent run setting. Direct-mode follow-ups only; profile-mode parents reject this field.',
+        },
+        worker_posture: {
+          type: 'string',
+          enum: ['trusted', 'restricted'],
+          description: 'Worker access posture override for this follow-up (issue #58). Omit to inherit the parent run setting. Direct-mode follow-ups only; profile-mode parents reject this field.',
         },
         metadata: { type: 'object', additionalProperties: true },
         idle_timeout_seconds: {

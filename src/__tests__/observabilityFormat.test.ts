@@ -69,8 +69,8 @@ describe('observability CLI formatting', () => {
       { name: 'gpt-5.5', source: 'explicit', requested_name: 'gpt-5.5', observed_name: null },
     ];
     session.settings = [
-      { reasoning_effort: 'low', service_tier: 'normal', mode: null, codex_network: null },
-      { reasoning_effort: 'xhigh', service_tier: 'fast', mode: null, codex_network: null },
+      { reasoning_effort: 'low', service_tier: 'normal', mode: null, codex_network: null, worker_posture: null },
+      { reasoning_effort: 'xhigh', service_tier: 'fast', mode: null, codex_network: null, worker_posture: null },
     ];
     session.workspace = {
       cwd: '/tmp/worktrees-agent-orchestrator/4-add-observability',
@@ -87,7 +87,7 @@ describe('observability CLI formatting', () => {
       summary: null,
       preview: 'Second raw prompt',
       model: { name: 'gpt-5.5', source: 'explicit', requested_name: 'gpt-5.5', observed_name: null },
-      settings: { reasoning_effort: 'xhigh', service_tier: 'fast', mode: null, codex_network: null },
+      settings: { reasoning_effort: 'xhigh', service_tier: 'fast', mode: null, codex_network: null, worker_posture: null },
       created_at: '2026-05-02T00:00:02.000Z',
       last_activity_at: '2026-05-02T00:00:03.000Z',
     });
@@ -164,7 +164,7 @@ function sampleEnvelope(): SnapshotEnvelope {
       run_count: 1,
       running_count: 1,
       models: [{ name: 'gpt-5.2', source: 'explicit' }],
-      settings: [{ reasoning_effort: 'xhigh', service_tier: 'fast', mode: null, codex_network: null }],
+      settings: [{ reasoning_effort: 'xhigh', service_tier: 'fast', mode: null, codex_network: null, worker_posture: null }],
       warnings: [],
       prompts: [{
         run_id: 'run-1',
@@ -173,7 +173,7 @@ function sampleEnvelope(): SnapshotEnvelope {
         summary: 'Show the prompt detail view',
         preview: 'Raw prompt body with details',
         model: { name: 'gpt-5.2', source: 'explicit' },
-        settings: { reasoning_effort: 'xhigh', service_tier: 'fast', mode: null, codex_network: null },
+        settings: { reasoning_effort: 'xhigh', service_tier: 'fast', mode: null, codex_network: null, worker_posture: null },
         created_at: now,
         last_activity_at: '2026-05-02T00:00:01.000Z',
       }],
@@ -217,7 +217,7 @@ function sampleEnvelope(): SnapshotEnvelope {
           dirty: [],
           dirty_fingerprints: {},
         },
-        model_settings: { reasoning_effort: 'xhigh', service_tier: 'fast', mode: null, codex_network: null },
+        model_settings: { reasoning_effort: 'xhigh', service_tier: 'fast', mode: null, codex_network: null, worker_posture: null },
         idle_timeout_seconds: 1200,
         execution_timeout_seconds: null,
         timeout_reason: null,
@@ -248,7 +248,7 @@ function sampleEnvelope(): SnapshotEnvelope {
         bytes: 128,
       },
       model: { name: 'gpt-5.2', source: 'explicit' },
-      settings: { reasoning_effort: 'xhigh', service_tier: 'fast', mode: null, codex_network: null },
+      settings: { reasoning_effort: 'xhigh', service_tier: 'fast', mode: null, codex_network: null, worker_posture: null },
       session: {
         requested_session_id: null,
         observed_session_id: 'session-1',

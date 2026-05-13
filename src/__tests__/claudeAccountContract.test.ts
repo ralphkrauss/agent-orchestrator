@@ -175,3 +175,58 @@ describe('inspectWorkerProfiles claude account validation', () => {
     assert.ok(inspected.errors.some((message) => /claude_account.*backend=claude/.test(message)));
   });
 });
+
+describe('inspectWorkerProfiles worker_posture validation (issue #58 review Medium 2)', () => {
+  it('rejects manifests with an unsupported worker_posture so list_worker_profiles surfaces them as invalid', () => {
+    const manifest: WorkerProfileManifest = {
+      version: 1,
+      profiles: {
+        typo: {
+          backend: 'codex',
+          model: 'gpt-5.5',
+          worker_posture: 'trustd',
+        },
+        good: {
+          backend: 'codex',
+          model: 'gpt-5.5',
+          worker_posture: 'trusted',
+        },
+        also_good: {
+          backend: 'claude',
+          model: 'claude-opus-4-7',
+          worker_posture: 'restricted',
+        },
+      },
+    };
+    const catalog = createWorkerCapabilityCatalog();
+    const inspected = inspectWorkerProfiles(manifest, catalog);
+
+    assert.ok(inspected.invalid_profiles.typo, 'profile with worker_posture: "trustd" must land in invalid_profiles');
+    assert.ok(
+      inspected.errors.some((message) => /worker_posture trustd/.test(message)),
+      'invalid worker_posture must produce a clear diagnostic',
+    );
+    assert.ok(
+      inspected.errors.some((message) => /trusted, restricted/.test(message)),
+      'diagnostic must list the supported values',
+    );
+    assert.ok(inspected.profiles.good, 'profile with worker_posture: "trusted" stays valid');
+    assert.ok(inspected.profiles.also_good, 'profile with worker_posture: "restricted" stays valid');
+  });
+
+  it('accepts profiles that omit worker_posture (the default is trusted)', () => {
+    const manifest: WorkerProfileManifest = {
+      version: 1,
+      profiles: {
+        defaulted: {
+          backend: 'codex',
+          model: 'gpt-5.5',
+        },
+      },
+    };
+    const catalog = createWorkerCapabilityCatalog();
+    const inspected = inspectWorkerProfiles(manifest, catalog);
+    assert.ok(inspected.profiles.defaulted);
+    assert.deepStrictEqual(inspected.errors, []);
+  });
+});

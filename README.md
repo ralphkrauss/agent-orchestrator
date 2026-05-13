@@ -90,15 +90,22 @@ Then use the MCP tools from that client:
 get_backend_status({})
 ```
 
-Create a profile. Choose a model id that your local backend accepts.
+Create a profile. Choose a model id that your local backend accepts. The
+example below uses `worker_posture: "restricted"` together with
+`codex_network: "isolated"` to keep the worker on the closed-network,
+`--ignore-user-config` envelope. Omit both fields (or use
+`worker_posture: "trusted"`, the default since #58) for backend-native parity
+with a manual `codex exec` run — see [`docs/reference.md`](docs/reference.md#model-and-network-settings)
+for the two-axis posture × `codex_network` argv table.
 
 ```text
 upsert_worker_profile({
   "profile": "codex-local",
   "backend": "codex",
   "model": "<codex-model-id>",
+  "worker_posture": "restricted",
   "codex_network": "isolated",
-  "description": "Local Codex worker with closed network egress"
+  "description": "Local Codex worker with closed network egress (restricted posture)"
 })
 ```
 

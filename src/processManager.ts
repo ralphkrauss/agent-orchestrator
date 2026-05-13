@@ -237,10 +237,30 @@ export class ProcessManager {
       return this.store.appendEvent(runId, event);
     };
 
-    trackPersistence(appendEventBuffered({
-      type: 'lifecycle',
-      payload: { status: 'started', pid: workerPid, pgid: workerPgid },
-    }));
+    // Issue #58: flush backend-supplied initial lifecycle events (e.g. the
+    // `worker_posture` event from Claude and Codex backends) BEFORE the
+    // `status: started` marker so operators see them at the head of the run
+    // event stream. The chain is required because in the non-buffered path
+    // (interceptor disengaged) `appendEventBuffered` returns
+    // `store.appendEvent`, which serializes through a filesystem run lock
+    // with EEXIST retry — two parallel appends race for the lock and
+    // ordering at the call site does not survive. Routed through
+    // `appendEventBuffered` so the D-COR-Resume interceptor still buffers
+    // them on a retry-eligible attempt.
+    let orderedInitialFlush: Promise<unknown> = Promise.resolve();
+    if (invocation.initialEvents && invocation.initialEvents.length > 0) {
+      for (const initialEvent of invocation.initialEvents) {
+        orderedInitialFlush = orderedInitialFlush.then(() => appendEventBuffered(initialEvent));
+      }
+    }
+    trackPersistence(
+      orderedInitialFlush.then(() =>
+        appendEventBuffered({
+          type: 'lifecycle',
+          payload: { status: 'started', pid: workerPid, pgid: workerPgid },
+        }),
+      ),
+    );
     lastPersistedActivityMs = lastActivityMs;
 
     child.stdin.end(invocation.stdinPayload);
