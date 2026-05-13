@@ -3,7 +3,7 @@ import { constants, createReadStream } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
-import { ulid } from 'ulid';
+import { monotonicFactory, ulid } from 'ulid';
 import {
   type Backend,
   type GitSnapshot,
@@ -108,6 +108,7 @@ const notificationJournalFile = 'notifications.jsonl';
 const notificationAcksFile = 'acks.jsonl';
 const notificationSeqDigits = 20;
 const maxAckCheckBytes = 4 * 1024 * 1024;
+const createRunId = monotonicFactory();
 
 export class RunStore {
   readonly root: string;
@@ -162,7 +163,7 @@ export class RunStore {
   async createRun(input: CreateRunInput): Promise<RunMeta> {
     await this.ensureReady();
     const now = new Date().toISOString();
-    const runId = ulid();
+    const runId = createRunId();
     const meta: RunMeta = {
       run_id: runId,
       backend: input.backend,
@@ -309,7 +310,9 @@ export class RunStore {
       }
     }
 
-    return runs.sort((a, b) => b.created_at.localeCompare(a.created_at));
+    return runs.sort((a, b) =>
+      b.created_at.localeCompare(a.created_at)
+      || b.run_id.localeCompare(a.run_id));
   }
 
   async readEvents(runId: string, afterSequence = 0, limit = 200): Promise<ReadEventsResult> {

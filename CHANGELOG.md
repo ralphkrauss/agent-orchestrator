@@ -4,6 +4,14 @@ This project uses npm dist-tags as documented in `PUBLISHING.md`: prereleases pu
 
 ## Unreleased
 
+## 0.2.3 - 2026-05-13
+
+### Added
+
+- Added the interactive watch TUI for live supervisor and worker conversations.
+- Added append-only Claude supervisor system prompt configuration.
+- Added `worker_posture` controls for backend-native trusted and restricted worker behavior.
+
 ### Repository Setup
 
 - Added public contributor, security, support, code-of-conduct, issue-template, PR-template, roadmap, and repository-map files.
@@ -13,6 +21,8 @@ This project uses npm dist-tags as documented in `PUBLISHING.md`: prereleases pu
 ### Fixed
 
 - Fixed Claude config-dir rotation session-copy lookup on macOS paths where worker processes observe `/private/var/...` while callers pass `/var/...`.
+- Fixed Claude subscription-cap banners so they classify as `rate_limit` and trigger account rotation.
+- Fixed observability worker ordering for runs created within the same millisecond.
 - Normalized macOS temporary-path expectations in git snapshot and OpenCode harness tests.
 - Updated the lockfile to patched transitive `fast-uri` and `hono` versions so `pnpm audit --prod` remains green.
 
