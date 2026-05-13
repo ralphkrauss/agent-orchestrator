@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { ulid } from 'ulid';
 import { formatVersionOutput } from '../packageMetadata.js';
 import { IpcClient, IpcRequestError } from '../ipc/client.js';
-import { daemonPaths } from '../daemon/paths.js';
+import { daemonIpcEndpoint, type DaemonPaths } from '../daemon/paths.js';
 import {
   removeOrchestratorSidecar,
   writeOrchestratorSidecar,
@@ -339,6 +339,7 @@ export async function runClaudeLauncher(
   // restarts mid-session (issue #40, F5 / Assumption A7). Best effort;
   // failures only log a warning.
   const storeRoot = env.AGENT_ORCHESTRATOR_HOME || resolveStoreRoot();
+  const paths = daemonPathsForStoreRoot(storeRoot);
   const registrationRecord: OrchestratorRecord = OrchestratorRecordSchema.parse({
     id: orchestratorId,
     client: 'claude',
@@ -357,7 +358,9 @@ export async function runClaudeLauncher(
   // Best-effort registration with the local daemon. Failures must not block
   // the launch; the supervisor's first hook signal will trigger a transparent
   // re-register from the sidecar if the daemon is later available.
+  await ensureDaemonStartedBestEffort(paths, env);
   await registerOrchestrator({
+    ipcPath: paths.ipc.path,
     orchestratorId,
     label: orchestratorLabelFor(options),
     cwd: options.cwd,
@@ -368,13 +371,53 @@ export async function runClaudeLauncher(
   try {
     return await spawnClaude(binary, options, built);
   } finally {
-    await unregisterOrchestrator(orchestratorId, (message) => io.stderr.write(`${message}\n`));
+    await unregisterOrchestrator(paths.ipc.path, orchestratorId, (message) => io.stderr.write(`${message}\n`));
     try {
       await removeOrchestratorSidecar(storeRoot, orchestratorId);
     } catch (error) {
       io.stderr.write(`agent-orchestrator: failed to remove orchestrator sidecar: ${error instanceof Error ? error.message : String(error)}\n`);
     }
     await built.cleanup();
+  }
+}
+
+function daemonPathsForStoreRoot(home: string): DaemonPaths {
+  return {
+    home,
+    ipc: daemonIpcEndpoint(home),
+    pid: join(home, 'daemon.pid'),
+    log: join(home, 'daemon.log'),
+  };
+}
+
+async function ensureDaemonStartedBestEffort(paths: DaemonPaths, env: NodeJS.ProcessEnv): Promise<void> {
+  if (await pingDaemon(paths.ipc.path)) return;
+
+  const daemonMain = resolve(dirname(fileURLToPath(import.meta.url)), '../daemon/daemonMain.js');
+  const child = spawn(process.execPath, [daemonMain], {
+    detached: true,
+    stdio: 'ignore',
+    env: { ...process.env, ...env, AGENT_ORCHESTRATOR_HOME: paths.home },
+  });
+  child.unref();
+
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    if (await pingDaemon(paths.ipc.path)) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
+async function pingDaemon(ipcPath: string): Promise<boolean> {
+  try {
+    const client = new IpcClient(ipcPath);
+    await client.request('ping', {}, 500);
+    return true;
+  } catch (error) {
+    if (error instanceof IpcRequestError && error.orchestratorError.code === 'DAEMON_VERSION_MISMATCH') {
+      return true;
+    }
+    return false;
   }
 }
 
@@ -424,6 +467,7 @@ function stringOrNull(value: string | undefined): string | null {
 }
 
 async function registerOrchestrator(input: {
+  ipcPath: string;
   orchestratorId: string;
   label: string;
   cwd: string;
@@ -431,7 +475,7 @@ async function registerOrchestrator(input: {
   log: (message: string) => void;
 }): Promise<void> {
   try {
-    const client = new IpcClient(daemonPaths().ipc.path);
+    const client = new IpcClient(input.ipcPath);
     await client.request('register_supervisor', {
       orchestrator_id: input.orchestratorId,
       label: input.label,
@@ -448,9 +492,9 @@ async function registerOrchestrator(input: {
   }
 }
 
-async function unregisterOrchestrator(orchestratorId: string, log: (message: string) => void): Promise<void> {
+async function unregisterOrchestrator(ipcPath: string, orchestratorId: string, log: (message: string) => void): Promise<void> {
   try {
-    const client = new IpcClient(daemonPaths().ipc.path);
+    const client = new IpcClient(ipcPath);
     await client.request('unregister_supervisor', { orchestrator_id: orchestratorId }, 2_000);
   } catch (error) {
     if (error instanceof IpcRequestError && error.orchestratorError.code === 'DAEMON_UNAVAILABLE') return;

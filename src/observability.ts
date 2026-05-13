@@ -21,8 +21,14 @@ import {
   type RunStatus,
   type OrchestratorRecord,
   type OrchestratorStatusSnapshot,
+  type WorkerEvent,
 } from './contract.js';
 import type { RunStore } from './runStore.js';
+
+const observabilityPromptTextCharLimit = 8_000;
+const observabilityResponseSummaryCharLimit = 8_000;
+const observabilityEventPayloadCharLimit = 2_000;
+const observabilityEventJsonByteLimit = 4_096;
 
 interface EventSummary {
   event_count: number;
@@ -94,7 +100,7 @@ async function buildPrompt(
     title,
     summary: meta.display.prompt_summary,
     preview,
-    text: includePrompt ? promptText : null,
+    text: includePrompt ? truncateText(promptText, observabilityPromptTextCharLimit) : null,
     path: promptInfo.exists ? path : null,
     bytes: promptInfo.bytes,
   };
@@ -107,7 +113,7 @@ async function buildResponse(store: RunStore, runId: string, events: EventSummar
   const resultSummary = result?.summary.trim() ? result.summary : null;
   return {
     status: result?.status ?? null,
-    summary: resultSummary ?? lastAssistantMessage(events.recent_events),
+    summary: truncateText(resultSummary ?? lastAssistantMessage(events.recent_events), observabilityResponseSummaryCharLimit),
     path: info.exists ? path : null,
     bytes: info.bytes,
   };
@@ -176,7 +182,7 @@ function buildActivity(meta: RunMeta, summary: EventSummary, recentEventLimit: n
     last_interaction_preview: lastInteractionPreview(summary.recent_events),
     event_count: summary.event_count,
     recent_errors: recentErrors(summary.recent_events),
-    recent_events: recentEvents,
+    recent_events: recentEvents.map(compactObservabilityEvent),
     latest_error: meta.latest_error,
   };
 }
@@ -608,6 +614,114 @@ function eventPreview(event: ObservabilityActivity['recent_events'][number]): st
   return null;
 }
 
+function compactObservabilityEvent(event: WorkerEvent): WorkerEvent {
+  const serialized = JSON.stringify(event);
+  if (Buffer.byteLength(serialized, 'utf8') <= observabilityEventJsonByteLimit) return event;
+  return {
+    ...event,
+    payload: compactObservabilityPayload(event),
+  };
+}
+
+function compactObservabilityPayload(event: WorkerEvent): Record<string, unknown> {
+  const preview = eventPreview(event);
+  if (event.type === 'assistant_message') {
+    const text = stringFromRecord(event.payload, 'text') ?? stringFromRecord(event.payload, 'message') ?? preview;
+    return {
+      text: truncateText(text, observabilityEventPayloadCharLimit) ?? '',
+      truncated: true,
+    };
+  }
+
+  if (event.type === 'tool_use') {
+    const input = getRecord(event.payload.input) ?? getRecord(event.payload.arguments) ?? getRecord(event.payload.args);
+    return pruneNullish({
+      name: stringFromRecord(event.payload, 'name') ?? stringFromRecord(event.payload, 'tool_name') ?? stringFromRecord(event.payload, 'toolName') ?? stringFromRecord(event.payload, 'tool') ?? stringFromRecord(event.payload, 'type'),
+      command: stringFromRecord(event.payload, 'command') ?? stringFromRecord(input, 'command') ?? stringFromRecord(input, 'cmd'),
+      path: stringFromRecord(input, 'file_path') ?? stringFromRecord(input, 'path') ?? stringFromRecord(event.payload, 'path'),
+      description: truncateText(stringFromRecord(input, 'description') ?? stringFromRecord(event.payload, 'description'), 400),
+      input_summary: compactUnknown(input ?? event.payload.input, 800),
+      truncated: true,
+    });
+  }
+
+  if (event.type === 'tool_result') {
+    return pruneNullish({
+      name: stringFromRecord(event.payload, 'name') ?? stringFromRecord(event.payload, 'tool_name') ?? stringFromRecord(event.payload, 'toolName') ?? stringFromRecord(event.payload, 'tool') ?? stringFromRecord(event.payload, 'type'),
+      status: stringFromRecord(event.payload, 'status') ?? stringFromRecord(event.payload, 'state') ?? stringFromRecord(event.payload, 'outcome') ?? (event.payload.is_error === true || event.payload.error === true ? 'error' : null),
+      duration_ms: numberFromRecord(event.payload, 'duration_ms') ?? numberFromRecord(event.payload, 'durationMs') ?? numberFromRecord(event.payload, 'elapsed_ms'),
+      text: truncateText(
+        stringFromRecord(event.payload, 'text')
+          ?? stringFromRecord(event.payload, 'message')
+          ?? stringFromRecord(event.payload, 'output')
+          ?? stringFromRecord(event.payload, 'result')
+          ?? preview
+          ?? compactUnknown(event.payload, observabilityEventPayloadCharLimit),
+        observabilityEventPayloadCharLimit,
+      ),
+      truncated: true,
+    });
+  }
+
+  if (event.type === 'error') {
+    return pruneNullish({
+      message: truncateText(stringFromRecord(event.payload, 'message') ?? stringFromRecord(event.payload, 'text') ?? preview ?? compactUnknown(event.payload, observabilityEventPayloadCharLimit), observabilityEventPayloadCharLimit),
+      code: stringFromRecord(event.payload, 'code'),
+      category: stringFromRecord(event.payload, 'category'),
+      truncated: true,
+    });
+  }
+
+  const raw = getRecord(event.payload.raw);
+  return pruneNullish({
+    status: stringFromRecord(event.payload, 'status'),
+    state: stringFromRecord(event.payload, 'state'),
+    subtype: stringFromRecord(event.payload, 'subtype'),
+    type: stringFromRecord(event.payload, 'type'),
+    message: truncateText(stringFromRecord(event.payload, 'message'), observabilityEventPayloadCharLimit),
+    summary: truncateText(stringFromRecord(event.payload, 'summary'), observabilityEventPayloadCharLimit),
+    warning: truncateText(stringFromRecord(event.payload, 'warning'), observabilityEventPayloadCharLimit),
+    raw: raw ? compactResultRaw(raw) : null,
+    payload_summary: preview ?? compactUnknown(event.payload, observabilityEventPayloadCharLimit),
+    truncated: true,
+  });
+}
+
+function compactResultRaw(raw: Record<string, unknown>): Record<string, unknown> {
+  return pruneNullish({
+    type: stringFromRecord(raw, 'type'),
+    subtype: stringFromRecord(raw, 'subtype'),
+    is_error: raw.is_error === true ? true : null,
+    duration_ms: numberFromRecord(raw, 'duration_ms') ?? numberFromRecord(raw, 'durationMs'),
+    num_turns: numberFromRecord(raw, 'num_turns') ?? numberFromRecord(raw, 'numTurns'),
+    stop_reason: stringFromRecord(raw, 'stop_reason') ?? stringFromRecord(raw, 'stopReason'),
+  });
+}
+
+function compactUnknown(value: unknown, maxLength: number): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'string') return truncateText(value, maxLength);
+  try {
+    return compactText(JSON.stringify(value), maxLength);
+  } catch {
+    return compactText(String(value), maxLength);
+  }
+}
+
+function getRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function numberFromRecord(value: unknown, key: string): number | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = (value as Record<string, unknown>)[key];
+  return typeof raw === 'number' && Number.isFinite(raw) ? raw : null;
+}
+
+function pruneNullish(value: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== null && item !== undefined));
+}
+
 function commandFromInput(input: unknown): string | null {
   if (!input || typeof input !== 'object') return null;
   return stringFromRecord(input as Record<string, unknown>, 'command');
@@ -623,6 +737,11 @@ function stringFromRecord(value: unknown, key: string): string | null {
 function compactText(value: string, maxLength: number): string {
   const compact = value.replace(/\s+/g, ' ').trim();
   return compact.length > maxLength ? `${compact.slice(0, maxLength - 3)}...` : compact;
+}
+
+function truncateText(value: string | null, maxLength: number): string | null {
+  if (value === null) return null;
+  return value.length > maxLength ? `${value.slice(0, Math.max(0, maxLength - 3))}...` : value;
 }
 
 function firstNonNull<T>(values: (T | null | undefined)[]): T | null {

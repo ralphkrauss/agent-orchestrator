@@ -139,6 +139,60 @@ describe('observability snapshot builder', () => {
     assert.equal(snapshot.runs[0]?.activity.event_count, 2);
   });
 
+  it('bounds prompts, response summaries, and recent event payloads for watch-sized snapshots', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-observe-large-'));
+    const store = new RunStore(root);
+    const largeText = 'large output '.repeat(10_000);
+    const run = await store.createRun({
+      backend: 'claude',
+      cwd: root,
+      prompt: `Review this output:\n${largeText}`,
+    });
+    await store.appendEvent(run.run_id, { type: 'assistant_message', payload: { text: largeText } });
+    await store.appendEvent(run.run_id, {
+      type: 'tool_result',
+      payload: {
+        name: 'Bash',
+        status: 'success',
+        output: largeText,
+      },
+    });
+    await store.markTerminal(run.run_id, 'completed', [], {
+      status: 'completed',
+      summary: largeText,
+      files_changed: [],
+      commands_run: [],
+      artifacts: store.defaultArtifacts(run.run_id),
+      errors: [],
+    });
+
+    const snapshot = await buildObservabilitySnapshot(store, {
+      limit: 200,
+      includePrompts: true,
+      recentEventLimit: 200,
+      daemonPid: null,
+      backendStatus: null,
+    });
+
+    const observed = snapshot.runs[0];
+    assert.ok(observed);
+    assert.ok((observed.prompt.text?.length ?? 0) < largeText.length);
+    assert.ok((observed.response.summary?.length ?? 0) < largeText.length);
+    assert.ok(Buffer.byteLength(JSON.stringify(snapshot), 'utf8') < 100_000);
+
+    const assistant = observed.activity.recent_events.find((event) => event.type === 'assistant_message');
+    assert.ok(assistant);
+    assert.equal(assistant?.payload.truncated, true);
+    assert.ok(typeof assistant?.payload.text === 'string');
+    assert.ok((assistant.payload.text as string).length < largeText.length);
+
+    const toolResult = observed.activity.recent_events.find((event) => event.type === 'tool_result');
+    assert.ok(toolResult);
+    assert.equal(toolResult?.payload.truncated, true);
+    assert.ok(typeof toolResult?.payload.text === 'string');
+    assert.ok((toolResult.payload.text as string).length < largeText.length);
+  });
+
   it('omits full prompt text unless requested but keeps a preview and title fallback', async () => {
     const root = await mkdtemp(join(tmpdir(), 'agent-observe-'));
     const store = new RunStore(root);

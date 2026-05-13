@@ -1,8 +1,10 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { IpcClient } from '../ipc/client.js';
+import { daemonIpcEndpoint } from '../daemon/paths.js';
 import { tools as mcpTools } from '../mcpTools.js';
 import {
   buildClaudeAllowedToolsList,
@@ -24,6 +26,51 @@ import {
 } from '../claude/config.js';
 import { buildClaudeEnvelope, buildClaudeSpawnArgs, parseClaudeLauncherArgs, runClaudeLauncher } from '../claude/launcher.js';
 import { createWorkerCapabilityCatalog } from '../harness/capabilities.js';
+
+class CaptureStream implements NodeJS.WritableStream {
+  data = '';
+  writable = true;
+  write(chunk: string | Uint8Array, _enc?: BufferEncoding | ((error?: Error | null) => void), cb?: (error?: Error | null) => void): boolean {
+    this.data += typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8');
+    if (typeof cb === 'function') cb();
+    return true;
+  }
+  end(): this { this.writable = false; return this; }
+  on(): this { return this; }
+  once(): this { return this; }
+  emit(): boolean { return true; }
+  removeListener(): this { return this; }
+  removeAllListeners(): this { return this; }
+  setMaxListeners(): this { return this; }
+  getMaxListeners(): number { return 10; }
+  listeners(): never[] { return []; }
+  rawListeners(): never[] { return []; }
+  listenerCount(): number { return 0; }
+  prependListener(): this { return this; }
+  prependOnceListener(): this { return this; }
+  eventNames(): never[] { return []; }
+  off(): this { return this; }
+  addListener(): this { return this; }
+  pipe<T extends NodeJS.WritableStream>(destination: T): T { return destination; }
+  cork(): void { /* no-op */ }
+  uncork(): void { /* no-op */ }
+  destroy(): this { return this; }
+  setDefaultEncoding(): this { return this; }
+}
+
+async function stopDaemon(home: string): Promise<void> {
+  const client = new IpcClient(daemonIpcEndpoint(home).path);
+  await client.request('shutdown', { force: true }, 5_000).catch(() => undefined);
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    try {
+      await client.request('ping', {}, 500);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    } catch {
+      return;
+    }
+  }
+}
 
 describe('Claude harness permission and allowlist', () => {
   it('orchestratorMcpToolAllowList matches every registered MCP tool exactly', () => {
@@ -1028,6 +1075,66 @@ describe('Claude launcher leak-proof tests', () => {
       assert.match(built.systemPrompt, /Do not call wait_for_any_run or wait_for_run in the Claude supervisor/);
     } finally {
       await built.cleanup();
+    }
+  });
+
+  it('auto-starts the daemon before supervisor registration when the store is stopped', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-claude-daemon-start-'));
+    const home = join(root, 'home');
+    const cwd = join(root, 'workspace');
+    const stateDir = join(root, 'state');
+    const fakeClaude = join(root, 'claude');
+    await mkdir(cwd, { recursive: true });
+    await writeFile(fakeClaude, `#!/usr/bin/env sh
+case "$1" in
+  --version)
+    printf '%s\\n' '2.1.140'
+    exit 0
+    ;;
+  --help)
+    cat <<'EOF'
+Usage: claude [options]
+  --mcp-config <path>
+  --strict-mcp-config
+  --settings <path>
+  --setting-sources <sources>
+  --tools <tools>
+  --append-system-prompt-file <path>
+  --allowed-tools <tools>
+  --permission-mode <mode>
+EOF
+    exit 0
+    ;;
+esac
+exit 0
+`, { mode: 0o700 });
+    await chmod(fakeClaude, 0o700);
+
+    const stdout = new CaptureStream();
+    const stderr = new CaptureStream();
+    try {
+      const exit = await runClaudeLauncher(
+        ['--cwd', cwd, '--state-dir', stateDir, '--claude-binary', fakeClaude],
+        {
+          stdout,
+          stderr,
+          env: {
+            ...process.env,
+            AGENT_ORCHESTRATOR_BIN: '/opt/agent-orchestrator',
+            AGENT_ORCHESTRATOR_HOME: home,
+          },
+        },
+      );
+      assert.equal(exit, 0, `launcher stderr:\n${stderr.data}`);
+      assert.doesNotMatch(stderr.data, /daemon unavailable/);
+      assert.doesNotMatch(stderr.data, /orchestrator register failed/);
+
+      const ping = await new IpcClient(daemonIpcEndpoint(home).path).request<{ ok: boolean; pong?: boolean }>('ping', {}, 5_000);
+      assert.equal(ping.ok, true);
+      assert.equal(ping.pong, true);
+    } finally {
+      await stopDaemon(home);
+      await rm(root, { recursive: true, force: true });
     }
   });
 

@@ -4,6 +4,15 @@ This project uses npm dist-tags as documented in `PUBLISHING.md`: prereleases pu
 
 ## Unreleased
 
+## 0.2.4 - 2026-05-13
+
+### Fixed
+
+- Fixed `agent-orchestrator claude` so it auto-starts the daemon before
+  supervisor registration when the daemon store is stopped.
+- Fixed `agent-orchestrator watch` so large run histories do not exceed the IPC
+  frame cap while rendering the dashboard snapshot.
+
 ## 0.2.3 - 2026-05-13
 
 ### Added

@@ -173,7 +173,7 @@ async function runs(argv: readonly string[]): Promise<void> {
 
 async function watch(argv: readonly string[]): Promise<void> {
   const intervalMs = readPositiveIntOption(argv, '--interval-ms') ?? 1_000;
-  const options = snapshotOptionsFromArgs(argv, { includePrompts: true, limit: 200, recentEventLimit: 200 });
+  const options = snapshotOptionsFromArgs(argv, { includePrompts: true, limit: 50, recentEventLimit: 20 });
   const readWatchSnapshot = async () => {
     try {
       return await readSnapshotFromDaemonOrStore(options);
