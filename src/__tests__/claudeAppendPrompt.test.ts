@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, symlink, writeFile, rm } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, symlink, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -36,6 +36,39 @@ function captureWritable(): { stream: NodeJS.WritableStream; text: () => string;
 
 async function makeTargetCwd(prefix: string): Promise<string> {
   return mkdtemp(join(tmpdir(), prefix));
+}
+
+async function writeFakeClaudeBinary(cwd: string): Promise<string> {
+  const fakeClaude = join(cwd, 'claude');
+  await writeFile(fakeClaude, `#!/usr/bin/env sh
+case "$1" in
+  --version)
+    printf '%s\\n' '99.0.0-test'
+    ;;
+  --help)
+    cat <<'EOF'
+Usage: claude [options]
+  --mcp-config <path>
+  --strict-mcp-config
+  --settings <path>
+  --setting-sources <sources>
+  --tools <tools>
+  --append-system-prompt-file <path>
+  --allowed-tools <tools>
+  --permission-mode <mode>
+EOF
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+`, { mode: 0o755 });
+  await chmod(fakeClaude, 0o755);
+  return fakeClaude;
+}
+
+function withFakeClaudeBinary(args: readonly string[], claudeBinary: string): string[] {
+  return ['--claude-binary', claudeBinary, ...args];
 }
 
 describe('parseClaudeLauncherArgs append-system-prompt parsing', () => {
@@ -527,13 +560,14 @@ describe('buildSupervisorSystemPrompt user-append integration', () => {
 });
 
 describe('buildClaudeEnvelope append-prompt wiring', () => {
-  async function makeBaseCwd(prefix: string): Promise<{ cwd: string; skillsPath: string; stateDir: string }> {
+  async function makeBaseCwd(prefix: string): Promise<{ cwd: string; skillsPath: string; stateDir: string; claudeBinary: string }> {
     const cwd = await makeTargetCwd(prefix);
     const skillsPath = join(cwd, '.agents', 'skills');
     await mkdir(join(skillsPath, 'orchestrate-foo'), { recursive: true });
     await writeFile(join(skillsPath, 'orchestrate-foo', 'SKILL.md'), '---\nname: orchestrate-foo\n---\nbody');
     const stateDir = join(cwd, 'claude-state');
-    return { cwd, skillsPath, stateDir };
+    const claudeBinary = await writeFakeClaudeBinary(cwd);
+    return { cwd, skillsPath, stateDir, claudeBinary };
   }
 
   it('writes one concatenated system-prompt.md and keeps spawn args at a single --append-system-prompt-file', async () => {
@@ -667,13 +701,13 @@ describe('buildClaudeEnvelope append-prompt wiring', () => {
   });
 
   it('precedence-skip emits a single stderr notice via runClaudeLauncher and --print-config records the cli-inline source', async () => {
-    const { cwd, skillsPath, stateDir } = await makeBaseCwd('agent-claude-precedence-skip-');
+    const { cwd, skillsPath, stateDir, claudeBinary } = await makeBaseCwd('agent-claude-precedence-skip-');
     await mkdir(join(cwd, '.agents', 'orchestrator'), { recursive: true });
     await writeFile(join(cwd, CONVENTION_APPEND_PROMPT_RELATIVE_PATH), 'project default\n');
     const stdout = captureWritable();
     const stderr = captureWritable();
     const code = await runClaudeLauncher(
-      ['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--append-system-prompt', 'override', '--print-config'],
+      withFakeClaudeBinary(['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--append-system-prompt', 'override', '--print-config'], claudeBinary),
       { stdout: stdout.stream, stderr: stderr.stream, env: { AGENT_ORCHESTRATOR_BIN: '/opt/agent-orchestrator', AGENT_ORCHESTRATOR_HOME: join(cwd, 'home') } },
     );
     assert.equal(code, 0);
@@ -687,11 +721,11 @@ describe('buildClaudeEnvelope append-prompt wiring', () => {
   });
 
   it('missing CLI file fails the launch with a typed error and exit code 1', async () => {
-    const { cwd, skillsPath, stateDir } = await makeBaseCwd('agent-claude-missing-cli-file-');
+    const { cwd, skillsPath, stateDir, claudeBinary } = await makeBaseCwd('agent-claude-missing-cli-file-');
     const stdout = captureWritable();
     const stderr = captureWritable();
     const code = await runClaudeLauncher(
-      ['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--append-system-prompt-file', 'nonexistent.md', '--print-config'],
+      withFakeClaudeBinary(['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--append-system-prompt-file', 'nonexistent.md', '--print-config'], claudeBinary),
       { stdout: stdout.stream, stderr: stderr.stream, env: { AGENT_ORCHESTRATOR_BIN: '/opt/agent-orchestrator', AGENT_ORCHESTRATOR_HOME: join(cwd, 'home') } },
     );
     assert.equal(code, 1);
@@ -700,11 +734,11 @@ describe('buildClaudeEnvelope append-prompt wiring', () => {
   });
 
   it('missing env file fails the launch with a typed error and exit code 1', async () => {
-    const { cwd, skillsPath, stateDir } = await makeBaseCwd('agent-claude-missing-env-file-');
+    const { cwd, skillsPath, stateDir, claudeBinary } = await makeBaseCwd('agent-claude-missing-env-file-');
     const stdout = captureWritable();
     const stderr = captureWritable();
     const code = await runClaudeLauncher(
-      ['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--print-config'],
+      withFakeClaudeBinary(['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--print-config'], claudeBinary),
       {
         stdout: stdout.stream,
         stderr: stderr.stream,
@@ -721,7 +755,7 @@ describe('buildClaudeEnvelope append-prompt wiring', () => {
   });
 
   it('--no-append-system-prompt short-circuits CLI, env, and convention sources to "none"', async () => {
-    const { cwd, skillsPath, stateDir } = await makeBaseCwd('agent-claude-no-append-');
+    const { cwd, skillsPath, stateDir, claudeBinary } = await makeBaseCwd('agent-claude-no-append-');
     await mkdir(join(cwd, '.agents', 'orchestrator'), { recursive: true });
     await writeFile(join(cwd, CONVENTION_APPEND_PROMPT_RELATIVE_PATH), 'project default\n');
     const cliFile = join(cwd, 'cli.md');
@@ -731,7 +765,7 @@ describe('buildClaudeEnvelope append-prompt wiring', () => {
     const stdout = captureWritable();
     const stderr = captureWritable();
     const code = await runClaudeLauncher(
-      ['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--no-append-system-prompt', '--append-system-prompt', 'cli inline', '--print-config'],
+      withFakeClaudeBinary(['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--no-append-system-prompt', '--append-system-prompt', 'cli inline', '--print-config'], claudeBinary),
       {
         stdout: stdout.stream,
         stderr: stderr.stream,
@@ -751,7 +785,7 @@ describe('buildClaudeEnvelope append-prompt wiring', () => {
   });
 
   it('non-regular convention file (symlink) is refused and surfaces the lstat skip notice exactly once via runClaudeLauncher', async () => {
-    const { cwd, skillsPath, stateDir } = await makeBaseCwd('agent-claude-convention-symlink-');
+    const { cwd, skillsPath, stateDir, claudeBinary } = await makeBaseCwd('agent-claude-convention-symlink-');
     const sensitive = join(cwd, 'sensitive.txt');
     await writeFile(sensitive, 'do-not-load');
     await mkdir(join(cwd, '.agents', 'orchestrator'), { recursive: true });
@@ -759,7 +793,7 @@ describe('buildClaudeEnvelope append-prompt wiring', () => {
     const stdout = captureWritable();
     const stderr = captureWritable();
     const code = await runClaudeLauncher(
-      ['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--print-config'],
+      withFakeClaudeBinary(['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--print-config'], claudeBinary),
       { stdout: stdout.stream, stderr: stderr.stream, env: { AGENT_ORCHESTRATOR_BIN: '/opt/agent-orchestrator', AGENT_ORCHESTRATOR_HOME: join(cwd, 'home') } },
     );
     assert.equal(code, 0);
@@ -771,12 +805,12 @@ describe('buildClaudeEnvelope append-prompt wiring', () => {
   });
 
   it('non-regular convention file (directory) is refused and surfaces the lstat skip notice exactly once', async () => {
-    const { cwd, skillsPath, stateDir } = await makeBaseCwd('agent-claude-convention-dir-');
+    const { cwd, skillsPath, stateDir, claudeBinary } = await makeBaseCwd('agent-claude-convention-dir-');
     await mkdir(join(cwd, CONVENTION_APPEND_PROMPT_RELATIVE_PATH), { recursive: true });
     const stdout = captureWritable();
     const stderr = captureWritable();
     const code = await runClaudeLauncher(
-      ['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--print-config'],
+      withFakeClaudeBinary(['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--print-config'], claudeBinary),
       { stdout: stdout.stream, stderr: stderr.stream, env: { AGENT_ORCHESTRATOR_BIN: '/opt/agent-orchestrator', AGENT_ORCHESTRATOR_HOME: join(cwd, 'home') } },
     );
     assert.equal(code, 0);
@@ -785,7 +819,7 @@ describe('buildClaudeEnvelope append-prompt wiring', () => {
   });
 
   it('CLI-named symlink is read as-is (not refused by the lstat guard, which is convention-only)', async () => {
-    const { cwd, skillsPath, stateDir } = await makeBaseCwd('agent-claude-cli-symlink-');
+    const { cwd, skillsPath, stateDir, claudeBinary } = await makeBaseCwd('agent-claude-cli-symlink-');
     const target = join(cwd, 'prompt-target.md');
     await writeFile(target, 'linked supervisor text\n');
     const linkPath = join(cwd, 'prompt-link.md');
@@ -793,7 +827,7 @@ describe('buildClaudeEnvelope append-prompt wiring', () => {
     const stdout = captureWritable();
     const stderr = captureWritable();
     const code = await runClaudeLauncher(
-      ['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--append-system-prompt-file', 'prompt-link.md', '--print-config'],
+      withFakeClaudeBinary(['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--append-system-prompt-file', 'prompt-link.md', '--print-config'], claudeBinary),
       { stdout: stdout.stream, stderr: stderr.stream, env: { AGENT_ORCHESTRATOR_BIN: '/opt/agent-orchestrator', AGENT_ORCHESTRATOR_HOME: join(cwd, 'home') } },
     );
     assert.equal(code, 0);
@@ -805,13 +839,13 @@ describe('buildClaudeEnvelope append-prompt wiring', () => {
   });
 
   it('--print-config emits the source line with an (empty) annotation when text is whitespace-only', async () => {
-    const { cwd, skillsPath, stateDir } = await makeBaseCwd('agent-claude-empty-text-');
+    const { cwd, skillsPath, stateDir, claudeBinary } = await makeBaseCwd('agent-claude-empty-text-');
     const emptyFile = join(cwd, 'empty.md');
     await writeFile(emptyFile, '   \n\t  \n');
     const stdout = captureWritable();
     const stderr = captureWritable();
     const code = await runClaudeLauncher(
-      ['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--append-system-prompt-file', 'empty.md', '--print-config'],
+      withFakeClaudeBinary(['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--append-system-prompt-file', 'empty.md', '--print-config'], claudeBinary),
       { stdout: stdout.stream, stderr: stderr.stream, env: { AGENT_ORCHESTRATOR_BIN: '/opt/agent-orchestrator', AGENT_ORCHESTRATOR_HOME: join(cwd, 'home') } },
     );
     assert.equal(code, 0);
@@ -823,13 +857,13 @@ describe('buildClaudeEnvelope append-prompt wiring', () => {
   });
 
   it('oversize CLI file fails the launch with the byte-cap message naming the source and path', async () => {
-    const { cwd, skillsPath, stateDir } = await makeBaseCwd('agent-claude-oversize-');
+    const { cwd, skillsPath, stateDir, claudeBinary } = await makeBaseCwd('agent-claude-oversize-');
     const big = join(cwd, 'big.md');
     await writeFile(big, Buffer.alloc(SUPERVISOR_APPEND_PROMPT_BYTE_CAP + 1, 0x61));
     const stdout = captureWritable();
     const stderr = captureWritable();
     const code = await runClaudeLauncher(
-      ['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--append-system-prompt-file', 'big.md', '--print-config'],
+      withFakeClaudeBinary(['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--append-system-prompt-file', 'big.md', '--print-config'], claudeBinary),
       { stdout: stdout.stream, stderr: stderr.stream, env: { AGENT_ORCHESTRATOR_BIN: '/opt/agent-orchestrator', AGENT_ORCHESTRATOR_HOME: join(cwd, 'home') } },
     );
     assert.equal(code, 1);
@@ -840,11 +874,11 @@ describe('buildClaudeEnvelope append-prompt wiring', () => {
   });
 
   it('no append source emits the # user system prompt source line with the none sentinel in --print-config', async () => {
-    const { cwd, skillsPath, stateDir } = await makeBaseCwd('agent-claude-print-none-');
+    const { cwd, skillsPath, stateDir, claudeBinary } = await makeBaseCwd('agent-claude-print-none-');
     const stdout = captureWritable();
     const stderr = captureWritable();
     const code = await runClaudeLauncher(
-      ['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--print-config'],
+      withFakeClaudeBinary(['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--print-config'], claudeBinary),
       { stdout: stdout.stream, stderr: stderr.stream, env: { AGENT_ORCHESTRATOR_BIN: '/opt/agent-orchestrator', AGENT_ORCHESTRATOR_HOME: join(cwd, 'home') } },
     );
     assert.equal(code, 0);
@@ -855,11 +889,11 @@ describe('buildClaudeEnvelope append-prompt wiring', () => {
   });
 
   it('cli-inline wins over a missing AGENT_ORCHESTRATOR_CLAUDE_APPEND_SYSTEM_PROMPT_FILE: preempted file is never read', async () => {
-    const { cwd, skillsPath, stateDir } = await makeBaseCwd('agent-claude-preempt-missing-env-file-');
+    const { cwd, skillsPath, stateDir, claudeBinary } = await makeBaseCwd('agent-claude-preempt-missing-env-file-');
     const stdout = captureWritable();
     const stderr = captureWritable();
     const code = await runClaudeLauncher(
-      ['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--append-system-prompt', 'cli wins', '--print-config'],
+      withFakeClaudeBinary(['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--append-system-prompt', 'cli wins', '--print-config'], claudeBinary),
       {
         stdout: stdout.stream,
         stderr: stderr.stream,
@@ -878,13 +912,13 @@ describe('buildClaudeEnvelope append-prompt wiring', () => {
   });
 
   it('cli-inline wins over an oversize AGENT_ORCHESTRATOR_CLAUDE_APPEND_SYSTEM_PROMPT_FILE: preempted file is never read', async () => {
-    const { cwd, skillsPath, stateDir } = await makeBaseCwd('agent-claude-preempt-oversize-env-file-');
+    const { cwd, skillsPath, stateDir, claudeBinary } = await makeBaseCwd('agent-claude-preempt-oversize-env-file-');
     const oversize = join(cwd, 'oversize.md');
     await writeFile(oversize, Buffer.alloc(SUPERVISOR_APPEND_PROMPT_BYTE_CAP + 4096, 0x61));
     const stdout = captureWritable();
     const stderr = captureWritable();
     const code = await runClaudeLauncher(
-      ['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--append-system-prompt', 'cli wins', '--print-config'],
+      withFakeClaudeBinary(['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--append-system-prompt', 'cli wins', '--print-config'], claudeBinary),
       {
         stdout: stdout.stream,
         stderr: stderr.stream,
@@ -901,7 +935,7 @@ describe('buildClaudeEnvelope append-prompt wiring', () => {
 
   it('cli-inline wins over an unreadable convention file: convention body is never read (precedence-skip notice fires, the bad bytes do not)', async () => {
     if (process.getuid?.() === 0) return; // root bypasses permission bits; skip
-    const { cwd, skillsPath, stateDir } = await makeBaseCwd('agent-claude-preempt-unreadable-convention-');
+    const { cwd, skillsPath, stateDir, claudeBinary } = await makeBaseCwd('agent-claude-preempt-unreadable-convention-');
     await mkdir(join(cwd, '.agents', 'orchestrator'), { recursive: true });
     const conventionPath = join(cwd, CONVENTION_APPEND_PROMPT_RELATIVE_PATH);
     await writeFile(conventionPath, 'convention body');
@@ -911,7 +945,7 @@ describe('buildClaudeEnvelope append-prompt wiring', () => {
       const stdout = captureWritable();
       const stderr = captureWritable();
       const code = await runClaudeLauncher(
-        ['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--append-system-prompt', 'cli wins', '--print-config'],
+        withFakeClaudeBinary(['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--append-system-prompt', 'cli wins', '--print-config'], claudeBinary),
         { stdout: stdout.stream, stderr: stderr.stream, env: { AGENT_ORCHESTRATOR_BIN: '/opt/agent-orchestrator', AGENT_ORCHESTRATOR_HOME: join(cwd, 'home') } },
       );
       assert.equal(code, 0, 'cli-inline wins; the preempted convention file must not be read');
@@ -924,13 +958,13 @@ describe('buildClaudeEnvelope append-prompt wiring', () => {
   });
 
   it('--no-append-system-prompt suppresses cli-file only (no parse error, source=none)', async () => {
-    const { cwd, skillsPath, stateDir } = await makeBaseCwd('agent-claude-no-suppress-cli-file-');
+    const { cwd, skillsPath, stateDir, claudeBinary } = await makeBaseCwd('agent-claude-no-suppress-cli-file-');
     const cliFile = join(cwd, 'cli.md');
     await writeFile(cliFile, 'cli file body');
     const stdout = captureWritable();
     const stderr = captureWritable();
     const code = await runClaudeLauncher(
-      ['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--no-append-system-prompt', '--append-system-prompt-file', 'cli.md', '--print-config'],
+      withFakeClaudeBinary(['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--no-append-system-prompt', '--append-system-prompt-file', 'cli.md', '--print-config'], claudeBinary),
       { stdout: stdout.stream, stderr: stderr.stream, env: { AGENT_ORCHESTRATOR_BIN: '/opt/agent-orchestrator', AGENT_ORCHESTRATOR_HOME: join(cwd, 'home') } },
     );
     assert.equal(code, 0);
@@ -939,11 +973,11 @@ describe('buildClaudeEnvelope append-prompt wiring', () => {
   });
 
   it('--no-append-system-prompt suppresses env-inline only', async () => {
-    const { cwd, skillsPath, stateDir } = await makeBaseCwd('agent-claude-no-suppress-env-inline-');
+    const { cwd, skillsPath, stateDir, claudeBinary } = await makeBaseCwd('agent-claude-no-suppress-env-inline-');
     const stdout = captureWritable();
     const stderr = captureWritable();
     const code = await runClaudeLauncher(
-      ['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--no-append-system-prompt', '--print-config'],
+      withFakeClaudeBinary(['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--no-append-system-prompt', '--print-config'], claudeBinary),
       {
         stdout: stdout.stream,
         stderr: stderr.stream,
@@ -960,13 +994,13 @@ describe('buildClaudeEnvelope append-prompt wiring', () => {
   });
 
   it('--no-append-system-prompt suppresses env-file only', async () => {
-    const { cwd, skillsPath, stateDir } = await makeBaseCwd('agent-claude-no-suppress-env-file-');
+    const { cwd, skillsPath, stateDir, claudeBinary } = await makeBaseCwd('agent-claude-no-suppress-env-file-');
     const envFile = join(cwd, 'env.md');
     await writeFile(envFile, 'env file body');
     const stdout = captureWritable();
     const stderr = captureWritable();
     const code = await runClaudeLauncher(
-      ['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--no-append-system-prompt', '--print-config'],
+      withFakeClaudeBinary(['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--no-append-system-prompt', '--print-config'], claudeBinary),
       {
         stdout: stdout.stream,
         stderr: stderr.stream,
@@ -983,13 +1017,13 @@ describe('buildClaudeEnvelope append-prompt wiring', () => {
   });
 
   it('--no-append-system-prompt suppresses a present convention file (no stderr, source=none, body not read)', async () => {
-    const { cwd, skillsPath, stateDir } = await makeBaseCwd('agent-claude-no-suppress-convention-');
+    const { cwd, skillsPath, stateDir, claudeBinary } = await makeBaseCwd('agent-claude-no-suppress-convention-');
     await mkdir(join(cwd, '.agents', 'orchestrator'), { recursive: true });
     await writeFile(join(cwd, CONVENTION_APPEND_PROMPT_RELATIVE_PATH), 'convention body');
     const stdout = captureWritable();
     const stderr = captureWritable();
     const code = await runClaudeLauncher(
-      ['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--no-append-system-prompt', '--print-config'],
+      withFakeClaudeBinary(['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--no-append-system-prompt', '--print-config'], claudeBinary),
       { stdout: stdout.stream, stderr: stderr.stream, env: { AGENT_ORCHESTRATOR_BIN: '/opt/agent-orchestrator', AGENT_ORCHESTRATOR_HOME: join(cwd, 'home') } },
     );
     assert.equal(code, 0);
@@ -999,13 +1033,13 @@ describe('buildClaudeEnvelope append-prompt wiring', () => {
   });
 
   it('--no-append-system-prompt overrides the CLI inline+file conflict (escape hatch wins)', async () => {
-    const { cwd, skillsPath, stateDir } = await makeBaseCwd('agent-claude-no-escape-cli-conflict-');
+    const { cwd, skillsPath, stateDir, claudeBinary } = await makeBaseCwd('agent-claude-no-escape-cli-conflict-');
     const cliFile = join(cwd, 'cli.md');
     await writeFile(cliFile, 'cli file body');
     const stdout = captureWritable();
     const stderr = captureWritable();
     const code = await runClaudeLauncher(
-      ['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--no-append-system-prompt', '--append-system-prompt', 'inline', '--append-system-prompt-file', 'cli.md', '--print-config'],
+      withFakeClaudeBinary(['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--no-append-system-prompt', '--append-system-prompt', 'inline', '--append-system-prompt-file', 'cli.md', '--print-config'], claudeBinary),
       { stdout: stdout.stream, stderr: stderr.stream, env: { AGENT_ORCHESTRATOR_BIN: '/opt/agent-orchestrator', AGENT_ORCHESTRATOR_HOME: join(cwd, 'home') } },
     );
     assert.equal(code, 0);
@@ -1013,11 +1047,11 @@ describe('buildClaudeEnvelope append-prompt wiring', () => {
   });
 
   it('--no-append-system-prompt overrides the env inline+file conflict (escape hatch wins)', async () => {
-    const { cwd, skillsPath, stateDir } = await makeBaseCwd('agent-claude-no-escape-env-conflict-');
+    const { cwd, skillsPath, stateDir, claudeBinary } = await makeBaseCwd('agent-claude-no-escape-env-conflict-');
     const stdout = captureWritable();
     const stderr = captureWritable();
     const code = await runClaudeLauncher(
-      ['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--no-append-system-prompt', '--print-config'],
+      withFakeClaudeBinary(['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--no-append-system-prompt', '--print-config'], claudeBinary),
       {
         stdout: stdout.stream,
         stderr: stderr.stream,
@@ -1034,7 +1068,7 @@ describe('buildClaudeEnvelope append-prompt wiring', () => {
   });
 
   it('env-named symlink is read as-is (lstat guard is convention-only)', async () => {
-    const { cwd, skillsPath, stateDir } = await makeBaseCwd('agent-claude-env-symlink-');
+    const { cwd, skillsPath, stateDir, claudeBinary } = await makeBaseCwd('agent-claude-env-symlink-');
     const target = join(cwd, 'env-target.md');
     await writeFile(target, 'env-supervisor text via symlink\n');
     const linkPath = join(cwd, 'env-link.md');
@@ -1042,7 +1076,7 @@ describe('buildClaudeEnvelope append-prompt wiring', () => {
     const stdout = captureWritable();
     const stderr = captureWritable();
     const code = await runClaudeLauncher(
-      ['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--print-config'],
+      withFakeClaudeBinary(['--cwd', cwd, '--skills', skillsPath, '--state-dir', stateDir, '--print-config'], claudeBinary),
       {
         stdout: stdout.stream,
         stderr: stderr.stream,
