@@ -88,9 +88,74 @@ agent-orchestrator runs
 agent-orchestrator runs --json
 agent-orchestrator runs --json --prompts
 agent-orchestrator watch
+agent-orchestrator watch --recent-events 300
 ```
 
-`watch` opens an interactive terminal dashboard. Detail views include raw prompt, recent activity, model/source, session-resume audit state, artifact paths, and size indicators.
+`watch` opens an Ink-based interactive terminal dashboard designed for SSH and
+ordinary terminal panes. The default view focuses on live orchestrator sessions
+registered with the daemon. Each live orchestrator is shown as a collapsible
+group in the left sidebar, and expanded groups list worker conversations rather
+than raw run records. Completed workers remain visible while their orchestrator
+is live. When an orchestrator exits or reports `session_ended`, it leaves the
+live list and remains available from the archive view.
+
+The main pane has two deliberately different surfaces:
+
+- Selecting an orchestrator opens an overview dashboard with a double border,
+  worker counts, workspace context, elapsed session time, last-update age, and
+  one compact status row per named worker.
+- Selecting a worker opens a `Worker Timeline` chat view. Every run round has a
+  colored left rail, so the run start marker, supervisor prompt, tool activity,
+  worker messages, and run end marker are visually grouped.
+
+- Oldest loaded content appears above newer content, with the latest content at
+  the bottom like a chat history. Short transcripts are bottom-aligned in the
+  pane instead of floating at the top.
+- The view follows new output automatically until you scroll up.
+- The TUI explicitly enters raw input mode and decodes terminal escape
+  sequences itself. Mouse wheel scrolling is enabled in terminals that report
+  SGR, urxvt, or legacy X10 mouse wheel events, with each wheel tick moving one
+  rendered transcript row. Press `m` to release terminal mouse capture for
+  native text selection in the transcript pane, and press `m` again to restore
+  wheel scrolling.
+- The main pane shows a scroll indicator and a `top`/percentage/`bottom` label
+  so the current viewport position is visible.
+- Scrollback is independent of terminal height; `--recent-events <n>` controls
+  how many worker events are loaded per run.
+- Initial worker prompts and follow-up child runs are folded into one worker
+  conversation using parent run links and backend session ids. Follow-ups render
+  as `Supervisor -> Worker` turns inside the transcript, followed by distinct
+  `Worker message`, `Tool call`, `Tool result`, `Worker activity`, and
+  `Final response` entries.
+- Run completion status is shown on run boundary markers, not stamped onto old
+  chat messages.
+- Assistant and prompt text is rendered with real terminal Markdown handling
+  for paragraphs, lists, code fences, inline code, headings, links,
+  blockquotes, and tables where practical.
+- Worker timeline prompt, assistant, and final-response text wraps inside the
+  pane rather than being truncated. Source line breaks in Markdown responses
+  are preserved, including final answers. Compact summaries are reserved for
+  the overview and sidebar surfaces.
+- Tool calls and tool results are summarized by tool name, command/status, and
+  concise result or error text. Full raw tool payloads are not dumped by
+  default.
+
+Keyboard controls:
+
+| Key | Action |
+|---|---|
+| `Up` / `Down`, `k` / `j` | Move selection in the sidebar. |
+| `Space` | Collapse or expand the selected orchestrator group. |
+| `Right` / `l` | Expand the selected orchestrator group. |
+| `Left` / `h` | Collapse the selected orchestrator group. |
+| `a` / `Tab` | Toggle between live orchestrators and archive history. |
+| Mouse wheel | Scroll the transcript pane one rendered row at a time when mouse capture is enabled. |
+| `m` | Toggle terminal mouse capture so native text selection can be used. |
+| `u` / `d`, `Ctrl-U` / `Ctrl-D` | Scroll the transcript pane by a half page. |
+| `PageUp` / `PageDown`, `Ctrl-B` / `Ctrl-F` | Scroll the transcript pane by a full page. |
+| `g` / `Home` | Jump to the oldest loaded transcript content. |
+| `G`, `Enter`, `End`, `Ctrl-E` | Return the transcript pane to auto-follow latest output. |
+| `q` / `Ctrl-C` | Quit. |
 
 For readable dashboard labels, pass metadata on `start_run` or `send_followup`:
 

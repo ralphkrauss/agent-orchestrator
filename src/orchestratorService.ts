@@ -1519,6 +1519,10 @@ export class OrchestratorService {
   async getObservabilitySnapshot(params: unknown, context: OrchestratorDispatchContext = {}): Promise<ToolResult> {
     const parsed = GetObservabilitySnapshotInputSchema.safeParse(params);
     if (!parsed.success) return invalidInput(parsed.error.message);
+    const liveOrchestrators = await Promise.all(this.orchestratorRegistry.list().map(async (state) => ({
+      record: state.record,
+      status: computeOrchestratorStatusSnapshot(state, await this.collectOwnedRunSnapshot(state.record.id)),
+    })));
     return wrapOk({
       snapshot: await buildObservabilitySnapshot(this.store, {
         limit: parsed.data.limit,
@@ -1530,6 +1534,7 @@ export class OrchestratorService {
           daemonVersion: getPackageVersion(),
           daemonPid: process.pid,
         }) : null,
+        liveOrchestrators,
       }),
     });
   }

@@ -7,6 +7,8 @@ import {
   type ObservabilityActivity,
   type ObservabilityArtifact,
   type ObservabilityModel,
+  type ObservabilityOrchestratorGroup,
+  type ObservabilityOrchestratorWorker,
   type ObservabilityPrompt,
   type ObservabilityResponse,
   type ObservabilityRun,
@@ -17,6 +19,8 @@ import {
   type ObservabilityWorkspace,
   type RunMeta,
   type RunStatus,
+  type OrchestratorRecord,
+  type OrchestratorStatusSnapshot,
 } from './contract.js';
 import type { RunStore } from './runStore.js';
 
@@ -32,6 +36,12 @@ export interface BuildObservabilitySnapshotOptions {
   recentEventLimit: number;
   daemonPid?: number | null;
   backendStatus?: BackendStatusReport | null;
+  liveOrchestrators?: readonly LiveOrchestratorSnapshot[];
+}
+
+export interface LiveOrchestratorSnapshot {
+  record: OrchestratorRecord;
+  status: OrchestratorStatusSnapshot;
 }
 
 export async function buildObservabilitySnapshot(
@@ -58,12 +68,14 @@ export async function buildObservabilitySnapshot(
   }
 
   const sessions = buildSessions(runs, allMetas);
+  const orchestrators = buildOrchestratorGroups(runs, allMetas, options.liveOrchestrators ?? []);
   return ObservabilitySnapshotSchema.parse({
     generated_at: new Date().toISOString(),
     daemon_pid: options.daemonPid ?? null,
     store_root: store.root,
     sessions,
     runs,
+    orchestrators,
     backend_status: options.backendStatus ?? null,
   });
 }
@@ -282,6 +294,128 @@ function buildWorkspace(root: ObservabilityRun): ObservabilityWorkspace {
   };
 }
 
+function buildOrchestratorGroups(
+  runs: ObservabilityRun[],
+  allMetas: RunMeta[],
+  liveOrchestrators: readonly LiveOrchestratorSnapshot[],
+): ObservabilityOrchestratorGroup[] {
+  const detailedRunsByOrchestrator = new Map<string, ObservabilityRun[]>();
+  for (const run of runs) {
+    const orchestratorId = orchestratorIdFromMetadata(run.run.metadata);
+    if (!orchestratorId) continue;
+    const group = detailedRunsByOrchestrator.get(orchestratorId) ?? [];
+    group.push(run);
+    detailedRunsByOrchestrator.set(orchestratorId, group);
+  }
+
+  const metasByOrchestrator = new Map<string, RunMeta[]>();
+  for (const meta of allMetas) {
+    const orchestratorId = orchestratorIdFromMetadata(meta.metadata);
+    if (!orchestratorId) continue;
+    const group = metasByOrchestrator.get(orchestratorId) ?? [];
+    group.push(meta);
+    metasByOrchestrator.set(orchestratorId, group);
+  }
+
+  const liveIds = new Set(liveOrchestrators.map((orchestrator) => orchestrator.record.id));
+  const liveGroups = liveOrchestrators.map((orchestrator) => {
+    const detailedRuns = sortRunsChronologically(detailedRunsByOrchestrator.get(orchestrator.record.id) ?? []);
+    const metas = metasByOrchestrator.get(orchestrator.record.id) ?? [];
+    const updatedAt = maxIso([
+      orchestrator.record.last_supervisor_event_at,
+      ...detailedRuns.map(latestObservedAt),
+      ...metas.map(latestMetaObservedAt),
+      orchestrator.record.registered_at,
+    ].filter((value): value is string => typeof value === 'string'));
+    return {
+      orchestrator_id: orchestrator.record.id,
+      live: true,
+      client: orchestrator.record.client,
+      label: orchestrator.record.label,
+      cwd: orchestrator.record.cwd,
+      display: orchestrator.record.display,
+      status: orchestrator.status,
+      registered_at: orchestrator.record.registered_at,
+      last_supervisor_event_at: orchestrator.record.last_supervisor_event_at,
+      created_at: orchestrator.record.registered_at,
+      updated_at: updatedAt,
+      worker_count: metas.length,
+      running_count: orchestrator.status.running_child_count,
+      workers: detailedRuns.map(orchestratorWorker),
+    } satisfies ObservabilityOrchestratorGroup;
+  });
+
+  const archiveGroups: ObservabilityOrchestratorGroup[] = [];
+  for (const [orchestratorId, metas] of metasByOrchestrator) {
+    if (liveIds.has(orchestratorId)) continue;
+    const detailedRuns = sortRunsChronologically(detailedRunsByOrchestrator.get(orchestratorId) ?? []);
+    if (detailedRuns.length === 0) continue;
+    archiveGroups.push({
+      orchestrator_id: orchestratorId,
+      live: false,
+      client: null,
+      label: archivedOrchestratorLabel(detailedRuns, orchestratorId),
+      cwd: detailedRuns[0]?.run.cwd ?? metas[0]?.cwd ?? '',
+      display: null,
+      status: null,
+      registered_at: null,
+      last_supervisor_event_at: null,
+      created_at: minIso(metas.map((meta) => meta.created_at)),
+      updated_at: maxIso(metas.map(latestMetaObservedAt)),
+      worker_count: metas.length,
+      running_count: metas.filter((meta) => !isTerminalStatus(meta.status)).length,
+      workers: detailedRuns.map(orchestratorWorker),
+    });
+  }
+
+  return [
+    ...liveGroups.sort((a, b) => b.updated_at.localeCompare(a.updated_at)),
+    ...archiveGroups.sort((a, b) => b.updated_at.localeCompare(a.updated_at)),
+  ];
+}
+
+function orchestratorWorker(run: ObservabilityRun): ObservabilityOrchestratorWorker {
+  return {
+    run_id: run.run.run_id,
+    parent_run_id: run.run.parent_run_id,
+    backend: run.run.backend,
+    status: run.run.status,
+    title: run.prompt.title,
+    summary: run.prompt.summary,
+    preview: run.prompt.preview,
+    model: run.model,
+    settings: run.settings,
+    created_at: run.run.created_at,
+    last_activity_at: latestObservedAt(run),
+  };
+}
+
+function sortRunsChronologically(runs: ObservabilityRun[]): ObservabilityRun[] {
+  return runs.slice().sort((a, b) =>
+    a.run.created_at.localeCompare(b.run.created_at)
+    || a.run.run_id.localeCompare(b.run.run_id));
+}
+
+function archivedOrchestratorLabel(runs: ObservabilityRun[], orchestratorId: string): string {
+  const titles = runs.map((run) => run.run.display.session_title ?? run.prompt.title).filter((title) => title.trim());
+  const title = lastNonNull(titles);
+  return title ?? `orchestrator ${orchestratorId.slice(0, 8)}`;
+}
+
+function orchestratorIdFromMetadata(metadata: Record<string, unknown> | undefined): string | null {
+  const value = metadata?.orchestrator_id;
+  return typeof value === 'string' && value.trim() ? value : null;
+}
+
+function latestMetaObservedAt(meta: RunMeta): string {
+  return maxIso([
+    meta.last_activity_at,
+    meta.finished_at,
+    meta.started_at,
+    meta.created_at,
+  ].filter((value): value is string => typeof value === 'string'));
+}
+
 function compactFolder(cwd: string): string {
   const leaf = basename(cwd);
   const parent = basename(dirname(cwd));
@@ -431,7 +565,7 @@ function lastAssistantMessage(events: ObservabilityActivity['recent_events']): s
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]!;
     if (event.type !== 'assistant_message') continue;
-    const text = compactText(stringFromRecord(event.payload, 'text') ?? stringFromRecord(event.payload, 'message') ?? '', 4000);
+    const text = stringFromRecord(event.payload, 'text') ?? stringFromRecord(event.payload, 'message') ?? '';
     if (text) return text;
   }
   return null;
@@ -508,4 +642,8 @@ function lastNonNull<T>(values: (T | null | undefined)[]): T | null {
 
 function maxIso(values: string[]): string {
   return values.reduce((current, value) => value.localeCompare(current) > 0 ? value : current, values[0] ?? new Date(0).toISOString());
+}
+
+function minIso(values: string[]): string {
+  return values.reduce((current, value) => value.localeCompare(current) < 0 ? value : current, values[0] ?? new Date(0).toISOString());
 }

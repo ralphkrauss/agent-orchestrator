@@ -591,7 +591,7 @@ export type PruneRunsInput = z.input<typeof PruneRunsInputSchema>;
 export const GetObservabilitySnapshotInputSchema = z.object({
   limit: z.number().int().positive().max(500).optional().default(50),
   include_prompts: z.boolean().optional().default(false),
-  recent_event_limit: z.number().int().nonnegative().max(50).optional().default(5),
+  recent_event_limit: z.number().int().nonnegative().max(500).optional().default(5),
   diagnostics: z.boolean().optional().default(false),
 });
 export type GetObservabilitySnapshotInput = z.input<typeof GetObservabilitySnapshotInputSchema>;
@@ -724,12 +724,57 @@ export const ObservabilitySessionSchema = z.object({
 });
 export type ObservabilitySession = z.infer<typeof ObservabilitySessionSchema>;
 
+export const ObservabilityOrchestratorWorkerSchema = z.object({
+  run_id: z.string(),
+  parent_run_id: z.string().nullable(),
+  backend: BackendSchema,
+  status: RunStatusSchema,
+  title: z.string(),
+  summary: z.string().nullable(),
+  preview: z.string(),
+  model: ObservabilityModelSchema,
+  settings: ObservabilityRunSettingsSchema,
+  created_at: z.string(),
+  last_activity_at: z.string().nullable(),
+});
+export type ObservabilityOrchestratorWorker = z.infer<typeof ObservabilityOrchestratorWorkerSchema>;
+
+export const ObservabilityOrchestratorGroupSchema = z.object({
+  orchestrator_id: z.string(),
+  live: z.boolean(),
+  client: z.enum(['claude']).nullable(),
+  label: z.string(),
+  cwd: z.string(),
+  display: z.object({
+    tmux_pane: z.string().nullable().optional().default(null),
+    tmux_window_id: z.string().nullable().optional().default(null),
+    base_title: z.string().nullable().optional().default(null),
+    host: z.string().nullable().optional().default(null),
+  }).nullable(),
+  status: z.object({
+    state: z.enum(['in_progress', 'waiting_for_user', 'idle', 'attention', 'stale']),
+    supervisor_turn_active: z.boolean(),
+    waiting_for_user: z.boolean(),
+    running_child_count: z.number().int().nonnegative(),
+    failed_unacked_count: z.number().int().nonnegative(),
+  }).nullable(),
+  registered_at: z.string().nullable(),
+  last_supervisor_event_at: z.string().nullable(),
+  created_at: z.string(),
+  updated_at: z.string(),
+  worker_count: z.number().int().nonnegative(),
+  running_count: z.number().int().nonnegative(),
+  workers: z.array(ObservabilityOrchestratorWorkerSchema),
+});
+export type ObservabilityOrchestratorGroup = z.infer<typeof ObservabilityOrchestratorGroupSchema>;
+
 export const ObservabilitySnapshotSchema = z.object({
   generated_at: z.string(),
   daemon_pid: z.number().int().nullable(),
   store_root: z.string(),
   sessions: z.array(ObservabilitySessionSchema),
   runs: z.array(ObservabilityRunSchema),
+  orchestrators: z.array(ObservabilityOrchestratorGroupSchema).optional().default([]),
   backend_status: BackendStatusReportSchema.nullable().optional().default(null),
 });
 export type ObservabilitySnapshot = z.infer<typeof ObservabilitySnapshotSchema>;

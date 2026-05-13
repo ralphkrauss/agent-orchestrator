@@ -11,13 +11,7 @@ import { formatVersionOutput, getPackageVersion } from '../packageMetadata.js';
 import { RunStore, type PruneRunsResult } from '../runStore.js';
 import { buildObservabilitySnapshot } from '../observability.js';
 import { getBackendStatus } from '../diagnostics.js';
-import {
-  clampDashboardState,
-  formatSnapshot,
-  renderDashboard,
-  type DashboardState,
-  type SnapshotEnvelope,
-} from './observabilityFormat.js';
+import { formatSnapshot, type SnapshotEnvelope } from './observabilityFormat.js';
 import type { ObservabilitySnapshot, OrchestratorError } from '../contract.js';
 
 const paths = daemonPaths();
@@ -74,8 +68,8 @@ export async function runDaemonCli(argv: readonly string[] = process.argv.slice(
 function daemonHelp(): string {
   return [
     'Usage:',
-    '  agent-orchestrator start | stop [--force] | restart [--force] | status [--verbose|--json] | runs [--json] [--prompts] | watch [--interval-ms <ms>] [--limit <n>] | prune --older-than-days <days> [--dry-run] | auth ...',
-    '  agent-orchestrator-daemon start | stop [--force] | restart [--force] | status [--verbose|--json] | runs [--json] [--prompts] | watch [--interval-ms <ms>] [--limit <n>] | prune --older-than-days <days> [--dry-run] | auth ...',
+    '  agent-orchestrator start | stop [--force] | restart [--force] | status [--verbose|--json] | runs [--json] [--prompts] | watch [--interval-ms <ms>] [--limit <n>] [--recent-events <n>] | prune --older-than-days <days> [--dry-run] | auth ...',
+    '  agent-orchestrator-daemon start | stop [--force] | restart [--force] | status [--verbose|--json] | runs [--json] [--prompts] | watch [--interval-ms <ms>] [--limit <n>] [--recent-events <n>] | prune --older-than-days <days> [--dry-run] | auth ...',
     '  agent-orchestrator-daemon --version [--json]',
     '',
   ].join('\n');
@@ -179,41 +173,12 @@ async function runs(argv: readonly string[]): Promise<void> {
 
 async function watch(argv: readonly string[]): Promise<void> {
   const intervalMs = readPositiveIntOption(argv, '--interval-ms') ?? 1_000;
-  const options = snapshotOptionsFromArgs(argv, { includePrompts: true });
-  if (!process.stdout.isTTY || !process.stdin.isTTY) {
-    process.stdout.write(formatSnapshot(await readSnapshotFromDaemonOrStore(options)));
-    return;
-  }
-
-  let envelope = await readSnapshotFromDaemonOrStore(options);
-  let state: DashboardState = { view: 'sessions', selectedSession: 0, selectedPrompt: 0 };
-  let stopped = false;
-  let refreshTimer: NodeJS.Timeout | null = null;
-  let resolveDone: (() => void) | null = null;
-
-  const finish = () => {
-    if (stopped) return;
-    stopped = true;
-    if (refreshTimer) clearTimeout(refreshTimer);
-    process.stdin.off('data', onKey);
-    if (process.stdin.isTTY) process.stdin.setRawMode(false);
-    process.stdin.pause();
-    process.stdout.write('\x1b[?25h\x1b[0m\n');
-    resolveDone?.();
-  };
-
-  const repaint = () => {
-    state = clampDashboardState(state, envelope.snapshot);
-    process.stdout.write('\x1b[?25l\x1b[H\x1b[2J');
-    process.stdout.write(renderDashboard(envelope, state, process.stdout.columns ?? 100, process.stdout.rows ?? 30));
-  };
-
-  const refresh = async () => {
-    if (stopped) return;
+  const options = snapshotOptionsFromArgs(argv, { includePrompts: true, limit: 200, recentEventLimit: 200 });
+  const readWatchSnapshot = async () => {
     try {
-      envelope = await readSnapshotFromDaemonOrStore(options);
+      return await readSnapshotFromDaemonOrStore(options);
     } catch (error) {
-      envelope = {
+      return {
         running: false,
         snapshot: {
           generated_at: new Date().toISOString(),
@@ -221,55 +186,28 @@ async function watch(argv: readonly string[]): Promise<void> {
           store_root: paths.home,
           sessions: [],
           runs: [],
+          orchestrators: [],
           backend_status: null,
         },
         error: error instanceof Error ? error.message : String(error),
-      };
-    }
-    if (stopped) return;
-    repaint();
-    refreshTimer = setTimeout(refresh, intervalMs);
-  };
-
-  const onKey = (chunk: Buffer) => {
-    const key = chunk.toString('utf8');
-    if (key === '\u0003' || key === 'q') {
-      finish();
-      return;
-    }
-    if (key === '\x1b[A') {
-      if (state.view === 'sessions') state.selectedSession -= 1;
-      if (state.view === 'prompts' || state.view === 'detail') state.selectedPrompt -= 1;
-      repaint();
-      return;
-    }
-    if (key === '\x1b[B') {
-      if (state.view === 'sessions') state.selectedSession += 1;
-      if (state.view === 'prompts' || state.view === 'detail') state.selectedPrompt += 1;
-      repaint();
-      return;
-    }
-    if (key === '\r' || key === '\n') {
-      if (state.view === 'sessions') state.view = 'prompts';
-      else if (state.view === 'prompts') state.view = 'detail';
-      repaint();
-      return;
-    }
-    if (key === '\x7f' || key === '\x1b') {
-      if (state.view === 'detail') state.view = 'prompts';
-      else if (state.view === 'prompts') state.view = 'sessions';
-      repaint();
+      } satisfies SnapshotEnvelope;
     }
   };
 
-  process.stdin.setRawMode(true);
-  process.stdin.resume();
-  process.stdin.on('data', onKey);
-  process.once('SIGINT', finish);
-  process.once('SIGTERM', finish);
-  const done = new Promise<void>((resolve) => { resolveDone = resolve; });
-  await refresh();
-  await done;
+  if (!process.stdout.isTTY || !process.stdin.isTTY) {
+    process.stdout.write(formatSnapshot(await readWatchSnapshot()));
+    return;
+  }
+
+  const { runWatchTui } = await import('./watchApp.js');
+  await runWatchTui({
+    initialEnvelope: await readWatchSnapshot(),
+    readSnapshot: readWatchSnapshot,
+    intervalMs,
+    stdin: process.stdin,
+    stdout: process.stdout,
+    stderr: process.stderr,
+  });
 }
 
 async function prune(argv: readonly string[]): Promise<void> {
