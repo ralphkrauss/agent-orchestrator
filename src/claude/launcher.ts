@@ -16,6 +16,7 @@ import { OrchestratorRecordSchema, type OrchestratorDisplay, type OrchestratorRe
 import { resolveBinary } from '../backend/common.js';
 import { getBackendStatus } from '../diagnostics.js';
 import { ensureSecureRoot, resolveStoreRoot } from '../runStore.js';
+import { spawnDaemonProcess } from '../daemon/spawnDaemon.js';
 import { defaultWorkerProfilesFile } from '../workerRouting.js';
 import {
   createWorkerCapabilityCatalog,
@@ -394,12 +395,7 @@ async function ensureDaemonStartedBestEffort(paths: DaemonPaths, env: NodeJS.Pro
   if (await pingDaemon(paths.ipc.path)) return;
 
   const daemonMain = resolve(dirname(fileURLToPath(import.meta.url)), '../daemon/daemonMain.js');
-  const child = spawn(process.execPath, [daemonMain], {
-    detached: true,
-    stdio: 'ignore',
-    env: { ...process.env, ...env, AGENT_ORCHESTRATOR_HOME: paths.home },
-  });
-  child.unref();
+  spawnDaemonProcess(paths, daemonMain, { ...process.env, ...env });
 
   const deadline = Date.now() + 2_000;
   while (Date.now() < deadline) {

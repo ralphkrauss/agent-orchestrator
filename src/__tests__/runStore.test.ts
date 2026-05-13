@@ -80,6 +80,39 @@ describe('RunStore', () => {
     assert.deepStrictEqual(events.map((event) => event.seq), Array.from({ length: 25 }, (_, index) => index + 1));
   });
 
+  it('summarizes oversized event lines without parsing their full payloads', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-store-'));
+    const store = new RunStore(root);
+    const run = await store.createRun({ backend: 'codex', cwd: root });
+    await store.appendEvent(run.run_id, { type: 'assistant_message', payload: { text: 'x'.repeat(90_000) } });
+
+    const page = await store.readEvents(run.run_id, 0, 10);
+    assert.equal(page.events.length, 1);
+    assert.equal(page.events[0]?.seq, 1);
+    assert.equal(page.events[0]?.type, 'assistant_message');
+    assert.equal((page.events[0]?.payload as Record<string, unknown>).truncated, true);
+
+    const summary = await store.readEventSummary(run.run_id, 1);
+    assert.equal(summary.event_count, 1);
+    assert.equal(summary.last_event?.seq, 1);
+    assert.equal((summary.recent_events[0]?.payload as Record<string, unknown>).truncated, true);
+  });
+
+  it('recovers terminal worker results from the bounded stdout tail', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-store-'));
+    const store = new RunStore(root);
+    const run = await store.createRun({ backend: 'claude', cwd: root });
+    await writeFile(
+      store.stdoutPath(run.run_id),
+      `${'noise\n'.repeat(120_000)}${JSON.stringify({ type: 'result', terminal_reason: 'completed', result: 'finished from stdout' })}\n`,
+    );
+
+    const result = await store.recoverTerminalResultFromStdout(run.run_id);
+    assert.equal(result?.status, 'completed');
+    assert.equal(result?.summary, 'finished from stdout');
+    assert.ok(result?.artifacts.some((artifact) => artifact.name === 'stdout.log'));
+  });
+
   it('paginates larger event logs and prunes only old terminal runs', async () => {
     const root = await mkdtemp(join(tmpdir(), 'agent-store-'));
     const store = new RunStore(root);

@@ -1,6 +1,6 @@
 {
   "name": "@ralphkrauss/agent-orchestrator",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Local MCP orchestrator for supervising Codex, Claude, Cursor, and OpenCode worker runs.",
   "type": "module",
   "main": "dist/index.js",

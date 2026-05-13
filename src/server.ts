@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { spawn } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -17,6 +16,7 @@ import { ipcTimeoutForTool } from './toolTimeout.js';
 import { tools } from './mcpTools.js';
 import { createNotificationPushTick, parseNotificationPollIntervalMs } from './notificationPushPoller.js';
 import { enforceWritableProfilesPolicy, harnessPolicyContext } from './serverPolicy.js';
+import { spawnDaemonProcess } from './daemon/spawnDaemon.js';
 
 const paths = daemonPaths();
 const client = new IpcClient(paths.ipc.path);
@@ -80,12 +80,7 @@ async function ensureDaemon(options: { allowVersionMismatch?: boolean } = {}): P
   }
 
   const daemonMain = resolve(dirname(fileURLToPath(import.meta.url)), 'daemon/daemonMain.js');
-  const child = spawn(process.execPath, [daemonMain], {
-    detached: true,
-    stdio: 'ignore',
-    env: process.env,
-  });
-  child.unref();
+  spawnDaemonProcess(paths, daemonMain);
 
   const deadline = Date.now() + 2_000;
   while (Date.now() < deadline) {

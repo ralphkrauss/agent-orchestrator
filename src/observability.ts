@@ -58,7 +58,7 @@ export async function buildObservabilitySnapshot(
   const metas = allMetas.slice(0, options.limit);
   const runs: ObservabilityRun[] = [];
   for (const meta of metas) {
-    const eventSummary = await store.readEventSummary(meta.run_id, Math.max(options.recentEventLimit, 20));
+    const eventSummary = await store.readEventSummary(meta.run_id, options.recentEventLimit);
     const promptText = await store.readPrompt(meta.run_id);
     runs.push({
       run: meta,
@@ -615,8 +615,7 @@ function eventPreview(event: ObservabilityActivity['recent_events'][number]): st
 }
 
 function compactObservabilityEvent(event: WorkerEvent): WorkerEvent {
-  const serialized = JSON.stringify(event);
-  if (Buffer.byteLength(serialized, 'utf8') <= observabilityEventJsonByteLimit) return event;
+  if (estimatedJsonBytes(event) <= observabilityEventJsonByteLimit) return event;
   return {
     ...event,
     payload: compactObservabilityPayload(event),
@@ -701,11 +700,9 @@ function compactResultRaw(raw: Record<string, unknown>): Record<string, unknown>
 function compactUnknown(value: unknown, maxLength: number): string | null {
   if (value === null || value === undefined) return null;
   if (typeof value === 'string') return truncateText(value, maxLength);
-  try {
-    return compactText(JSON.stringify(value), maxLength);
-  } catch {
-    return compactText(String(value), maxLength);
-  }
+  if (Array.isArray(value)) return compactText(`[array length=${value.length}]`, maxLength);
+  if (typeof value === 'object') return compactText(objectPreview(value as Record<string, unknown>), maxLength);
+  return compactText(String(value), maxLength);
 }
 
 function getRecord(value: unknown): Record<string, unknown> | null {
@@ -720,6 +717,61 @@ function numberFromRecord(value: unknown, key: string): number | null {
 
 function pruneNullish(value: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== null && item !== undefined));
+}
+
+function estimatedJsonBytes(value: unknown, limit = observabilityEventJsonByteLimit): number {
+  let total = 0;
+  const visit = (item: unknown, depth: number): void => {
+    if (total > limit) return;
+    if (item === null || item === undefined) {
+      total += 4;
+      return;
+    }
+    if (typeof item === 'string') {
+      total += item.length + 2;
+      return;
+    }
+    if (typeof item === 'number' || typeof item === 'boolean') {
+      total += String(item).length;
+      return;
+    }
+    if (depth > 5) {
+      total += limit + 1;
+      return;
+    }
+    if (Array.isArray(item)) {
+      total += 2;
+      if (item.length > 50) total += limit + 1;
+      for (const value of item.slice(0, 50)) visit(value, depth + 1);
+      return;
+    }
+    if (typeof item === 'object') {
+      const entries = Object.entries(item as Record<string, unknown>);
+      total += 2;
+      if (entries.length > 80) total += limit + 1;
+      for (const [key, entry] of entries.slice(0, 80)) {
+        total += key.length + 3;
+        visit(entry, depth + 1);
+      }
+    }
+  };
+  visit(value, 0);
+  return total;
+}
+
+function objectPreview(value: Record<string, unknown>): string {
+  const entries = Object.entries(value).slice(0, 8).map(([key, item]) => `${key}: ${scalarPreview(item)}`);
+  const suffix = Object.keys(value).length > entries.length ? ', ...' : '';
+  return `{ ${entries.join(', ')}${suffix} }`;
+}
+
+function scalarPreview(value: unknown): string {
+  if (value === null || value === undefined) return 'null';
+  if (typeof value === 'string') return compactText(value, 120);
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (Array.isArray(value)) return `[array length=${value.length}]`;
+  if (typeof value === 'object') return `{object keys=${Object.keys(value as Record<string, unknown>).length}}`;
+  return String(value);
 }
 
 function commandFromInput(input: unknown): string | null {

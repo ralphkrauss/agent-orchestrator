@@ -4,6 +4,19 @@ This project uses npm dist-tags as documented in `PUBLISHING.md`: prereleases pu
 
 ## Unreleased
 
+## 0.2.5 - 2026-05-13
+
+### Fixed
+
+- Made `agent-orchestrator watch` read lightweight snapshots from the local run
+  store instead of polling rich daemon IPC snapshots on every refresh.
+- Bounded dashboard event parsing and stdout terminal recovery so oversized
+  worker payloads cannot force full-log parsing or large JSON serialization.
+- Fixed daemon restarts to recover completed workers from stdout and adopt
+  still-live worker processes instead of marking them orphaned immediately.
+- Sanitized daemon auto-start environments from Claude supervisor launches so
+  restarted daemons use the intended user home, cwd, and daemon log stream.
+
 ## 0.2.4 - 2026-05-13
 
 ### Fixed

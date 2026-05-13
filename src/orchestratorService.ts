@@ -81,6 +81,7 @@ import {
 import { getBackendStatus } from './diagnostics.js';
 import { captureGitSnapshot } from './gitSnapshot.js';
 import { buildObservabilitySnapshot } from './observability.js';
+import { terminateProcessTree, type RunTerminalOverride } from './processManager.js';
 import {
   createWorkerCapabilityCatalog,
   inspectWorkerProfiles,
@@ -124,6 +125,8 @@ type OrchestratorLogger = (message: string) => void;
  * interceptor. Not on the public contract.
  */
 const SESSION_NOT_FOUND_INTERCEPT_THRESHOLD = { events: 50, ms: 5_000 } as const;
+const detachedRunPollMs = 2_000;
+const detachedCancelGraceMs = 10_000;
 
 interface RotationTrackerEntry {
   /** Promise gating the in-flight picker for this parent. */
@@ -761,8 +764,9 @@ export class OrchestratorService {
   async sendFollowup(params: unknown, context: OrchestratorDispatchContext = {}): Promise<ToolResult> {
     const parsed = SendFollowupInputSchema.safeParse(params);
     if (!parsed.success) return invalidInput(parsed.error.message);
-    const parent = await this.store.loadRun(parsed.data.run_id);
-    if (!parent) return unknownRun(parsed.data.run_id);
+    const parentMeta = await this.loadMetaOrNull(parsed.data.run_id);
+    if (!parentMeta) return unknownRun(parsed.data.run_id);
+    const parent = { meta: parentMeta };
     if (!isTerminalStatus(parent.meta.status)) {
       return wrapErr(orchestratorError('INVALID_STATE', 'Cannot send follow-up while parent run is still running'));
     }
@@ -1339,10 +1343,10 @@ export class OrchestratorService {
   async cancelRun(params: unknown): Promise<ToolResult> {
     const parsed = CancelRunInputSchema.safeParse(params);
     if (!parsed.success) return invalidInput(parsed.error.message);
-    const run = await this.store.loadRun(parsed.data.run_id);
+    const run = await this.loadMetaOrNull(parsed.data.run_id);
     if (!run) return unknownRun(parsed.data.run_id);
-    if (isTerminalStatus(run.meta.status)) {
-      return wrapErr(orchestratorError('INVALID_STATE', `Run is already terminal: ${run.meta.status}`));
+    if (isTerminalStatus(run.status)) {
+      return wrapErr(orchestratorError('INVALID_STATE', `Run is already terminal: ${run.status}`));
     }
 
     const managed = this.activeRuns.get(parsed.data.run_id);
@@ -1358,15 +1362,15 @@ export class OrchestratorService {
   async getRunStatus(params: unknown): Promise<ToolResult> {
     const parsed = RunIdInputSchema.safeParse(params);
     if (!parsed.success) return invalidInput(parsed.error.message);
-    const run = await this.store.loadRun(parsed.data.run_id);
+    const run = await this.loadMetaOrNull(parsed.data.run_id);
     if (!run) return unknownRun(parsed.data.run_id);
-    return wrapOk({ run_summary: run.meta });
+    return wrapOk({ run_summary: run });
   }
 
   async getRunEvents(params: unknown): Promise<ToolResult> {
     const parsed = GetRunEventsInputSchema.safeParse(params);
     if (!parsed.success) return invalidInput(parsed.error.message);
-    const run = await this.store.loadRun(parsed.data.run_id);
+    const run = await this.loadMetaOrNull(parsed.data.run_id);
     if (!run) return unknownRun(parsed.data.run_id);
     return wrapOk(await this.store.readEvents(parsed.data.run_id, parsed.data.after_sequence, parsed.data.limit));
   }
@@ -1412,16 +1416,16 @@ export class OrchestratorService {
     if (!parsed.success) return invalidInput(parsed.error.message);
     const deadline = Date.now() + parsed.data.wait_seconds * 1000;
     while (Date.now() < deadline) {
-      const run = await this.store.loadRun(parsed.data.run_id);
+      const run = await this.loadMetaOrNull(parsed.data.run_id);
       if (!run) return unknownRun(parsed.data.run_id);
-      if (isTerminalStatus(run.meta.status)) {
-        return wrapOk({ status: run.meta.status, run_summary: run.meta });
+      if (isTerminalStatus(run.status)) {
+        return wrapOk({ status: run.status, run_summary: run });
       }
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    const run = await this.store.loadRun(parsed.data.run_id);
+    const run = await this.loadMetaOrNull(parsed.data.run_id);
     if (!run) return unknownRun(parsed.data.run_id);
-    return wrapOk({ status: 'still_running', wait_exceeded: true, run_summary: run.meta });
+    return wrapOk({ status: 'still_running', wait_exceeded: true, run_summary: run });
   }
 
   async waitForAnyRun(params: unknown): Promise<ToolResult> {
@@ -1488,9 +1492,13 @@ export class OrchestratorService {
   async getRunResult(params: unknown): Promise<ToolResult> {
     const parsed = RunIdInputSchema.safeParse(params);
     if (!parsed.success) return invalidInput(parsed.error.message);
-    const run = await this.store.loadRun(parsed.data.run_id);
+    const run = await this.loadMetaOrNull(parsed.data.run_id);
     if (!run) return unknownRun(parsed.data.run_id);
-    return wrapOk({ run_summary: run.meta, result: resultWithAssistantSummaryFallback(run.result, run.events) });
+    const result = await this.store.loadResult(parsed.data.run_id);
+    const events = result && !result.summary.trim()
+      ? (await this.store.readEventSummary(parsed.data.run_id, 50)).recent_events
+      : [];
+    return wrapOk({ run_summary: run, result: resultWithAssistantSummaryFallback(result, events) });
   }
 
   async shutdown(params: unknown): Promise<ToolResult> {
@@ -1850,6 +1858,17 @@ export class OrchestratorService {
     for (const run of await this.store.listRuns()) {
       if (run.status !== 'running') continue;
       try {
+        const recovered = await this.store.recoverTerminalResultFromStdout(run.run_id);
+        if (recovered) {
+          await this.store.markTerminal(run.run_id, recovered.status === 'completed' ? 'completed' : 'failed', recovered.errors, recovered);
+          this.logger(`recovered terminal run ${run.run_id} from stdout after daemon restart previous_daemon_pid=${run.daemon_pid_at_spawn ?? 'unknown'} worker_pid=${run.worker_pid ?? 'unknown'}`);
+          continue;
+        }
+        if (run.worker_pid && isPidAlive(run.worker_pid)) {
+          this.adoptDetachedRunningRun(run);
+          this.logger(`adopted detached running run ${run.run_id} after daemon restart because worker_pid=${run.worker_pid} is still alive previous_daemon_pid=${run.daemon_pid_at_spawn ?? 'unknown'}`);
+          continue;
+        }
         await this.store.markTerminal(run.run_id, 'orphaned', [{
           message: 'orphaned by daemon restart; worker process state unknown',
           context: {
@@ -1863,6 +1882,165 @@ export class OrchestratorService {
       }
     }
   }
+
+  private async loadMetaOrNull(runId: string): Promise<RunMeta | null> {
+    try {
+      return await this.store.loadMeta(runId);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    }
+  }
+
+  private adoptDetachedRunningRun(run: RunMeta): void {
+    const pid = run.worker_pid;
+    if (!pid || this.activeRuns.has(run.run_id)) return;
+
+    let terminalRequest: { status: Extract<RunStatus, 'failed' | 'cancelled' | 'timed_out'>; terminal?: RunTerminalOverride } | null = null;
+    let cancelDeadlineMs: number | null = null;
+    let forceTimer: NodeJS.Timeout | null = null;
+    let pollTimer: NodeJS.Timeout | null = null;
+    let settled = false;
+    const parsedActivity = run.last_activity_at ? Date.parse(run.last_activity_at) : NaN;
+    const lastActivityMs = Number.isFinite(parsedActivity) ? parsedActivity : Date.now();
+
+    let resolveCompletion: (meta: RunMeta) => void = () => undefined;
+    const completion = new Promise<RunMeta>((resolve) => {
+      resolveCompletion = resolve;
+    });
+
+    const handle: RuntimeRunHandle = {
+      runId: run.run_id,
+      cancel: (status, terminal) => {
+        if (terminalRequest) return;
+        terminalRequest = { status, terminal };
+        cancelDeadlineMs = Date.now() + detachedCancelGraceMs;
+        terminateProcessTree(pid, false);
+        forceTimer = setTimeout(() => {
+          terminateProcessTree(pid, true);
+        }, 5_000);
+      },
+      lastActivityMs: () => lastActivityMs,
+      completion,
+    };
+
+    this.activeRuns.set(run.run_id, handle);
+    this.armRunTimer(run.run_id, run.idle_timeout_seconds ?? this.config.default_idle_timeout_seconds, run.execution_timeout_seconds ?? this.config.default_execution_timeout_seconds, handle);
+
+    const settle = async () => {
+      if (settled) return;
+      const alive = isPidAlive(pid);
+      if (alive && (!cancelDeadlineMs || Date.now() < cancelDeadlineMs)) {
+        pollTimer = setTimeout(() => void settle(), detachedRunPollMs);
+        return;
+      }
+
+      settled = true;
+      if (pollTimer) clearTimeout(pollTimer);
+      if (forceTimer) clearTimeout(forceTimer);
+      this.clearRunTimer(run.run_id);
+      this.activeRuns.delete(run.run_id);
+
+      let terminalMeta: RunMeta;
+      try {
+        terminalMeta = await this.finalizeDetachedRunningRun(run, terminalRequest, alive);
+      } catch (error) {
+        this.logger(`failed to finalize detached run ${run.run_id}: ${error instanceof Error ? error.message : String(error)}`);
+        terminalMeta = await this.store.loadMeta(run.run_id);
+      }
+
+      this.emitRunLifecycle({
+        kind: 'terminal',
+        run_id: run.run_id,
+        orchestrator_id: orchestratorIdFromMeta(terminalMeta.metadata),
+        status: terminalMeta.status,
+      });
+      if (terminalMeta.latest_error?.fatal) {
+        this.emitRunLifecycle({
+          kind: 'notification',
+          run_id: run.run_id,
+          orchestrator_id: orchestratorIdFromMeta(terminalMeta.metadata),
+        });
+      }
+      if (this.shuttingDown && this.activeRuns.size === 0) {
+        scheduleProcessExit();
+      }
+      resolveCompletion(terminalMeta);
+    };
+
+    pollTimer = setTimeout(() => void settle(), detachedRunPollMs);
+  }
+
+  private async finalizeDetachedRunningRun(
+    run: RunMeta,
+    terminalRequest: { status: Extract<RunStatus, 'failed' | 'cancelled' | 'timed_out'>; terminal?: RunTerminalOverride } | null,
+    stillAlive: boolean,
+  ): Promise<RunMeta> {
+    if (!terminalRequest) {
+      const recovered = await this.store.recoverTerminalResultFromStdout(run.run_id);
+      if (recovered) {
+        return this.store.markTerminal(run.run_id, recovered.status === 'completed' ? 'completed' : 'failed', recovered.errors, recovered);
+      }
+    }
+
+    if (terminalRequest) {
+      const latestError = terminalRequest.terminal?.latest_error ?? detachedCancelError(run, terminalRequest.status, terminalRequest.terminal, stillAlive);
+      return this.store.markTerminal(run.run_id, terminalRequest.status, [latestError], undefined, {
+        ...terminalRequest.terminal,
+        latest_error: latestError,
+        context: {
+          ...(terminalRequest.terminal?.context ?? {}),
+          detached_worker_pid: run.worker_pid,
+          detached_worker_still_alive: stillAlive,
+        },
+      });
+    }
+
+    return this.store.markTerminal(run.run_id, 'orphaned', [{
+      message: 'detached worker exited after daemon restart; terminal result unavailable',
+      context: {
+        previous_daemon_pid: run.daemon_pid_at_spawn,
+        worker_pid: run.worker_pid,
+      },
+    }]);
+  }
+}
+
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function detachedCancelError(
+  run: RunMeta,
+  status: Extract<RunStatus, 'failed' | 'cancelled' | 'timed_out'>,
+  terminal: RunTerminalOverride | undefined,
+  stillAlive: boolean,
+): RunError {
+  const timeoutReason = terminal?.timeout_reason;
+  const message = status === 'cancelled'
+    ? 'cancelled by user'
+    : status === 'timed_out'
+      ? timeoutReason === 'execution_timeout' ? 'execution timeout exceeded' : 'idle timeout exceeded'
+      : 'detached worker failed after daemon restart';
+  return {
+    message,
+    category: status === 'timed_out' ? 'timeout' : 'unknown',
+    source: status === 'timed_out' ? 'watchdog' : 'process_exit',
+    backend: run.backend,
+    retryable: false,
+    fatal: status !== 'cancelled',
+    context: {
+      ...(terminal?.context ?? {}),
+      previous_daemon_pid: run.daemon_pid_at_spawn,
+      worker_pid: run.worker_pid,
+      detached_worker_still_alive: stillAlive,
+    },
+  };
 }
 
 function defaultLogger(message: string): void {

@@ -13,6 +13,19 @@ function log(message: string): void {
   process.stderr.write(line);
 }
 
+process.on('uncaughtException', (error) => {
+  log(`uncaughtException: ${error.stack ?? error.message}`);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason) => {
+  log(`unhandledRejection: ${reason instanceof Error ? reason.stack ?? reason.message : String(reason)}`);
+});
+
+process.on('warning', (warning) => {
+  log(`warning: ${warning.stack ?? warning.message}`);
+});
+
 async function main(): Promise<void> {
   const booted = await bootDaemon({ paths, log });
   bootedShutdown = booted.shutdown;

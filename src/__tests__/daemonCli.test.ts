@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { IpcServer } from '../ipc/server.js';
 import { getPackageVersion } from '../packageMetadata.js';
+import { daemonSpawnEnv } from '../daemon/spawnDaemon.js';
 
 const execFileAsync = promisify(execFile);
 const testDir = dirname(fileURLToPath(import.meta.url));
@@ -33,6 +34,35 @@ describe('daemon CLI', () => {
 
     assert.match(result.stdout, /agent-orchestrator-daemon start/);
     assert.equal(result.stderr, '');
+  });
+
+  it('sanitizes supervisor-specific environment when spawning the daemon', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-daemon-env-'));
+    const storeRoot = join(root, '.agent-orchestrator');
+    const supervisorHome = join(root, '.agent-orchestrator', 'claude-supervisor', 'home');
+
+    try {
+      const env = daemonSpawnEnv(storeRoot, {
+        HOME: supervisorHome,
+        PWD: '/tmp/supervisor-worktree',
+        INIT_CWD: '/tmp/supervisor-init',
+        CLAUDE_CONFIG_DIR: '/tmp/claude-config',
+        CLAUDE_CODE_ENTRYPOINT: 'cli',
+        CLAUDECODE: '1',
+        CLAUDE_PROJECT_DIR: '/tmp/project',
+      });
+
+      assert.equal(env.AGENT_ORCHESTRATOR_HOME, storeRoot);
+      assert.equal(env.HOME, root);
+      assert.equal(env.PWD, undefined);
+      assert.equal(env.INIT_CWD, undefined);
+      assert.equal(env.CLAUDE_CONFIG_DIR, undefined);
+      assert.equal(env.CLAUDE_CODE_ENTRYPOINT, undefined);
+      assert.equal(env.CLAUDECODE, undefined);
+      assert.equal(env.CLAUDE_PROJECT_DIR, undefined);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it('prints both prune command forms when the required age is missing', async () => {
@@ -109,12 +139,16 @@ describe('daemon CLI', () => {
     const socket = join(home, 'daemon.sock');
     const env = { ...process.env, AGENT_ORCHESTRATOR_HOME: home };
     let staleServer: IpcServer | null = null;
+    let snapshotRequests = 0;
 
     try {
       await mkdir(home);
       staleServer = new IpcServer(socket, async (method) => {
         if (method === 'ping') {
           return { ok: true, pong: true, daemon_pid: process.pid, daemon_version: '0.0.0-stale' };
+        }
+        if (method === 'get_observability_snapshot') {
+          snapshotRequests += 1;
         }
         if (method === 'shutdown') {
           setImmediate(() => {
@@ -143,9 +177,9 @@ describe('daemon CLI', () => {
       assert.match(staleVerboseStatus.stdout, /error: Frontend package version .* does not match daemon package version 0\.0\.0-stale/);
 
       const staleWatch = await execFileAsync(process.execPath, [daemonCliPath, 'watch'], { env, timeout: 10_000 });
-      assert.match(staleWatch.stdout, /agent-orchestrator daemon: running pid=/);
-      assert.match(staleWatch.stdout, /error: Frontend package version .* does not match daemon package version 0\.0\.0-stale/);
+      assert.match(staleWatch.stdout, /agent-orchestrator daemon: stopped/);
       assert.match(staleWatch.stdout, /sessions: 0 runs: 0/);
+      assert.equal(snapshotRequests, 0);
 
       const restart = await execFileAsync(process.execPath, [daemonCliPath, 'restart'], { env, timeout: 10_000 });
       assert.match(restart.stdout, new RegExp(`agent-orchestrator daemon stopping store=${escapeRegExp(home)}`));

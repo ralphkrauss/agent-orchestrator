@@ -32,6 +32,10 @@ import {
 const rootMode = 0o700;
 const fileMode = 0o600;
 const maxLockAttempts = 200;
+const initialRecentEventTailBytes = 64 * 1024;
+const maxRecentEventTailBytes = 256 * 1024;
+const maxParsedEventLineBytes = 64 * 1024;
+const maxTerminalStdoutTailBytes = 512 * 1024;
 
 interface LockMetadata {
   pid: number;
@@ -939,7 +943,8 @@ export class RunStore {
     try {
       for await (const line of lines) {
         if (!line) continue;
-        const event = WorkerEventSchema.parse(JSON.parse(line));
+        const event = parseWorkerEventLine(line);
+        if (!event) continue;
         if (event.seq <= afterSequence) continue;
         if (events.length >= limit) {
           has_more = true;
@@ -971,10 +976,9 @@ export class RunStore {
       await handle.read(buffer, 0, bytesToRead, info.size - bytesToRead);
       const lastLine = buffer.toString('utf8').trimEnd().split('\n').at(-1);
       if (!lastLine) return 0;
-      return WorkerEventSchema.parse(JSON.parse(lastLine)).seq;
+      return parseWorkerEventLine(lastLine)?.seq ?? 0;
     } catch {
-      const events = await this.readAllEvents(runId);
-      return events.at(-1)?.seq ?? 0;
+      return 0;
     } finally {
       await handle.close();
     }
@@ -986,7 +990,8 @@ export class RunStore {
     const info = await stat(path);
     if (info.size === 0) return [];
 
-    let bytesToRead = Math.min(info.size, 64 * 1024);
+    const maxBytes = Math.min(info.size, maxRecentEventTailBytes);
+    let bytesToRead = Math.min(info.size, initialRecentEventTailBytes);
     while (true) {
       const handle = await open(path, 'r');
       try {
@@ -995,20 +1000,36 @@ export class RunStore {
         const text = buffer.toString('utf8');
         const lines = text.split('\n').filter(Boolean);
         const hasFileStart = bytesToRead === info.size;
-        if (hasFileStart || lines.length > limit) {
-          const completeLines = hasFileStart ? lines : lines.slice(1);
-          return completeLines
-            .slice(-limit)
-            .map((line) => WorkerEventSchema.parse(JSON.parse(line)));
+        const completeLines = hasFileStart ? lines : lines.slice(1);
+        const parsedEvents = completeLines
+          .map((line) => parseWorkerEventLine(line))
+          .filter((event): event is WorkerEvent => event !== null);
+        if (hasFileStart || parsedEvents.length >= limit || bytesToRead >= maxBytes) {
+          return parsedEvents.slice(-limit);
         }
       } finally {
         await handle.close();
       }
 
-      const nextBytes = Math.min(info.size, bytesToRead * 2);
-      if (nextBytes === bytesToRead) return this.readAllEvents(runId).then((events) => events.slice(-limit));
+      const nextBytes = Math.min(maxBytes, bytesToRead * 2);
+      if (nextBytes === bytesToRead) return [];
       bytesToRead = nextBytes;
     }
+  }
+
+  async recoverTerminalResultFromStdout(runId: string): Promise<WorkerResult | null> {
+    let text: string;
+    try {
+      text = await readTailText(this.stdoutPath(runId), maxTerminalStdoutTailBytes);
+    } catch (error) {
+      if (isNotFound(error)) return null;
+      throw error;
+    }
+    const result = parseTerminalWorkerResultFromText(text);
+    return result ? WorkerResultSchema.parse({
+      ...result,
+      artifacts: this.defaultArtifacts(runId),
+    }) : null;
   }
 
   private async withRunLock<T>(runId: string, action: () => Promise<T>): Promise<T> {
@@ -1094,6 +1115,104 @@ async function pathExistsAsFile(path: string): Promise<boolean> {
     if (isNotFound(error)) return false;
     throw error;
   }
+}
+
+async function readTailText(path: string, maxBytes: number): Promise<string> {
+  const info = await stat(path);
+  const bytesToRead = Math.min(info.size, maxBytes);
+  if (bytesToRead === 0) return '';
+  const handle = await open(path, 'r');
+  try {
+    const buffer = Buffer.alloc(bytesToRead);
+    await handle.read(buffer, 0, bytesToRead, info.size - bytesToRead);
+    return buffer.toString('utf8');
+  } finally {
+    await handle.close();
+  }
+}
+
+function parseWorkerEventLine(line: string): WorkerEvent | null {
+  if (Buffer.byteLength(line, 'utf8') <= maxParsedEventLineBytes) {
+    try {
+      return WorkerEventSchema.parse(JSON.parse(line));
+    } catch {
+      // Fall through to a header-only parse. This keeps tail readers cheap when
+      // an older event was partially truncated or manually edited.
+    }
+  }
+
+  const header = workerEventHeader(line);
+  if (!header) return null;
+  return WorkerEventSchema.parse({
+    ...header,
+    payload: oversizedEventPayload(header.type),
+  });
+}
+
+function workerEventHeader(line: string): Pick<WorkerEvent, 'seq' | 'ts' | 'type'> | null {
+  const match = line.match(/"seq"\s*:\s*(\d+).*?"ts"\s*:\s*"([^"]+)".*?"type"\s*:\s*"(assistant_message|tool_use|tool_result|error|lifecycle)"/);
+  if (!match) return null;
+  return {
+    seq: Number.parseInt(match[1]!, 10),
+    ts: match[2]!,
+    type: match[3] as WorkerEvent['type'],
+  };
+}
+
+function oversizedEventPayload(type: WorkerEvent['type']): Record<string, unknown> {
+  if (type === 'assistant_message') {
+    return { text: '', truncated: true, message: 'assistant message omitted because it exceeds the dashboard read budget' };
+  }
+  if (type === 'tool_use') {
+    return { name: 'tool', truncated: true, message: 'tool input omitted because it exceeds the dashboard read budget' };
+  }
+  if (type === 'tool_result') {
+    return { text: '', truncated: true, message: 'tool result omitted because it exceeds the dashboard read budget' };
+  }
+  if (type === 'error') {
+    return { message: 'error payload omitted because it exceeds the dashboard read budget', truncated: true };
+  }
+  return {
+    truncated: true,
+    message: 'event payload omitted because it exceeds the dashboard read budget',
+  };
+}
+
+function parseTerminalWorkerResultFromText(text: string): Omit<WorkerResult, 'artifacts'> | null {
+  const lines = text.trimEnd().split('\n').reverse();
+  for (const line of lines) {
+    const parsed = safeParseJsonRecord(line);
+    if (!parsed) continue;
+    const terminalReason = stringValue(parsed.terminal_reason);
+    const stopReason = stringValue(parsed.stop_reason);
+    const type = stringValue(parsed.type);
+    if (terminalReason || stopReason || type === 'turn.completed' || type === 'result') {
+      const status = terminalReason === 'completed' || stopReason === 'end_turn' || stopReason === 'stop' || type === 'turn.completed' || type === 'result'
+        ? 'completed'
+        : 'failed';
+      return {
+        status,
+        summary: stringValue(parsed.result) ?? stringValue(parsed.summary) ?? '',
+        files_changed: [],
+        commands_run: [],
+        errors: [],
+      };
+    }
+  }
+  return null;
+}
+
+function safeParseJsonRecord(line: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(line) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
 function terminalReasonFromStatus(status: TerminalRunStatus): RunTerminalReason {

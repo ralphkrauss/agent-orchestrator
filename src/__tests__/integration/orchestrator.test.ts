@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { chmod, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { delimiter, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createBackendRegistry } from '../../backend/registry.js';
 import { OrchestratorService } from '../../orchestratorService.js';
@@ -997,16 +997,69 @@ describe('agent orchestrator integration with mock CLIs', () => {
 
     process.env.PATH = originalPath;
     const store = new RunStore(fixture.home);
+    const recovered = await store.createRun({ backend: 'claude', cwd: repo });
+    await store.updateMeta(recovered.run_id, (meta) => ({ ...meta, started_at: new Date().toISOString(), worker_pid: 999_999_998, daemon_pid_at_spawn: 99999 }));
+    await writeFile(store.stdoutPath(recovered.run_id), `${JSON.stringify({ type: 'result', terminal_reason: 'completed', result: 'completed before daemon restart' })}\n`);
+
     const running = await store.createRun({ backend: 'codex', cwd: repo });
     await store.updateMeta(running.run_id, (meta) => ({ ...meta, started_at: new Date().toISOString(), worker_pid: 12345, daemon_pid_at_spawn: 99999 }));
     await writeFile(join(store.runDir(running.run_id), '.lock'), `${JSON.stringify({ pid: 999_999_999, acquired_at: new Date(0).toISOString() })}\n`);
     const logMessages: string[] = [];
     const restarted = new OrchestratorService(store, createBackendRegistry(store), (message) => logMessages.push(message));
     await restarted.initialize();
+    const completed = await store.loadRun(recovered.run_id);
+    assert.equal(completed?.meta.status, 'completed');
+    assert.equal(completed?.result?.summary, 'completed before daemon restart');
+    assert.ok(logMessages.some((message) => message.includes(`recovered terminal run ${recovered.run_id}`)));
     const swept = await store.loadRun(running.run_id);
     assert.equal(swept?.meta.status, 'orphaned');
     assert.equal(swept?.events.at(-1)?.payload.status, 'orphaned');
     assert.ok(logMessages.some((message) => message.includes(`orphaned run ${running.run_id}`)));
+  });
+
+  it('adopts live running runs after daemon restart and finalizes them from stdout when they exit', async () => {
+    const fixture = await createFixture();
+    const repo = await createGitRepo(fixture.root);
+    const store = new RunStore(fixture.home);
+    await store.ensureReady();
+    const run = await store.createRun({ backend: 'claude', cwd: repo, idle_timeout_seconds: 60 });
+    const child = spawn(process.execPath, ['-e', 'setTimeout(() => process.exit(0), 3000)'], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    child.unref();
+    await store.updateMeta(run.run_id, (meta) => ({
+      ...meta,
+      started_at: new Date().toISOString(),
+      worker_pid: child.pid ?? null,
+      worker_pgid: process.platform === 'win32' ? null : child.pid ?? null,
+      daemon_pid_at_spawn: 99999,
+      last_activity_at: new Date().toISOString(),
+      last_activity_source: 'stdout',
+    }));
+
+    const logMessages: string[] = [];
+    const restarted = new OrchestratorService(store, createBackendRegistry(store), (message) => logMessages.push(message));
+
+    try {
+      await restarted.initialize();
+      assert.equal((await store.loadMeta(run.run_id)).status, 'running');
+      assert.ok(logMessages.some((message) => message.includes(`adopted detached running run ${run.run_id}`)));
+      await writeFile(store.stdoutPath(run.run_id), `${JSON.stringify({ type: 'result', terminal_reason: 'completed', result: 'detached run completed' })}\n`);
+
+      await restarted.waitForRun({ run_id: run.run_id, wait_seconds: 5 });
+      const terminal = await store.loadRun(run.run_id);
+      assert.equal(terminal?.meta.status, 'completed');
+      assert.equal(terminal?.result?.summary, 'detached run completed');
+    } finally {
+      if (child.pid && isPidAlive(child.pid)) {
+        try {
+          process.kill(process.platform === 'win32' ? child.pid : -child.pid, 'SIGKILL');
+        } catch {
+          // The test worker usually exits on its own.
+        }
+      }
+    }
   });
 
   // Issue #31 — OD1=B / OD2=B / C12 end-to-end coverage.

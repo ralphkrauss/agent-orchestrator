@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { spawn } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFile } from 'node:fs/promises';
@@ -13,6 +12,7 @@ import { buildObservabilitySnapshot } from '../observability.js';
 import { getBackendStatus } from '../diagnostics.js';
 import { formatSnapshot, type SnapshotEnvelope } from './observabilityFormat.js';
 import type { ObservabilitySnapshot, OrchestratorError } from '../contract.js';
+import { spawnDaemonProcess } from './spawnDaemon.js';
 
 const paths = daemonPaths();
 const daemonCommands = new Set(['start', 'stop', 'restart', 'status', 'runs', 'watch', 'prune', 'auth']);
@@ -90,12 +90,7 @@ async function start(): Promise<void> {
   }
 
   const daemonMain = resolve(dirname(fileURLToPath(import.meta.url)), 'daemonMain.js');
-  const child = spawn(process.execPath, [daemonMain], {
-    detached: true,
-    stdio: 'ignore',
-    env: process.env,
-  });
-  child.unref();
+  spawnDaemonProcess(paths, daemonMain);
   await waitForDaemon(2_000);
   process.stdout.write(`agent-orchestrator daemon started pid=${await readPid() ?? 'unknown'} store=${paths.home}\n`);
 }
@@ -173,10 +168,10 @@ async function runs(argv: readonly string[]): Promise<void> {
 
 async function watch(argv: readonly string[]): Promise<void> {
   const intervalMs = readPositiveIntOption(argv, '--interval-ms') ?? 1_000;
-  const options = snapshotOptionsFromArgs(argv, { includePrompts: true, limit: 50, recentEventLimit: 20 });
+  const options = snapshotOptionsFromArgs(argv, { includePrompts: false, limit: 50, recentEventLimit: 0 });
   const readWatchSnapshot = async () => {
     try {
-      return await readSnapshotFromDaemonOrStore(options);
+      return await readWatchSnapshotFromStore(options);
     } catch (error) {
       return {
         running: false,
@@ -208,6 +203,11 @@ async function watch(argv: readonly string[]): Promise<void> {
     stdout: process.stdout,
     stderr: process.stderr,
   });
+}
+
+async function readWatchSnapshotFromStore(options: SnapshotOptions): Promise<SnapshotEnvelope> {
+  const daemonPid = await readLivePid();
+  return readSnapshotFromStore(options, { running: daemonPid !== null, daemonPid });
 }
 
 async function prune(argv: readonly string[]): Promise<void> {
@@ -350,6 +350,18 @@ async function waitForStopped(timeoutMs: number): Promise<void> {
 async function readPid(): Promise<string | null> {
   if (!existsSync(paths.pid)) return null;
   return (await readFile(paths.pid, 'utf8')).trim();
+}
+
+async function readLivePid(): Promise<number | null> {
+  const raw = await readPid();
+  const pid = raw ? Number.parseInt(raw, 10) : NaN;
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    process.kill(pid, 0);
+    return pid;
+  } catch {
+    return null;
+  }
 }
 
 function readPositiveIntOption(argv: readonly string[], name: string): number | null {
