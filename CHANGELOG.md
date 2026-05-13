@@ -4,6 +4,18 @@ This project uses npm dist-tags as documented in `PUBLISHING.md`: prereleases pu
 
 ## Unreleased
 
+## 0.2.6 - 2026-05-13
+
+### Fixed
+
+- Fixed `agent-orchestrator watch` so live orchestrators come from a
+  lightweight daemon registry read while worker/session details still come from
+  the bounded local store snapshot.
+- Fixed stale sidebar rows in the watch TUI when the live/archive lists shrink
+  between refreshes.
+- Added sidebar click selection in the watch TUI and clarified worker totals
+  when details are outside the current watch `--limit`.
+
 ## 0.2.5 - 2026-05-13
 
 ### Fixed

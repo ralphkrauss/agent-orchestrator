@@ -8,7 +8,7 @@ import { daemonPaths } from './paths.js';
 import { checkDaemonVersion } from '../daemonVersion.js';
 import { formatVersionOutput, getPackageVersion } from '../packageMetadata.js';
 import { RunStore, type PruneRunsResult } from '../runStore.js';
-import { buildObservabilitySnapshot } from '../observability.js';
+import { buildObservabilitySnapshot, type LiveOrchestratorSnapshot } from '../observability.js';
 import { getBackendStatus } from '../diagnostics.js';
 import { formatSnapshot, type SnapshotEnvelope } from './observabilityFormat.js';
 import type { ObservabilitySnapshot, OrchestratorError } from '../contract.js';
@@ -206,8 +206,14 @@ async function watch(argv: readonly string[]): Promise<void> {
 }
 
 async function readWatchSnapshotFromStore(options: SnapshotOptions): Promise<SnapshotEnvelope> {
-  const daemonPid = await readLivePid();
-  return readSnapshotFromStore(options, { running: daemonPid !== null, daemonPid });
+  const live = await readLiveDaemonState();
+  return readSnapshotFromStore(options, {
+    running: live.running,
+    daemonPid: live.daemonPid,
+    daemonVersion: live.daemonVersion,
+    error: live.error,
+    liveOrchestrators: live.liveOrchestrators,
+  });
 }
 
 async function prune(argv: readonly string[]): Promise<void> {
@@ -287,7 +293,13 @@ async function readSnapshotFromDaemonOrStore(options: SnapshotOptions): Promise<
 
 async function readSnapshotFromStore(
   options: SnapshotOptions,
-  state: { running: boolean; daemonPid?: number | null; daemonVersion?: string | null; error?: string },
+  state: {
+    running: boolean;
+    daemonPid?: number | null;
+    daemonVersion?: string | null;
+    error?: string;
+    liveOrchestrators?: readonly LiveOrchestratorSnapshot[];
+  },
 ): Promise<SnapshotEnvelope> {
   return {
     running: state.running,
@@ -301,9 +313,59 @@ async function readSnapshotFromStore(
         daemonVersion: state.daemonVersion ?? null,
         daemonPid: state.daemonPid ?? null,
       }) : null,
+      liveOrchestrators: state.liveOrchestrators,
     }),
     error: state.error,
   };
+}
+
+interface LiveDaemonState {
+  running: boolean;
+  daemonPid: number | null;
+  daemonVersion?: string | null;
+  error?: string;
+  liveOrchestrators: readonly LiveOrchestratorSnapshot[];
+}
+
+async function readLiveDaemonState(): Promise<LiveDaemonState> {
+  const pingResult = await pingDaemon();
+  if (!pingResult) {
+    const daemonPid = await readLivePid();
+    return { running: daemonPid !== null, daemonPid, liveOrchestrators: [] };
+  }
+
+  const versionCheck = checkDaemonVersion(pingResult);
+  if (!versionCheck.ok) {
+    return {
+      running: true,
+      daemonPid: errorDetailNumber(versionCheck.error, 'daemon_pid'),
+      daemonVersion: errorDetailString(versionCheck.error, 'daemon_version'),
+      error: versionCheck.error.message,
+      liveOrchestrators: [],
+    };
+  }
+
+  const daemonPid = daemonPidFromPing(pingResult);
+  try {
+    const client = new IpcClient(paths.ipc.path);
+    const result = await client.request('get_live_orchestrators', {}, 5_000) as {
+      ok: boolean;
+      live_orchestrators?: readonly LiveOrchestratorSnapshot[];
+      error?: { message?: string };
+    };
+    if (result.ok && Array.isArray(result.live_orchestrators)) {
+      return { running: true, daemonPid, daemonVersion: getPackageVersion(), liveOrchestrators: result.live_orchestrators };
+    }
+    throw new Error(result.error?.message ?? 'failed to read live orchestrators');
+  } catch (error) {
+    return {
+      running: true,
+      daemonPid,
+      daemonVersion: getPackageVersion(),
+      error: error instanceof Error ? error.message : String(error),
+      liveOrchestrators: [],
+    };
+  }
 }
 
 async function ping(): Promise<boolean> {
@@ -317,6 +379,11 @@ async function pingDaemon(): Promise<unknown | null> {
   } catch {
     return null;
   }
+}
+
+function daemonPidFromPing(pingResult: unknown): number | null {
+  const value = (pingResult as { daemon_pid?: unknown } | null)?.daemon_pid;
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : null;
 }
 
 function errorDetailString(error: OrchestratorError, key: string): string | null {

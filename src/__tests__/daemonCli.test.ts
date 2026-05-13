@@ -177,7 +177,8 @@ describe('daemon CLI', () => {
       assert.match(staleVerboseStatus.stdout, /error: Frontend package version .* does not match daemon package version 0\.0\.0-stale/);
 
       const staleWatch = await execFileAsync(process.execPath, [daemonCliPath, 'watch'], { env, timeout: 10_000 });
-      assert.match(staleWatch.stdout, /agent-orchestrator daemon: stopped/);
+      assert.match(staleWatch.stdout, /agent-orchestrator daemon: running pid=/);
+      assert.match(staleWatch.stdout, /error: Frontend package version .* does not match daemon package version 0\.0\.0-stale/);
       assert.match(staleWatch.stdout, /sessions: 0 runs: 0/);
       assert.equal(snapshotRequests, 0);
 
@@ -192,6 +193,65 @@ describe('daemon CLI', () => {
       await staleServer?.close().catch(() => undefined);
       await execFileAsync(process.execPath, [daemonCliPath, 'stop', '--force'], { env, timeout: 10_000 }).catch(() => undefined);
       await waitForStopped(env);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('watch merges live orchestrators through lightweight daemon IPC without rich snapshot polling', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-daemon-watch-live-'));
+    const home = join(root, 'home');
+    const socket = join(home, 'daemon.sock');
+    const env = { ...process.env, AGENT_ORCHESTRATOR_HOME: home };
+    let server: IpcServer | null = null;
+    let richSnapshotRequests = 0;
+    let liveRequests = 0;
+
+    try {
+      await mkdir(home);
+      server = new IpcServer(socket, async (method) => {
+        if (method === 'ping') {
+          return { ok: true, pong: true, daemon_pid: process.pid, daemon_version: getPackageVersion() };
+        }
+        if (method === 'get_live_orchestrators') {
+          liveRequests += 1;
+          return {
+            ok: true,
+            live_orchestrators: [{
+              record: {
+                id: '01WATCHLIVEORCH0000000000A',
+                client: 'claude',
+                label: 'Live watch session',
+                cwd: '/tmp/watch-live',
+                display: { tmux_pane: '%1', tmux_window_id: '@1', base_title: 'Live watch session', host: 'host' },
+                registered_at: '2026-05-13T00:00:00.000Z',
+                last_supervisor_event_at: '2026-05-13T00:00:01.000Z',
+              },
+              status: {
+                state: 'waiting_for_user',
+                supervisor_turn_active: false,
+                waiting_for_user: true,
+                running_child_count: 0,
+                failed_unacked_count: 0,
+              },
+            }],
+          };
+        }
+        if (method === 'get_observability_snapshot') {
+          richSnapshotRequests += 1;
+        }
+        return { ok: true };
+      }, getPackageVersion());
+      await server.listen();
+
+      const watch = await execFileAsync(process.execPath, [daemonCliPath, 'watch'], { env, timeout: 10_000 });
+
+      assert.match(watch.stdout, /agent-orchestrator daemon: running pid=/);
+      assert.match(watch.stdout, /live_orchestrators: 1 archived_orchestrators: 0/);
+      assert.match(watch.stdout, /Live watch session \[waiting_for_user\]/);
+      assert.equal(liveRequests, 1);
+      assert.equal(richSnapshotRequests, 0);
+    } finally {
+      await server?.close().catch(() => undefined);
       await rm(root, { recursive: true, force: true });
     }
   });

@@ -7,6 +7,7 @@ import {
   BackendSchema,
   CancelRunInputSchema,
   CodexNetworkSchema,
+  GetLiveOrchestratorsInputSchema,
   GetObservabilitySnapshotInputSchema,
   GetOrchestratorStatusInputSchema,
   GetRunEventsInputSchema,
@@ -264,6 +265,8 @@ export class OrchestratorService {
         });
       case 'get_observability_snapshot':
         return this.getObservabilitySnapshot(params, context);
+      case 'get_live_orchestrators':
+        return this.getLiveOrchestrators(params);
       case 'register_supervisor':
         return this.registerSupervisor(params);
       case 'signal_supervisor_event':
@@ -1545,6 +1548,16 @@ export class OrchestratorService {
         liveOrchestrators,
       }),
     });
+  }
+
+  async getLiveOrchestrators(params: unknown): Promise<ToolResult> {
+    const parsed = GetLiveOrchestratorsInputSchema.safeParse(params);
+    if (!parsed.success) return invalidInput(parsed.error.message);
+    const liveOrchestrators = await Promise.all(this.orchestratorRegistry.list().map(async (state) => ({
+      record: state.record,
+      status: computeOrchestratorStatusSnapshot(state, await this.collectOwnedRunSnapshot(state.record.id)),
+    })));
+    return wrapOk({ live_orchestrators: liveOrchestrators });
   }
 
   private async startManagedRun(

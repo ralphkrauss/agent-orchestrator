@@ -14,9 +14,11 @@ import {
   normalizeWatchEvent,
   renderMarkdownToAnsi,
   scrollWatchTranscript,
+  selectWatchSidebarItemAt,
   selectWatchSidebarItem,
   selectedWatchTranscriptBlocks,
   selectedWatchTranscriptLines,
+  watchMouseClickPosition,
   watchMouseScrollDelta,
   watchSidebarItems,
 } from '../daemon/watchViewModel.js';
@@ -97,7 +99,7 @@ describe('watch view model', () => {
     const overviewState = clampWatchDashboardState(createWatchDashboardState(), model);
     const blocks = selectedWatchTranscriptBlocks(model, overviewState);
     assert.equal(blocks[0]?.label, 'Session');
-    assert.match(blocks[0]?.body ?? '', /Workers: 1 running \/ 1 total/);
+    assert.match(blocks[0]?.body ?? '', /Workers: 1 running \/ 2 total/);
     assert.match(blocks[0]?.body ?? '', /Open:/);
     assert.equal(blocks[1]?.label, 'Worker 1');
     assert.match(blocks[1]?.title ?? '', /running for/);
@@ -295,6 +297,10 @@ describe('watch view model', () => {
     assert.equal(watchMouseScrollDelta('\x1b[<65;1;1M', 9), -1);
     assert.equal(watchMouseScrollDelta('\x1b[<64;1;1M\x1b[<64;1;1M', 9), 2);
     assert.equal(watchMouseScrollDelta(`\x1b[M${String.fromCharCode(96)}!!`, 9), 1);
+    assert.deepEqual(watchMouseClickPosition('\x1b[<0;3;4M'), { x: 3, y: 4 });
+    assert.equal(watchMouseClickPosition('\x1b[<64;3;4M'), null);
+    assert.equal(selectWatchSidebarItemAt(state, model, 0).selectedId, 'orchestrator:orch-live');
+    assert.equal(selectWatchSidebarItemAt(state, model, 1).selectedId, state.selectedId);
 
     const top = applyWatchInput(state, model, 'g', {}, 90, 3).state;
     assert.equal(top.follow, false);
@@ -319,7 +325,7 @@ describe('watch view model', () => {
     assert.match(output, /agent-orchestrator watch/);
     assert.match(output, /Live orchestrators/);
     assert.match(output, /Worker 1/);
-    assert.match(output, /Build TUI/);
+    assert.match(output, /Build the watch TUI/);
     assert.match(output, /Overview/);
   });
 });

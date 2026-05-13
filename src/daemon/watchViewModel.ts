@@ -148,6 +148,11 @@ export interface WatchInputResult {
   toggleMouseCapture?: boolean;
 }
 
+export interface WatchMouseClickPosition {
+  x: number;
+  y: number;
+}
+
 interface WatchInputEvent {
   input: string;
   key: WatchInputKey;
@@ -206,6 +211,14 @@ export function selectWatchSidebarItem(state: WatchDashboardState, model: WatchV
   const currentIndex = Math.max(0, items.findIndex((item) => item.id === clamped.selectedId));
   const next = items[clamp(currentIndex + delta, 0, items.length - 1)]!;
   if (next.id === clamped.selectedId) return clamped;
+  return { ...clamped, selectedId: next.id, follow: true, scrollOffset: 0 };
+}
+
+export function selectWatchSidebarItemAt(state: WatchDashboardState, model: WatchViewModel, index: number): WatchDashboardState {
+  const clamped = clampWatchDashboardState(state, model);
+  const items = watchSidebarItems(model, clamped);
+  const next = items[index];
+  if (!next || next.id === clamped.selectedId) return clamped;
   return { ...clamped, selectedId: next.id, follow: true, scrollOffset: 0 };
 }
 
@@ -303,6 +316,27 @@ export function watchMouseScrollDelta(input: string, pageSize: number): number |
   }
 
   return delta === 0 ? null : delta;
+}
+
+export function watchMouseClickPosition(input: string): WatchMouseClickPosition | null {
+  for (const match of input.matchAll(/\x1b\[<(\d+);(\d+);(\d+)([mM])/g)) {
+    if (match[4] !== 'M') continue;
+    const button = Number(match[1]);
+    if (!Number.isInteger(button) || (button & 64) === 64 || (button & 3) !== 0) continue;
+    const x = Number(match[2]);
+    const y = Number(match[3]);
+    if (Number.isInteger(x) && x > 0 && Number.isInteger(y) && y > 0) return { x, y };
+  }
+
+  for (const match of input.matchAll(/\x1b\[(\d+);(\d+);(\d+)M/g)) {
+    const button = Number(match[1]);
+    if (!Number.isInteger(button) || (button & 64) === 64 || (button & 3) !== 0) continue;
+    const x = Number(match[2]);
+    const y = Number(match[3]);
+    if (Number.isInteger(x) && x > 0 && Number.isInteger(y) && y > 0) return { x, y };
+  }
+
+  return null;
 }
 
 export function applyWatchRawInput(
@@ -592,7 +626,7 @@ function buildWatchOrchestrator(snapshot: ObservabilitySnapshot, group: Observab
     label: group.label,
     cwd: group.cwd,
     status: group.status?.state ?? (group.live ? 'live' : 'archived'),
-    workerCount: conversations.length,
+    workerCount: Math.max(group.worker_count, conversations.length),
     runningCount: conversations.filter((conversation) => conversation.status === 'running').length,
     createdAt: group.created_at,
     updatedAt: maxIso([group.updated_at, ...conversations.map((conversation) => conversation.updatedAt)]),
@@ -835,7 +869,7 @@ function renderOrchestratorOverviewBlocks(orchestrator: WatchOrchestrator): Watc
     timestamp: orchestrator.updatedAt || null,
     status: orchestrator.status,
     body: [
-      `Workers: ${orchestrator.runningCount} running / ${orchestrator.conversations.length} total`,
+      `Workers: ${orchestrator.runningCount} running / ${orchestrator.workerCount} total`,
       `Open: ${formatDurationBetween(orchestrator.createdAt, generatedAt)}`,
       `Last update: ${formatRelativeTime(orchestrator.updatedAt, generatedAt)}`,
       `Workspace: ${orchestrator.cwd}`,
@@ -847,14 +881,17 @@ function renderOrchestratorOverviewBlocks(orchestrator: WatchOrchestrator): Watc
   }];
 
   if (orchestrator.conversations.length === 0) {
+    const limited = orchestrator.workerCount > 0;
     blocks.push({
       id: `${orchestrator.id}:empty`,
       actor: 'system',
       label: 'Workers',
-      title: 'No worker conversations yet',
+      title: limited ? 'Worker details outside current limit' : 'No worker conversations yet',
       timestamp: null,
       status: null,
-      body: 'No worker conversations are recorded for this orchestrator yet.',
+      body: limited
+        ? `This orchestrator has ${orchestrator.workerCount} recorded worker run${orchestrator.workerCount === 1 ? '' : 's'}, but none are inside the current watch detail limit. Increase --limit to include older worker details.`
+        : 'No worker conversations are recorded for this orchestrator yet.',
       round: null,
       tone: 'status',
       subtle: true,

@@ -597,6 +597,9 @@ export const GetObservabilitySnapshotInputSchema = z.object({
 export type GetObservabilitySnapshotInput = z.input<typeof GetObservabilitySnapshotInputSchema>;
 export type GetObservabilitySnapshot = z.output<typeof GetObservabilitySnapshotInputSchema>;
 
+export const GetLiveOrchestratorsInputSchema = z.object({});
+export type GetLiveOrchestratorsInput = z.input<typeof GetLiveOrchestratorsInputSchema>;
+
 export const ObservabilityArtifactSchema = z.object({
   name: z.string(),
   path: z.string(),
@@ -847,6 +850,7 @@ export const RpcMethodSchema = z.enum([
   'cancel_run',
   'get_backend_status',
   'get_observability_snapshot',
+  'get_live_orchestrators',
   // Orchestrator status (issue #40). Internal-only IPC; not exposed as MCP
   // tools so the model cannot forge supervisor turn signals or orchestrator
   // identity.

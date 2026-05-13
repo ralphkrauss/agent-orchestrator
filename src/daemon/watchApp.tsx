@@ -7,8 +7,10 @@ import {
   clampWatchDashboardState,
   createWatchDashboardState,
   renderMarkdownToAnsi,
+  selectWatchSidebarItemAt,
   selectedWatchSidebarItem,
   selectedWatchTranscriptBlocks,
+  watchMouseClickPosition,
   watchSidebarItems,
   type WatchDashboardState,
   type WatchSidebarItem,
@@ -154,6 +156,14 @@ export function WatchApp({ initialEnvelope, readSnapshot, intervalMs, stdin, std
     const inputStream = stdin;
     const onData = (chunk: Buffer | string) => {
       const input = chunk.toString();
+      const clickedRow = sidebarItemIndexFromMouse(input, sidebarWidth, bodyHeight, Boolean(model.error));
+      if (clickedRow !== null) {
+        const nextState = selectWatchSidebarItemAt(stateRef.current, model, clickedRow);
+        stateRef.current = nextState;
+        setState(nextState);
+        return;
+      }
+
       const result = applyWatchRawInput(stateRef.current, model, input, mainWidth - 2, transcriptHeight, transcriptMaxScroll);
       stateRef.current = result.state;
       if (result.quit) {
@@ -201,13 +211,19 @@ function Header({ model, state }: { model: WatchViewModel; state: WatchDashboard
 
 function Sidebar({ model, state, width, height }: { model: WatchViewModel; state: WatchDashboardState; width: number; height: number }): React.ReactElement {
   const items = watchSidebarItems(model, state);
-  const rows = items.slice(0, height - 2);
+  const contentHeight = Math.max(1, height - 3);
+  const rows = items.slice(0, contentHeight);
   const title = state.mode === 'live' ? 'Live orchestrators' : 'Archive';
+  const renderedRows = rows.length === 0
+    ? [<Text key="empty" dimColor>{state.mode === 'live' ? 'No live sessions.' : 'No archived sessions.'}</Text>]
+    : rows.map((item) => <SidebarRow key={item.id} item={item} selected={item.id === state.selectedId} state={state} />);
+  while (renderedRows.length < contentHeight) {
+    renderedRows.push(<Text key={`pad:${renderedRows.length}`}> </Text>);
+  }
   return (
     <Box flexDirection="column" width={width} height={height} borderStyle="single" borderColor="gray" paddingX={1}>
       <Text bold color={state.mode === 'live' ? 'green' : 'yellow'}>{title}</Text>
-      {rows.length === 0 ? <Text dimColor>{state.mode === 'live' ? 'No live sessions.' : 'No archived sessions.'}</Text> : null}
-      {rows.map((item) => <SidebarRow key={item.id} item={item} selected={item.id === state.selectedId} state={state} />)}
+      {renderedRows}
     </Box>
   );
 }
@@ -224,14 +240,9 @@ function SidebarRow({ item, selected, state }: { item: WatchSidebarItem; selecte
 
   const conversation = item.conversation!;
   return (
-    <Box flexDirection="column">
-      <SelectedText selected={selected}>
-        {'  '}{selected ? '>' : ' '} {statusLabel(conversation.status)} {conversation.workerName}
-      </SelectedText>
-      <SelectedText selected={selected} dim={!selected}>
-        {'      '}{plainSidebarText(conversation.title)}
-      </SelectedText>
-    </Box>
+    <SelectedText selected={selected} dim={!selected}>
+      {'  '}{selected ? '>' : ' '} {statusLabel(conversation.status)} {conversation.workerName}  {plainSidebarText(conversation.title)}
+    </SelectedText>
   );
 }
 
@@ -310,9 +321,18 @@ function MainPane({
 function Footer({ state, mouseCapture }: { state: WatchDashboardState; mouseCapture: boolean }): React.ReactElement {
   return (
     <Text dimColor>
-      Up/Down j/k select | wheel/u/d scroll | m {mouseCapture ? 'text' : 'wheel'} | Space | Tab {state.mode === 'live' ? 'archive' : 'live'} | q quit
+      Up/Down j/k/click select | wheel/u/d scroll | m {mouseCapture ? 'text' : 'wheel'} | Space | Tab {state.mode === 'live' ? 'archive' : 'live'} | q quit
     </Text>
   );
+}
+
+function sidebarItemIndexFromMouse(input: string, sidebarWidth: number, bodyHeight: number, hasErrorLine: boolean): number | null {
+  const click = watchMouseClickPosition(input);
+  if (!click || click.x < 1 || click.x > sidebarWidth) return null;
+  const bodyTop = hasErrorLine ? 3 : 2;
+  const rowIndex = click.y - bodyTop - 2;
+  const contentHeight = Math.max(1, bodyHeight - 3);
+  return rowIndex >= 0 && rowIndex < contentHeight ? rowIndex : null;
 }
 
 type TranscriptRow =
