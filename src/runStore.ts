@@ -176,6 +176,7 @@ export class RunStore {
         service_tier: null,
         mode: null,
         codex_network: null,
+        worker_posture: null,
       },
       requested_session_id: input.requested_session_id ?? null,
       observed_session_id: input.observed_session_id ?? null,

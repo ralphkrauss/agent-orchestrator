@@ -28,6 +28,7 @@ import {
   UpsertWorkerProfileInputSchema,
   WaitForAnyRunInputSchema,
   WaitForRunInputSchema,
+  WorkerPostureSchema,
   wrapErr,
   wrapOk,
   type Backend,
@@ -50,6 +51,7 @@ import {
   type ToolResponse,
   type UpsertWorkerProfile,
   type WorkerEvent,
+  type WorkerPosture,
   type WorkerResult,
 } from './contract.js';
 import { errorFromEvent } from './backend/common.js';
@@ -147,6 +149,10 @@ interface ResolvedStartRunTarget {
   reasoningEffort: ReasoningEffort | undefined;
   serviceTier: ServiceTier | undefined;
   codexNetwork: CodexNetwork | undefined;
+  // Issue #58: resolved worker posture from profile or direct-mode input.
+  // `undefined` means "not specified"; `modelSettingsForBackend` normalizes
+  // to the concrete `'trusted'` default before persistence.
+  workerPosture: WorkerPosture | undefined;
   metadata: Record<string, unknown>;
   profileId: string | null;
   accountSpawn?: AccountSpawnContribution;
@@ -350,14 +356,14 @@ export class OrchestratorService {
     const input = parsed.data;
     const resolved = await this.resolveStartRunTarget(input);
     if (!resolved.ok) return wrapErr(resolved.error);
-    const { backendName, runtime, model, reasoningEffort, serviceTier, codexNetwork, metadata: resolvedMetadata, profileId } = resolved.value;
+    const { backendName, runtime, model, reasoningEffort, serviceTier, codexNetwork, workerPosture, metadata: resolvedMetadata, profileId } = resolved.value;
     const metadata = stampOrchestratorIdInMetadata(resolvedMetadata, context.policy_context);
     const accountSpawn = resolved.value.accountSpawn;
     const idleTimeout = this.resolveIdleTimeout(input.idle_timeout_seconds);
     if (!idleTimeout.ok) return wrapErr(idleTimeout.error);
     const executionTimeout = this.resolveExecutionTimeout(input.execution_timeout_seconds);
     if (!executionTimeout.ok) return wrapErr(executionTimeout.error);
-    const settings = modelSettingsForBackend(backendName, model, reasoningEffort, serviceTier, codexNetwork);
+    const settings = modelSettingsForBackend(backendName, model, reasoningEffort, serviceTier, codexNetwork, workerPosture);
     if (!settings.ok) return wrapErr(settings.error);
 
     const meta = await this.store.createRun({
@@ -373,26 +379,38 @@ export class OrchestratorService {
       execution_timeout_seconds: executionTimeout.value,
     });
     await this.captureAndPersistGitSnapshot(meta.run_id, input.cwd);
-    await this.maybeEmitCodexNetworkDefaultWarning(meta.run_id, backendName, codexNetwork, profileId);
+    await this.maybeEmitCodexNetworkDefaultWarning(meta.run_id, backendName, codexNetwork, profileId, settings.value.worker_posture ?? 'trusted');
 
     await this.startManagedRun(meta.run_id, runtime, input.prompt, input.cwd, idleTimeout.value, executionTimeout.value, settings.value, model, undefined, accountSpawn);
     return wrapOk({ run_id: meta.run_id });
   }
 
   // C12 / T11: emit a single non-blocking lifecycle warning event when a codex
-  // run resolved its codex_network from the OD1=B default ('isolated') because
-  // neither the profile nor the direct-mode argument set it explicitly. The
-  // warning never blocks the run; it surfaces in the run's event log alongside
-  // failing tool calls so users hitting the breaking change can correlate.
+  // run resolved its codex_network from the issue #31 OD1=B default
+  // ('isolated', --ignore-user-config, no network) because neither the
+  // profile nor the direct-mode argument set it explicitly. The warning
+  // surfaces in the run's event log alongside failing tool calls so users
+  // hitting the breaking change can correlate.
+  //
+  // Issue #58 review follow-up (Medium 1): suppress the warning under
+  // `worker_posture: 'trusted'`. The trusted-default behavior (workspace-write
+  // sandbox + network on) is the intended product direction, not a surprise
+  // breaking change; there is also no explicit `codex_network` enum value
+  // an operator could set to preserve the same argv (null is the trusted
+  // default, distinct from 'isolated' / 'workspace' / 'user-config'). Only
+  // restricted+absent keeps emitting the warning, since restricted preserves
+  // the issue #31 closed-by-default isolated behavior.
   private async maybeEmitCodexNetworkDefaultWarning(
     runId: string,
     backendName: Backend,
     explicitCodexNetwork: CodexNetwork | undefined,
     profileId: string | null,
+    workerPosture: WorkerPosture,
   ): Promise<void> {
     if (backendName !== 'codex' || explicitCodexNetwork !== undefined) return;
+    if (workerPosture !== 'restricted') return;
     const profilePart = profileId ? `profile ${profileId}` : 'direct-mode run';
-    const message = `agent-orchestrator codex_network not set on ${profilePart}; defaulting to 'isolated' (no network access). Set codex_network explicitly to silence this warning. See docs/development/codex-backend.md for migration.`;
+    const message = `agent-orchestrator codex_network not set on ${profilePart} (worker_posture=restricted); defaulting to 'isolated' (no network access, --ignore-user-config). Set codex_network explicitly to silence this warning, or move the profile to worker_posture: 'trusted' to opt into backend-native parity. See docs/development/codex-backend.md for migration.`;
     try {
       await this.store.appendEvent(runId, {
         type: 'lifecycle',
@@ -400,6 +418,7 @@ export class OrchestratorService {
           state: 'codex_network_defaulted',
           warning: message,
           profile: profileId,
+          worker_posture: workerPosture,
           resolved_codex_network: 'isolated',
           migration_doc: 'docs/development/codex-backend.md',
           issue: 31,
@@ -434,6 +453,7 @@ export class OrchestratorService {
           reasoningEffort: input.reasoning_effort,
           serviceTier: input.service_tier,
           codexNetwork: input.codex_network,
+          workerPosture: input.worker_posture,
           metadata,
           profileId: null,
           accountSpawn: claudeBinding.binding?.accountSpawn,
@@ -518,6 +538,7 @@ export class OrchestratorService {
         reasoningEffort: profileSettings.reasoningEffort,
         serviceTier: profileSettings.serviceTier,
         codexNetwork: profileSettings.codexNetwork,
+        workerPosture: profileSettings.workerPosture,
         metadata: applyClaudeBindingToMetadata(baseMetadata, claudeBinding.binding),
         profileId: profile.id,
         accountSpawn: claudeBinding.binding?.accountSpawn,
@@ -759,6 +780,13 @@ export class OrchestratorService {
     if (parsed.data.codex_network !== undefined && backendName !== 'codex') {
       return wrapErr(orchestratorError('INVALID_INPUT', `codex_network is only supported on the codex backend; got backend ${backendName}`));
     }
+    // Issue #58: worker_posture override mirrors the codex_network rule —
+    // profile-mode chains reject direct overrides so the profile manifest
+    // stays authoritative for the chain. Direct-mode chains accept the
+    // override and persist the new value on the child run record.
+    if (parsed.data.worker_posture !== undefined && chainOriginIsProfileMode) {
+      return wrapErr(orchestratorError('INVALID_INPUT', 'Profile-mode follow-ups cannot override worker_posture; edit the profile or run a direct-mode follow-up instead'));
+    }
     // Rotation eligibility check (D7 / D8). The decision carries a
     // `releaseLock` callback when rotation succeeded — must be called after
     // the new child's meta.json is durably written.
@@ -799,26 +827,62 @@ export class OrchestratorService {
     const inheritedCodexNetwork = parsed.data.codex_network !== undefined
       ? parsed.data.codex_network
       : (parent.meta.model_settings.codex_network ?? undefined);
+    // Issue #58: inherit worker_posture from parent unless the follow-up
+    // overrides it. Legacy parents (pre-#58) have `null`; that gets
+    // normalized to 'trusted' on the child write below.
+    const inheritedWorkerPosture: WorkerPosture | undefined = parsed.data.worker_posture !== undefined
+      ? parsed.data.worker_posture
+      : (parent.meta.model_settings.worker_posture ?? undefined);
     const settings = hasModelSettingsInput(parsed.data)
-      ? modelSettingsForBackend(backendName, model, parsed.data.reasoning_effort, parsed.data.service_tier, inheritedCodexNetwork)
+      ? modelSettingsForBackend(backendName, model, parsed.data.reasoning_effort, parsed.data.service_tier, inheritedCodexNetwork, inheritedWorkerPosture)
       : parsed.data.codex_network !== undefined
-        ? patchCodexNetwork(parent.meta.model_settings, parsed.data.codex_network)
-        : parsed.data.model || backendName === 'cursor'
-          ? validateInheritedModelSettingsForBackend(backendName, model, parent.meta.model_settings)
-          : { ok: true as const, value: parent.meta.model_settings };
+        ? patchCodexNetwork(parent.meta.model_settings, parsed.data.codex_network, inheritedWorkerPosture)
+        : {
+            ok: true as const,
+            value: parsed.data.worker_posture !== undefined
+              ? { ...parent.meta.model_settings, worker_posture: parsed.data.worker_posture }
+              : parent.meta.model_settings,
+          };
     if (!settings.ok) {
       releaseLock?.();
       return wrapErr(settings.error);
     }
+    // Issue #58 review Major (Comment 6): the posture-only branch above
+    // intentionally skips backend validation so a follow-up that only flips
+    // worker_posture does not have to re-validate the parent's inherited
+    // settings. But if the follow-up *also* changes the model (or targets
+    // cursor), the merged settings must run through
+    // validateInheritedModelSettingsForBackend just like a non-posture
+    // model-changing follow-up does — otherwise a `worker_posture + model`
+    // override could persist an invalid claude reasoning_effort/model
+    // combination or an incomplete cursor setup.
+    const validated = parsed.data.model || backendName === 'cursor'
+      ? validateInheritedModelSettingsForBackend(backendName, model, settings.value)
+      : settings;
+    if (!validated.ok) {
+      releaseLock?.();
+      return wrapErr(validated.error);
+    }
     // B2 (issue #31): normalize legacy parent records before persisting the
     // child. A legacy codex parent has model_settings.codex_network === null;
-    // sandboxArgs() defensively treats that as 'isolated', but the child run
-    // record must reflect the *effective* posture (plan invariant: "effective
-    // codex_network lands in run_summary.model_settings"). Only normalize for
-    // the codex backend; non-codex follow-ups must keep codex_network: null.
-    const persistedSettings = backendName === 'codex' && settings.value.codex_network === null
-      ? { ...settings.value, codex_network: 'isolated' as CodexNetwork, mode: 'normal' as const }
-      : settings.value;
+    // sandboxArgs() defensively treats that as 'isolated' under restricted,
+    // and the child run record must reflect the *effective* posture under
+    // restricted (plan invariant: "effective codex_network lands in
+    // run_summary.model_settings"). Only normalize for the codex backend;
+    // non-codex follow-ups must keep codex_network: null.
+    //
+    // Issue #58: same pattern for worker_posture (every backend), with one
+    // refinement for codex — the legacy-null → 'isolated' normalization is
+    // restricted-only. Under trusted, codex_network=null is the *effective*
+    // value (it means "trusted-default sandbox": workspace-write + network on)
+    // and must persist as null so re-runs spawn with the trusted-default argv.
+    const childPosture: WorkerPosture = validated.value.worker_posture ?? 'trusted';
+    const codexNormalized = backendName === 'codex' && validated.value.codex_network === null && childPosture === 'restricted'
+      ? { ...validated.value, codex_network: 'isolated' as CodexNetwork, mode: 'normal' as const }
+      : validated.value;
+    const persistedSettings: RunModelSettings = codexNormalized.worker_posture === null
+      ? { ...codexNormalized, worker_posture: 'trusted' as WorkerPosture }
+      : codexNormalized;
 
     let accountSpawn: AccountSpawnContribution | undefined;
     let metadata: Record<string, unknown> = baseMetadata;
@@ -2088,6 +2152,7 @@ function workerProfileFromUpsert(input: UpsertWorkerProfile): WorkerProfile {
   if (input.reasoning_effort !== undefined) profile.reasoning_effort = input.reasoning_effort;
   if (input.service_tier !== undefined) profile.service_tier = input.service_tier;
   if (input.codex_network !== undefined) profile.codex_network = input.codex_network;
+  if (input.worker_posture !== undefined) profile.worker_posture = input.worker_posture;
   if (input.description !== undefined) profile.description = input.description;
   if (input.metadata !== undefined) profile.metadata = input.metadata;
   if (input.claude_account !== undefined) profile.claude_account = input.claude_account;
@@ -2105,6 +2170,7 @@ function formatValidProfile(profile: ValidatedWorkerProfile): Record<string, unk
     reasoning_effort: profile.reasoning_effort ?? null,
     service_tier: profile.service_tier ?? null,
     codex_network: profile.codex_network ?? null,
+    worker_posture: profile.worker_posture ?? null,
     description: profile.description ?? null,
     metadata: profile.metadata ?? {},
     claude_account: profile.claude_account ?? null,
@@ -2133,15 +2199,18 @@ function hasModelSettingsInput(input: { reasoning_effort?: ReasoningEffort; serv
   return input.reasoning_effort !== undefined || input.service_tier !== undefined;
 }
 
-function patchCodexNetwork(settings: RunModelSettings, codexNetwork: CodexNetwork): { ok: true; value: RunModelSettings } {
+function patchCodexNetwork(settings: RunModelSettings, codexNetwork: CodexNetwork, workerPosture: WorkerPosture | undefined): { ok: true; value: RunModelSettings } {
   // Preserve reasoning_effort/service_tier from the parent; only patch
-  // codex_network (and re-derive the mode breadcrumb).
+  // codex_network (and re-derive the mode breadcrumb). Issue #58: a
+  // follow-up may also override worker_posture; preserve the inherited
+  // value when the follow-up did not.
   return {
     ok: true,
     value: {
       ...settings,
       mode: codexNetwork === 'isolated' ? 'normal' : null,
       codex_network: codexNetwork,
+      worker_posture: workerPosture ?? settings.worker_posture ?? null,
     },
   };
 }
@@ -2155,7 +2224,7 @@ function isProfileModeMetadata(metadata: Record<string, unknown>): boolean {
 function parseProfileModelSettings(
   profile: ValidatedWorkerProfile,
   profilesFile: string,
-): { ok: true; reasoningEffort: ReasoningEffort | undefined; serviceTier: ServiceTier | undefined; codexNetwork: CodexNetwork | undefined } | { ok: false; error: OrchestratorError } {
+): { ok: true; reasoningEffort: ReasoningEffort | undefined; serviceTier: ServiceTier | undefined; codexNetwork: CodexNetwork | undefined; workerPosture: WorkerPosture | undefined } | { ok: false; error: OrchestratorError } {
   const reasoningEffort = profile.reasoning_effort
     ? ReasoningEffortSchema.safeParse(profile.reasoning_effort)
     : null;
@@ -2195,11 +2264,28 @@ function parseProfileModelSettings(
     };
   }
 
+  // Issue #58: profile manifests store worker_posture as a plain string
+  // (`WorkerProfileSchema`); validate against the orchestrator's typed enum
+  // here so invalid values fail at start-run time with a clear error.
+  const workerPosture = profile.worker_posture
+    ? WorkerPostureSchema.safeParse(profile.worker_posture)
+    : null;
+  if (workerPosture && !workerPosture.success) {
+    return {
+      ok: false,
+      error: orchestratorError('INVALID_INPUT', `Profile ${profile.id} has invalid worker_posture ${profile.worker_posture} (must be 'trusted' or 'restricted')`, {
+        profile: profile.id,
+        profiles_file: profilesFile,
+      }),
+    };
+  }
+
   return {
     ok: true,
     reasoningEffort: reasoningEffort?.data,
     serviceTier: serviceTier?.data,
     codexNetwork: codexNetwork?.data,
+    workerPosture: workerPosture?.data,
   };
 }
 
@@ -2305,23 +2391,32 @@ function modelSettingsForBackend(
   reasoningEffort: ReasoningEffort | undefined,
   serviceTier: ServiceTier | undefined,
   codexNetwork: CodexNetwork | undefined,
+  workerPosture: WorkerPosture | undefined,
 ): { ok: true; value: RunModelSettings } | { ok: false; error: OrchestratorError } {
+  // Issue #58: resolved posture lands on every run record. Default to
+  // 'trusted' when the caller did not specify one, so new runs always carry
+  // a concrete value (legacy null only persists for pre-#58 run records).
+  const resolvedWorkerPosture: WorkerPosture = workerPosture ?? 'trusted';
   if (backend === 'codex') {
     if (reasoningEffort === 'max') {
       return { ok: false, error: orchestratorError('INVALID_INPUT', 'Codex reasoning_effort must be one of none, minimal, low, medium, high, or xhigh') };
     }
-    // Per OD1 = B (issue #31, locked 2026-05-05): the codex backend's network
-    // posture is now driven exclusively by codex_network. service_tier no
-    // longer derives mode='normal' (and therefore no longer derives
-    // --ignore-user-config). When codex_network is unset we default to
-    // 'isolated', matching the locked OD1 = B uniform default. The internal
-    // `mode` field is retained as a derived breadcrumb (now derived from
-    // codex_network rather than service_tier) so observability and
-    // run-record back-compat keep working. service_tier='normal' continues
-    // to be suppressed in serialization because codex's CLI default is
-    // 'normal'; explicit re-emission of the default would add no behavior
-    // and would churn the codex argv shape.
-    const resolvedCodexNetwork: CodexNetwork = codexNetwork ?? 'isolated';
+    // Issue #58 review follow-up (High): codex_network defaulting is now
+    // posture-aware. The trusted-default argv (sandbox_mode="workspace-write"
+    // + network_access=true) is distinct from explicit codex_network='isolated'
+    // (no flags) and from explicit codex_network='workspace' (only
+    // network_access=true). To preserve those three argv cells distinctly,
+    // trusted+absent must leave codex_network null on the run record so
+    // `sandboxArgs()` can emit the trusted-default flags. Restricted keeps the
+    // issue #31 OD1=B uniform default of 'isolated' on absent so the v1
+    // contract continues to hold for opt-in callers.
+    //
+    // The internal `mode` field stays as a derived breadcrumb: 'normal' only
+    // when the resolved codex_network is 'isolated', otherwise null.
+    // service_tier='normal' continues to be suppressed in serialization
+    // because codex's CLI default is 'normal'.
+    const resolvedCodexNetwork: CodexNetwork | null = codexNetwork
+      ?? (resolvedWorkerPosture === 'restricted' ? 'isolated' : null);
     return {
       ok: true,
       value: {
@@ -2329,6 +2424,7 @@ function modelSettingsForBackend(
         service_tier: serviceTier && serviceTier !== 'normal' ? serviceTier : null,
         mode: resolvedCodexNetwork === 'isolated' ? 'normal' : null,
         codex_network: resolvedCodexNetwork,
+        worker_posture: resolvedWorkerPosture,
       },
     };
   }
@@ -2354,6 +2450,7 @@ function modelSettingsForBackend(
         service_tier: null,
         mode: null,
         codex_network: null,
+        worker_posture: resolvedWorkerPosture,
       },
     };
   }
@@ -2370,6 +2467,7 @@ function modelSettingsForBackend(
       service_tier: null,
       mode: null,
       codex_network: null,
+      worker_posture: resolvedWorkerPosture,
     },
   };
 }

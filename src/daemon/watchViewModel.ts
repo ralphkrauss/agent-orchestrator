@@ -682,7 +682,7 @@ function conversationFromDraft(draft: ConversationDraft): WatchConversation {
     purpose: compactText(root?.prompt.summary ?? placeholder?.summary ?? root?.prompt.preview ?? placeholder?.preview ?? draft.rootRunId, 140),
     summary: root?.prompt.summary ?? placeholder?.summary ?? null,
     model: root ? formatModelName(root) : formatModelLike(placeholder?.model.name ?? null),
-    settings: root?.settings ?? placeholder?.settings ?? { reasoning_effort: null, service_tier: null, mode: null, codex_network: null },
+    settings: root?.settings ?? placeholder?.settings ?? { reasoning_effort: null, service_tier: null, mode: null, codex_network: null, worker_posture: null },
     createdAt: root?.run.created_at ?? placeholder?.created_at ?? '',
     updatedAt: maxIso([
       ...runs.map(latestObservedAt),

@@ -123,10 +123,24 @@ export interface CursorAgent {
   [Symbol.asyncDispose]?: () => Promise<void>;
 }
 
+// Issue #58: subset of @cursor/sdk's SettingSource (LocalAgentOptions.settingSources)
+// re-declared here so the shim stays decoupled from the optional SDK package
+// when it is not installed. Type kept in sync with @cursor/sdk 1.0.12.
+export type CursorSettingSource = 'project' | 'user' | 'team' | 'mdm' | 'plugins' | 'all';
+
+export interface CursorSandboxOptions {
+  enabled: boolean;
+}
+
 export interface CursorAgentCreateOptions {
   apiKey?: string;
   model?: { id: string; params?: { id: string; value: string }[] };
-  local?: { cwd?: string };
+  // Issue #58: extend local options to forward `settingSources` and
+  // `sandboxOptions` to `Agent.create`. Trusted-posture cursor workers
+  // pass `settingSources: ['all']` so the SDK loads every ambient settings
+  // layer (project / user / team / mdm / plugins) — the documented full-parity
+  // value (review rev. 2 F4).
+  local?: { cwd?: string; settingSources?: CursorSettingSource[]; sandboxOptions?: CursorSandboxOptions };
   agentId?: string;
   name?: string;
 }
@@ -134,7 +148,11 @@ export interface CursorAgentCreateOptions {
 export interface CursorAgentResumeOptions {
   apiKey?: string;
   model?: { id: string; params?: { id: string; value: string }[] };
-  local?: { cwd?: string };
+  // Resume must also receive `settingSources` to preserve parity across the
+  // start → resume boundary (SDK docs note inline `mcpServers` do not
+  // persist across resume, so file-backed `settingSources` is the resume-safe
+  // path).
+  local?: { cwd?: string; settingSources?: CursorSettingSource[]; sandboxOptions?: CursorSandboxOptions };
 }
 
 export interface CursorAgentApi {

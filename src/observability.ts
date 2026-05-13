@@ -391,7 +391,9 @@ function orchestratorWorker(run: ObservabilityRun): ObservabilityOrchestratorWor
 }
 
 function sortRunsChronologically(runs: ObservabilityRun[]): ObservabilityRun[] {
-  return runs.slice().sort((a, b) => a.run.created_at.localeCompare(b.run.created_at));
+  return runs.slice().sort((a, b) =>
+    a.run.created_at.localeCompare(b.run.created_at)
+    || a.run.run_id.localeCompare(b.run.run_id));
 }
 
 function archivedOrchestratorLabel(runs: ObservabilityRun[], orchestratorId: string): string {

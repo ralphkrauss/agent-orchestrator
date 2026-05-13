@@ -52,6 +52,66 @@ into the secrets file.
 > belongs in `~/.config/agent-orchestrator/secrets.env`; see
 > [`auth-setup.md`](auth-setup.md).
 
+## Workers And Project MCP Servers
+
+Worker runs (the local Codex / Claude / Cursor processes spawned by the
+daemon, distinct from the supervisor) opt into backend-native parity via the
+`worker_posture` profile field introduced by issue #58. The field is also
+accepted as a direct-mode override on `start_run` and `send_followup`. Two
+values:
+
+- `trusted` (default) — worker behaves like a manual run from the project
+  worktree. Loads project MCP servers, project / user / local Claude Code
+  scopes, and project / user codex config.
+- `restricted` — worker keeps the pre-#58 isolated envelope. Closed by
+  default; opt in per profile when needed.
+
+Per-backend mapping under `trusted`:
+
+| Backend | What `trusted` does | What changes vs. pre-#58 |
+|---|---|---|
+| Claude (worker) | `--setting-sources user,project,local`, per-run settings body includes `enableAllProjectMcpServers: true`. `disableAllHooks: true` and CLI `--permission-mode bypassPermissions` still pinned by precedence — project hooks cannot fire and project `permissionMode` cannot stall the worker. | Was `--setting-sources user` only; project `.mcp.json` and `.claude/settings.json` were invisible. |
+| Codex (worker) | `--ignore-user-config` is **never** emitted. Sandbox / network argv driven by `codex_network` via `-c key=value` overrides (resume-safe on `codex exec resume`). When `codex_network` is unset, trusted defaults to `-c sandbox_mode="workspace-write" -c sandbox_workspace_write.network_access=true`. | Was `--ignore-user-config` by default; existing profiles with explicit `codex_network: workspace` also lose `--ignore-user-config` under trusted (migration note in [`codex-backend.md`](codex-backend.md)). |
+| Cursor (worker) | `Agent.create` and `Agent.resume` receive `local.settingSources: ['all']` — every ambient Cursor settings layer (project, user, team, MDM, plugins) loads. | Shim previously forwarded only `cwd`; project / global Cursor settings were invisible. |
+
+The Claude **supervisor** envelope (`agent-orchestrator claude` and
+`buildClaudeSpawnArgs` in `src/claude/launcher.ts`) is **always restricted**
+and ignores `worker_posture`. It keeps `--strict-mcp-config` plus the
+orchestrator-owned MCP config and the `--tools` / `dontAsk` deny-by-default
+surface, so the supervisor's tool envelope stays curated.
+
+A `worker_posture` lifecycle event is appended at the head of every worker
+run's event stream so `get_run_events` answers "what did this worker
+actually load?" deterministically. The Claude and Codex backends emit the
+event via `WorkerInvocation.initialEvents`, which `ProcessManager.start()`
+flushes once per actual spawn; `CliRuntime.buildStartInvocation()` strips
+the field on the pre-bake retry path so a retry that never spawns does not
+record false telemetry. The Cursor SDK runtime (which does not produce a
+`WorkerInvocation`) appends the same event via `store.appendEvent()` after
+`Agent.create` / `Agent.resume` succeeds and before the first SDK stream
+message; pre-spawn failures emit no event.
+
+### Trust Boundary
+
+Enabling project MCP on workers means treating `.mcp.json` (Claude) and
+`.codex/config.toml` (Codex) entries as **executable local config** that
+runs in the worker process environment. Project stdio MCP servers spawn at
+MCP init outside the model tool path, so a malicious or compromised entry
+runs as the same OS user as the daemon. This is the same trust model as a
+manual `claude` or `codex exec` invocation from the project worktree.
+
+Two implications:
+
+1. Workers were already trusted-local, full-access processes — `worker_posture: 'trusted'`
+   does not weaken any sandbox; it widens *what worker processes can see*.
+2. Secret-bearing project MCP entries must continue to route through
+   `scripts/mcp-secret-bridge.mjs` so credentials are resolved from
+   `~/.config/agent-orchestrator/mcp-secrets.env`, process env, or `gh auth
+   token` — never committed to the repo.
+
+Set `worker_posture: 'restricted'` on a profile (or pass it as a direct-mode
+argument on `start_run`) when you need the pre-#58 closed-by-default envelope.
+
 ## Client Setup
 
 Claude Code reads:
@@ -183,6 +243,71 @@ Claude:
 agent-orchestrator claude --print-discovery
 agent-orchestrator claude --print-config --cwd /path/to/workspace
 ```
+
+#### Customizing the Claude supervisor system prompt (append-only)
+
+`agent-orchestrator claude` accepts user-supplied text that is *appended* to
+the supervisor system prompt after the harness-owned isolation contract. The
+harness allowlist (`--tools`, `--allowed-tools`, `--permission-mode dontAsk`)
+is the authoritative tool gate regardless of any user prompt text; appended
+text cannot loosen the wire-level tool surface.
+
+Three surfaces in precedence order (top wins):
+
+1. `--no-append-system-prompt` — explicit escape hatch that forces
+   `source = none` and suppresses every other source for this launch
+   (including the env vars and the convention file).
+2. `--append-system-prompt <text>` — inline CLI text (`source = cli-inline`).
+3. `--append-system-prompt-file <path>` — path resolved against the resolved
+   target cwd (`source = cli-file`).
+4. `AGENT_ORCHESTRATOR_CLAUDE_APPEND_SYSTEM_PROMPT` — env-var inline text
+   (`source = env-inline`).
+5. `AGENT_ORCHESTRATOR_CLAUDE_APPEND_SYSTEM_PROMPT_FILE` — env-var path,
+   resolved against the resolved target cwd (`source = env-file`).
+6. `<target-cwd>/.agents/orchestrator/system-prompt.md` — auto-loaded
+   convention file, opt-in by presence (`source = convention-file`).
+
+Combining `--append-system-prompt` and `--append-system-prompt-file` is a
+parse error; the two env vars together are the same parse error.
+`--no-append-system-prompt` overrides those conflict checks — the escape
+hatch always wins and produces `source = none`, suppressing CLI, env, and
+convention sources without inspecting the disk. An empty
+`AGENT_ORCHESTRATOR_CLAUDE_APPEND_SYSTEM_PROMPT` or
+`AGENT_ORCHESTRATOR_CLAUDE_APPEND_SYSTEM_PROMPT_FILE` value is treated as
+unset and falls through to the next precedence step; use
+`--no-append-system-prompt` for explicit suppression. When a
+higher-precedence source preempts a present convention file, the launcher
+writes a single-line stderr notice naming the skipped path. Only the
+**winning** file source is read from disk; preempted lower-precedence file
+sources (CLI, env, convention) are never opened, so a missing or oversize
+lower-precedence file does not block a higher-precedence source. A convention
+file that is a symlink, directory, or other non-regular file is refused
+(`lstat` guard) with a similar notice and treated as absent; CLI- and
+env-named paths are read as-is so legitimate dotfile symlink setups keep
+working.
+
+The resolved user text is concatenated after the harness prompt with the
+literal delimiter `\n\n---\n# User-supplied supervisor prompt\n\n` into the
+single envelope `system-prompt.md`. The Claude spawn args remain
+`--append-system-prompt-file <envelope-file>` exactly; there is no second
+instance and no new Claude flag surface. Behavior:
+
+- Content is read as bytes. The 64 KB cap is byte-based and applies after a
+  leading UTF-8 BOM is stripped (the boundary is `65 536` accepted /
+  `65 537` rejected).
+- Trailing whitespace is trimmed; CRLF inside the body is preserved; leading
+  Markdown (headings, lists) is preserved.
+- A missing CLI- or env-named file fails the launch with a typed error
+  pointing at the source tag and path. A missing convention file is silent.
+- `--append-system-prompt` and `--append-system-prompt-file` *after* the
+  `--` separator are rejected by the passthrough validator because the
+  harness owns Claude's append-system-prompt flag. Use the launcher flag
+  before `--` (or the env var) instead.
+- `agent-orchestrator claude --print-config` always renders
+  `# user system prompt source <tag>` and adds a `# user system prompt path`
+  line for file sources plus a `# user system prompt (append)` section when
+  the resolved text is non-empty. An empty/whitespace-only source renders
+  as `<tag> (empty)`.
 
 ### Notification-aware run supervision
 

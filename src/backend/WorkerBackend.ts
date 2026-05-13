@@ -48,6 +48,18 @@ export interface WorkerInvocation {
    * `ProcessManager.start` behaves exactly as today.
    */
   earlyEventInterceptor?: EarlyEventInterceptor;
+  /**
+   * Issue #58: backend-supplied lifecycle events to append at actual spawn
+   * time, ahead of the `status: started` marker. `ProcessManager.start()`
+   * is the single flusher; `CliRuntime.buildStartInvocation()` strips this
+   * field so pre-bake retry invocations (which may never spawn) do not
+   * record false telemetry. Used by Claude and Codex to emit a single
+   * `{ state: 'worker_posture', ... }` event describing the resolved
+   * trusted/restricted mapping for this run. The Cursor SDK runtime uses a
+   * separate `store.appendEvent()` path (see `src/backend/cursor/runtime.ts`)
+   * because it does not produce a `WorkerInvocation`.
+   */
+  initialEvents?: Omit<WorkerEvent, 'seq' | 'ts'>[];
 }
 
 export type EarlyEventInterceptorOutcome = 'continue' | 'retry_with_start';

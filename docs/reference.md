@@ -213,15 +213,37 @@ Expected operational failures use `{ ok: false, error }`. MCP `isError: true` is
 
 `reasoning_effort` maps to Codex `model_reasoning_effort` or Claude `--effort`. `service_tier` is Codex-only.
 
-`codex_network` is Codex-only:
+`worker_posture` (issue #58) controls whether workers see project / user
+configuration and MCP servers, independently of `codex_network`:
 
 | Value | Behavior |
 |---|---|
-| `isolated` | Passes `--ignore-user-config`; network remains closed by Codex defaults. |
-| `workspace` | Passes `--ignore-user-config` and enables workspace-write network access. |
-| `user-config` | Lets Codex read `$CODEX_HOME/config.toml` verbatim. |
+| `trusted` (default) | Worker gets backend-native parity with a manual run from the project worktree. Claude loads project/user/local setting-sources and auto-approves project MCP servers; Codex loads user + project `config.toml`; Cursor loads every ambient SDK settings layer. |
+| `restricted` | Orchestrator-curated isolated envelope (pre-#58 closed-by-default). Codex emits `--ignore-user-config`; Claude restricts setting-sources to `user`; Cursor omits ambient `settingSources`. |
 
-Codex profiles that omit `codex_network` default to `isolated`. See [development/codex-backend.md](development/codex-backend.md) for the migration table.
+The Claude supervisor envelope is always restricted and ignores
+`worker_posture`. Direct-mode `start_run` / `send_followup` accept the field;
+profile-mode rejects mixing (set it on the profile manifest).
+
+`codex_network` is Codex-only and independent of `worker_posture`. The effective
+argv depends on both axes (issue #58 review follow-up):
+
+| Posture × `codex_network` | Argv |
+|---|---|
+| `trusted` + unset | `-c sandbox_mode="workspace-write" -c sandbox_workspace_write.network_access=true` (persisted as `codex_network: null`) |
+| `trusted` + `isolated` | (no sandbox flags; codex defaults apply) |
+| `trusted` + `workspace` | `-c sandbox_workspace_write.network_access=true` |
+| `trusted` + `user-config` | (no flags) |
+| `restricted` + unset or `isolated` | `--ignore-user-config` |
+| `restricted` + `workspace` | `--ignore-user-config -c sandbox_workspace_write.network_access=true` |
+| `restricted` + `user-config` | (no flags) |
+
+Under `worker_posture: 'restricted'`, codex profiles that omit
+`codex_network` resolve to `'isolated'` and emit a one-off
+`codex_network_defaulted` lifecycle warning the first time the run starts;
+under `'trusted'` the warning is suppressed since the absence is the
+intended default. See [development/codex-backend.md](development/codex-backend.md)
+for the migration table.
 
 ## Long-Running Runs
 

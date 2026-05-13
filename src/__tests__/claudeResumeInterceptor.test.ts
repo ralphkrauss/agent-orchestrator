@@ -524,4 +524,62 @@ process.stdin.on('end', () => {
       'retry assistant_message must NOT be present at hook-fire time',
     );
   });
+
+  it('Test 8 — retry path emits exactly one worker_posture event (issue #58 review follow-up Medium 3)', async () => {
+    // Both the first attempt and the retry invocation carry their own
+    // initialEvents (the realistic shape — `backend.start()` populates
+    // it per invocation). The first attempt's event is buffered and
+    // dropped along with the cancelled-attempt stream; the retry's
+    // event must land so the run ends with exactly one posture event.
+    const root = await mkdtemp(join(tmpdir(), 'cor-resume-posture-'));
+    const failingCli = join(root, 'fail.js');
+    const successCli = join(root, 'ok.js');
+    await writeFakeClaude(failingCli, `
+process.stdin.on('data', () => {});
+process.stdin.on('end', () => {
+  console.log(JSON.stringify({ type: 'error', subtype: 'session_not_found', message: 'session not found' }));
+  setInterval(() => {}, 1000);
+});`);
+    await writeFakeClaude(successCli, `
+process.stdin.on('data', () => {});
+process.stdin.on('end', () => {
+  console.log(JSON.stringify({ type: 'system', subtype: 'init', session_id: 'sid-posture' }));
+  console.log(JSON.stringify({ type: 'result', subtype: 'success', result: 'ok', session_id: 'sid-posture' }));
+  process.exit(0);
+});`);
+
+    const store = new MarkTerminalCounterStore(root);
+    const run = await store.createRun({ backend: 'claude', cwd: root });
+    const manager = new ProcessManager(store);
+
+    const retryInvocation: WorkerInvocation = {
+      ...claudeInvocation({ cli: successCli, cwd: root }),
+      initialEvents: [{
+        type: 'lifecycle',
+        payload: { state: 'worker_posture', backend: 'claude', worker_posture: 'trusted', attempt: 'retry' },
+      }],
+    };
+    const interceptor: EarlyEventInterceptor = {
+      thresholdEvents: 50,
+      thresholdMs: 5_000,
+      classify: buildClassify(),
+      retryInvocation,
+    };
+    const invocation: WorkerInvocation = {
+      ...claudeInvocation({ cli: failingCli, cwd: root, interceptor }),
+      initialEvents: [{
+        type: 'lifecycle',
+        payload: { state: 'worker_posture', backend: 'claude', worker_posture: 'trusted', attempt: 'first' },
+      }],
+    };
+
+    const managed = await manager.start(run.run_id, new ClaudeBackend(), invocation);
+    await managed.completion;
+
+    const events = await readEvents(store, run.run_id);
+    const postureEvents = events.filter((event) => event.type === 'lifecycle' && (event.payload as { state?: string }).state === 'worker_posture');
+    assert.equal(postureEvents.length, 1, 'retry path must end with exactly one worker_posture event');
+    // The surviving event MUST be the retry's, not the cancelled first attempt's.
+    assert.equal((postureEvents[0]!.payload as { attempt?: string }).attempt, 'retry', 'cancelled first-attempt posture event was dropped; only the retry event survives');
+  });
 });

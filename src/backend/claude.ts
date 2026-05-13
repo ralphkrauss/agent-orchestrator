@@ -1,5 +1,6 @@
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import type { WorkerEvent, WorkerPosture } from '../contract.js';
 import type { RunStore } from '../runStore.js';
 import type { BackendStartInput, ParsedBackendEvent, WorkerInvocation } from './WorkerBackend.js';
 import { BaseBackend, classifyBackendError, commandFromToolInput, emptyParsedEvent, errorFromEvent, extractText, getRecord, getString, invocation, matchesClaudeCliBanner, pathFromToolInput } from './common.js';
@@ -25,7 +26,14 @@ import { BaseBackend, classifyBackendError, commandFromToolInput, emptyParsedEve
  * - `disableAllHooks: true` preserves hook isolation so inherited user
  *   `~/.claude/settings.json` hooks cannot fire under workers (issue #40,
  *   Decisions 9 / 26 / T5 / T13). Hook isolation is independent of the
- *   permission posture and is also NOT a tool sandbox.
+ *   permission posture and is also NOT a tool sandbox. Pinned under both
+ *   trusted and restricted postures (issue #58 Decision 5).
+ * - `enableAllProjectMcpServers: true` is added under the `'trusted'`
+ *   posture (issue #58 Decision 5). Without it, workers loading
+ *   `--setting-sources user,project,local` would stall on the project-MCP
+ *   approval prompt that a non-interactive worker cannot answer. Under
+ *   `'restricted'` posture this key is omitted to preserve the pre-#58
+ *   behavior exactly.
  *
  * The `--permission-mode bypassPermissions` CLI flag is set in addition to
  * the in-file `defaultMode` to mirror the supervisor envelope
@@ -33,10 +41,19 @@ import { BaseBackend, classifyBackendError, commandFromToolInput, emptyParsedEve
  * precedence drift across Claude Code versions where the CLI flag may take
  * precedence over file settings.
  *
- * `--setting-sources user` plus `--settings <path>` is the chosen v1
- * isolation method; `CLAUDE_CONFIG_DIR` is intentionally not redirected
- * (Decision 26). Decision 9b documents the redirected fallback if T13 proves
- * this approach insufficient.
+ * Issue #58: under `worker_posture: 'trusted'` (the new default) the spawn
+ * argv pairs `--settings <path>` with `--setting-sources user,project,local`
+ * so workers see project / user / local Claude Code scopes — MCP servers,
+ * settings, subagents, plugins, CLAUDE.md. Per-run `--settings <path>`
+ * precedence over `--setting-sources` merge plus the CLI `--permission-mode`
+ * flag preserve the hook-isolation and bypass-permissions contracts even
+ * when project `.claude/settings.json` defines hooks or a stricter
+ * permission mode. Under `worker_posture: 'restricted'` the v1 envelope
+ * (`--setting-sources user`) is preserved verbatim.
+ *
+ * `CLAUDE_CONFIG_DIR` is intentionally not redirected (Decision 26 of #40).
+ * Decision 9b documents the redirected fallback if T13 proves this
+ * approach insufficient.
  *
  * `--dangerously-skip-permissions` is forbidden everywhere in this harness
  * per issue #13 Decisions 7 / 21 and is NOT used here. The bypass posture is
@@ -44,14 +61,24 @@ import { BaseBackend, classifyBackendError, commandFromToolInput, emptyParsedEve
  * only.
  *
  * See issue #47 for the empirical reproduction that motivated adding the
- * permission keys, and issue #40 Decisions 9 / 26 for the underlying worker
- * isolation envelope.
+ * permission keys, issue #40 Decisions 9 / 26 for the underlying worker
+ * isolation envelope, and issue #58 for the trusted/restricted posture.
  */
 export const CLAUDE_WORKER_SETTINGS_FILENAME = 'claude-worker-settings.json';
 export const CLAUDE_WORKER_SETTINGS_BODY = {
   disableAllHooks: true,
   permissions: { defaultMode: 'bypassPermissions' },
   skipDangerousModePermissionPrompt: true,
+} as const;
+
+// Issue #58: trusted-posture worker settings include
+// `enableAllProjectMcpServers: true` so the worker auto-approves project
+// MCP servers (`.mcp.json`) at MCP init. Without this key, a worker loading
+// `--setting-sources user,project,local` would stall on the project-MCP
+// approval prompt that a non-interactive worker cannot answer.
+export const CLAUDE_TRUSTED_WORKER_SETTINGS_BODY = {
+  ...CLAUDE_WORKER_SETTINGS_BODY,
+  enableAllProjectMcpServers: true,
 } as const;
 
 export class ClaudeBackend extends BaseBackend {
@@ -64,23 +91,66 @@ export class ClaudeBackend extends BaseBackend {
 
   async start(input: BackendStartInput): Promise<WorkerInvocation> {
     const isolation = await this.prepareWorkerIsolation(input);
-    return invocation(this.binary, ['-p', '--output-format', 'stream-json', '--verbose', ...modelArgs(input.model), ...modelSettingsArgs(input.modelSettings), ...isolation], input);
+    const inv = invocation(this.binary, ['-p', '--output-format', 'stream-json', '--verbose', ...modelArgs(input.model), ...modelSettingsArgs(input.modelSettings), ...isolation.args], input);
+    if (isolation.initialEvents.length > 0) {
+      inv.initialEvents = isolation.initialEvents;
+    }
+    return inv;
   }
 
   async resume(sessionId: string, input: BackendStartInput): Promise<WorkerInvocation> {
     const isolation = await this.prepareWorkerIsolation(input);
-    return invocation(this.binary, ['-p', '--resume', sessionId, '--output-format', 'stream-json', '--verbose', ...modelArgs(input.model), ...modelSettingsArgs(input.modelSettings), ...isolation], input);
+    const inv = invocation(this.binary, ['-p', '--resume', sessionId, '--output-format', 'stream-json', '--verbose', ...modelArgs(input.model), ...modelSettingsArgs(input.modelSettings), ...isolation.args], input);
+    if (isolation.initialEvents.length > 0) {
+      inv.initialEvents = isolation.initialEvents;
+    }
+    return inv;
   }
 
-  private async prepareWorkerIsolation(input: BackendStartInput): Promise<string[]> {
-    if (!this.store || !input.runId) return [];
+  private async prepareWorkerIsolation(input: BackendStartInput): Promise<{ args: string[]; initialEvents: Omit<WorkerEvent, 'seq' | 'ts'>[] }> {
+    if (!this.store || !input.runId) {
+      // Legacy/direct-caller path: no run id, no per-run settings, no
+      // telemetry event. Preserves the existing contract documented by
+      // `claudeWorkerIsolation.test.ts` "omits worker isolation flags when
+      // no run id is supplied".
+      return { args: [], initialEvents: [] };
+    }
+    // Issue #58: branch on worker_posture. Legacy run records (pre-#58)
+    // have `worker_posture: null` in their model_settings; tolerate by
+    // defaulting to 'trusted' (the new product default). Operators who
+    // need the v1 closed-by-default envelope must opt in with
+    // `worker_posture: 'restricted'`.
+    const workerPosture: WorkerPosture = input.modelSettings.worker_posture ?? 'trusted';
+    const settingsBody = workerPosture === 'trusted'
+      ? CLAUDE_TRUSTED_WORKER_SETTINGS_BODY
+      : CLAUDE_WORKER_SETTINGS_BODY;
+    const settingSources = workerPosture === 'trusted' ? 'user,project,local' : 'user';
     const settingsPath = join(this.store.runDir(input.runId), CLAUDE_WORKER_SETTINGS_FILENAME);
     await writeFile(
       settingsPath,
-      `${JSON.stringify(CLAUDE_WORKER_SETTINGS_BODY, null, 2)}\n`,
+      `${JSON.stringify(settingsBody, null, 2)}\n`,
       { mode: 0o600 },
     );
-    return ['--settings', settingsPath, '--setting-sources', 'user', '--permission-mode', CLAUDE_WORKER_SETTINGS_BODY.permissions.defaultMode];
+    const args = ['--settings', settingsPath, '--setting-sources', settingSources, '--permission-mode', settingsBody.permissions.defaultMode];
+    // Issue #58 Decision 11: emit one spawn-time lifecycle event per worker
+    // so operators can see which posture and setting-sources value the
+    // worker actually used via `get_run_events`. Placed in
+    // `WorkerInvocation.initialEvents` so `ProcessManager.start()` flushes
+    // it once per actual spawn — `CliRuntime.buildStartInvocation()` strips
+    // it on the pre-bake retry path.
+    const initialEvents: Omit<WorkerEvent, 'seq' | 'ts'>[] = [{
+      type: 'lifecycle',
+      payload: {
+        state: 'worker_posture',
+        backend: 'claude',
+        worker_posture: workerPosture,
+        claude: {
+          setting_sources: settingSources,
+          enable_all_project_mcp_servers: workerPosture === 'trusted',
+        },
+      },
+    }];
+    return { args, initialEvents };
   }
 
   parseEvent(raw: unknown): ParsedBackendEvent {

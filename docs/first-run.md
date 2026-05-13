@@ -70,15 +70,23 @@ That is the MCP equivalent of `doctor` and still makes no model calls.
 
 Pick a backend that diagnostics reports as `available` or `auth_unknown`. The examples below use placeholders for model ids because accepted model names belong to the backend CLI or SDK.
 
-Codex profile with closed worker network egress:
+Codex profile with closed worker network egress. Since #58, "closed network
+egress" requires **both** `worker_posture: "restricted"` (so the daemon emits
+`--ignore-user-config`) and `codex_network: "isolated"` (so no
+`sandbox_workspace_write.network_access=true` override is added). Omit both
+fields (or use the default `worker_posture: "trusted"`) to get backend-native
+parity with a manual `codex exec` run — see
+[reference.md](reference.md#model-and-network-settings) for the two-axis argv
+table.
 
 ```text
 upsert_worker_profile({
   "profile": "codex-local",
   "backend": "codex",
   "model": "<codex-model-id>",
+  "worker_posture": "restricted",
   "codex_network": "isolated",
-  "description": "Local Codex worker with closed network egress"
+  "description": "Local Codex worker with closed network egress (restricted posture)"
 })
 ```
 
