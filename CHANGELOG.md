@@ -4,6 +4,16 @@ This project uses npm dist-tags as documented in `PUBLISHING.md`: prereleases pu
 
 ## Unreleased
 
+## 0.2.8 - 2026-05-15
+
+### Fixed
+
+- Fixed `agent-orchestrator watch` archive sidebar rows so stale
+  orchestrators render as `[stale]` instead of `[err]`.
+- Kept actual failed, timed out, cancelled, and orphaned worker/run statuses
+  marked as errors while rendering stale orchestrator overviews with neutral
+  status tone.
+
 ## 0.2.7 - 2026-05-13
 
 ### Fixed

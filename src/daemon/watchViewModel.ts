@@ -1150,7 +1150,8 @@ function duplicateLastAssistantIndex(turns: WatchTranscriptEvent[], summary: str
 
 function transcriptToneForStatus(status: string): WatchTranscriptTone {
   const normalized = status.toLowerCase();
-  if (['failed', 'error', 'timed_out', 'cancelled', 'orphaned', 'attention', 'stale'].includes(normalized)) return 'error';
+  if (normalized === 'stale') return 'status';
+  if (['failed', 'error', 'timed_out', 'cancelled', 'orphaned', 'attention'].includes(normalized)) return 'error';
   if (['running', 'in_progress', 'waiting_for_user', 'reasoning', 'queued'].includes(normalized)) return 'running';
   if (['completed', 'complete', 'success', 'succeeded', 'done', 'idle'].includes(normalized)) return 'success';
   return 'status';

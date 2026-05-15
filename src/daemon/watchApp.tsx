@@ -277,7 +277,7 @@ function SidebarRow({ item, selected, state }: { item: WatchSidebarItem; selecte
     const expanded = state.expanded[item.orchestrator.id] ?? true;
     return (
       <SelectedText selected={selected}>
-        {selected ? '>' : ' '} {expanded ? 'v' : '+'} {statusLabel(item.orchestrator.status)} {item.orchestrator.runningCount}/{item.orchestrator.workerCount} {plainSidebarText(item.orchestrator.label)}
+        {selected ? '>' : ' '} {expanded ? 'v' : '+'} {watchOrchestratorStatusLabel(item.orchestrator.status)} {item.orchestrator.runningCount}/{item.orchestrator.workerCount} {plainSidebarText(item.orchestrator.label)}
       </SelectedText>
     );
   }
@@ -822,11 +822,19 @@ function runRailColor(block: WatchTranscriptBlock): string {
   return colors[(block.round - 1) % colors.length]!;
 }
 
+export function watchOrchestratorStatusLabel(status: string): string {
+  if (status === 'stale') return '[stale]';
+  if (status === 'attention') return '[attn]';
+  if (status === 'archived') return '[archived]';
+  if (status === 'live') return '[live]';
+  return statusLabel(status);
+}
+
 function statusLabel(status: string): string {
   if (status === 'running' || status === 'in_progress') return '[run]';
   if (status === 'completed' || status === 'idle') return '[ok]';
   if (status === 'waiting_for_user') return '[wait]';
-  if (status === 'failed' || status === 'timed_out' || status === 'cancelled' || status === 'orphaned' || status === 'attention' || status === 'stale') return '[err]';
+  if (status === 'failed' || status === 'timed_out' || status === 'cancelled' || status === 'orphaned') return '[err]';
   return `[${status}]`;
 }
 

@@ -4,7 +4,7 @@ import React from 'react';
 import { renderToString } from 'ink';
 import { ObservabilitySnapshotSchema } from '../contract.js';
 import type { SnapshotEnvelope } from '../daemon/observabilityFormat.js';
-import { WatchApp } from '../daemon/watchApp.js';
+import { WatchApp, watchOrchestratorStatusLabel } from '../daemon/watchApp.js';
 import {
   applyWatchInput,
   applyWatchRawInput,
@@ -131,6 +131,9 @@ describe('watch view model', () => {
 
     const archiveState = clampWatchDashboardState({ ...createWatchDashboardState(), mode: 'archive' }, model);
     const archiveBlocks = selectedWatchTranscriptBlocks(model, archiveState);
+    assert.equal(watchOrchestratorStatusLabel('stale'), '[stale]');
+    assert.equal(archiveBlocks[0]?.status, 'stale');
+    assert.equal(archiveBlocks[0]?.tone, 'status');
     assert.match(archiveBlocks[1]?.title ?? '', /done after/);
   });
 
